@@ -68,15 +68,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import func, select
-from sqlalchemy.exc import NoResultFound
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from eap_api.deps import get_ag_ui_store, get_approval_store, get_database_engine, get_delta_source, get_stream_limiter, require_run_storage
 from eap_api.ag_ui.input import (
     AGUI_NS,
-    WORKFLOW_INPUT_INVALID,
     AgUiInput,
     AgUiInputError,
     check_principal_options,
@@ -96,13 +91,9 @@ from eap_api.ag_ui.resume_entries import (
     thread_interrupts,
 )
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext, ChildPrior, OpenApproval, step_interrupt_id, tool_interrupt_id
-from eap_api.agent_archive import archived_step_problems
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, require_agui_workflow
-from eap_api.deps import get_run_launcher
-from eap_api.launcher import RunLauncher
+from eap_api.deps import get_delta_source, get_stream_limiter
 from eap_api.routes.ag_ui import (
-    FINGERPRINT_CONFLICT_DETAIL,
-    UNKNOWN_RUN_DETAIL,
     AgUiRoute,
     AgUiRouteSettings,
     _acquire,
@@ -116,9 +107,16 @@ from eap_api.routes.ag_ui import (
     get_agui_settings,
     static_stream,
 )
-from eap_api.routes.workflow_runs import MAX_WORKFLOW_INPUT_BYTES, input_schema_errors, non_finite_errors
-from eap_api.routes.workflows import reference_problems
 from eap_api.schemas import ErrorDetail
+from eap_api.service_deps.agui import AgUiWorkflowServiceDep
+from eap_api.services.ag_ui import UNKNOWN_RUN_DETAIL, AgUiRunRecord
+from eap_api.services.ag_ui_workflows import (
+    WORKFLOW_NOT_FOUND,
+    AgUiWorkflowService,
+    WorkflowRef,
+    canonical_input,
+    history_of,
+)
 from eap_api.sse import (
     DeltaSource,
     StreamLimiter,
@@ -131,21 +129,10 @@ from eap_api.streams.native import ChildScope
 from eap_api.streams.resume import LastEventIdError, StreamPlan, parse_last_event_id, plan_stream
 from eap_api.streams.native import TERMINAL_EVENT_TYPES
 from eap_api.streams.workflow import Merged, WorkflowItemStream, agent_step_child, merged_events
-from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
-from eap_observability import current_trace_context, log_failure
-from eap_run_store import (
-    AgUiRunModel,
-    AgUiRunRecord,
-    AgUiScopeMismatch,
-    RunIdConflict,
-)
-from eap_api.auth import get_api_key_store
 from eap_schemas import RunEvent
-from eap_schemas.workflows import WorkflowSpec
 
 log = logging.getLogger("eap_api")
 
-WORKFLOW_NOT_FOUND = "Workflow not found"
 RUN_OPTION_UNSUPPORTED = "run_option_unsupported"
 WORKFLOW_THREAD_RUNNING = "workflow_thread_running"
 WORKFLOW_THREAD_FINISHED = "workflow_thread_finished"
@@ -180,6 +167,8 @@ router = APIRouter(
 class _WCtx(_Ctx):
     """`_Ctx` of a workflow: `agent_id` holds the workflow id; the AG-UI rows have scope workflow."""
 
+    svc: AgUiWorkflowService  # type: ignore[assignment]
+
     @property
     def workflow_id(self) -> str:
         return self.agent_id
@@ -193,19 +182,8 @@ class _WCtx(_Ctx):
         }
 
 
-def _wctx(request: Request, principal: AgUiPrincipal, workflow_id: str, launcher: RunLauncher | None = None) -> _WCtx:
-    run_store, event_log = require_run_storage(request)
-    return _WCtx(
-        engine=get_database_engine(request),
-        run_store=run_store,
-        event_log=event_log,
-        ag_ui=get_ag_ui_store(request),
-        approvals=get_approval_store(request),
-        api_keys=get_api_key_store(request),
-        principal=principal,
-        agent_id=workflow_id,
-        launcher=launcher,
-    )
+def _wctx(svc: AgUiWorkflowService, principal: AgUiPrincipal, workflow_id: str) -> _WCtx:
+    return _WCtx(svc=svc, principal=principal, agent_id=workflow_id)
 
 
 def _workflow_id_or_404(principal: AgUiPrincipal, value: str) -> str:
@@ -256,78 +234,17 @@ def check_workflow_options(mapped: AgUiInput) -> None:
 # --------------------------------------------------------------------------- reads
 
 
-def _load_workflow(c: _WCtx) -> WorkflowModel:
-    with Session(c.engine) as db:
-        workflow = db.execute(
-            select(WorkflowModel).where(WorkflowModel.id == c.workflow_id, WorkflowModel.tenant_id == c.tenant_id)
-        ).scalar_one_or_none()
-        if workflow is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=WORKFLOW_NOT_FOUND)
-        db.expunge(workflow)
-        return workflow
+def _load_workflow(c: _WCtx) -> WorkflowRef:
+    return c.svc.load_workflow(c.tenant_id, c.workflow_id)
 
 
-def _version_row(db: Session, workflow: WorkflowModel, version: int | None) -> WorkflowVersionModel:
-    query = select(WorkflowVersionModel).where(
-        WorkflowVersionModel.workflow_id == workflow.id, WorkflowVersionModel.tenant_id == workflow.tenant_id
-    )
-    if version is None:
-        latest = db.execute(
-            select(func.max(WorkflowVersionModel.version)).where(
-                WorkflowVersionModel.workflow_id == workflow.id, WorkflowVersionModel.tenant_id == workflow.tenant_id
-            )
-        ).scalar_one_or_none()
-        if latest is None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Workflow has no published version")
-        version = latest
-    row = db.execute(query.where(WorkflowVersionModel.version == version)).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
-    return row
-
-
-def _thread_rows(c: _WCtx, thread_id: str) -> list[AgUiRunModel]:
+def _thread_rows(c: _WCtx, thread_id: str) -> list[Any]:
     """The thread's AG-UI runs, in order (the first one started the run)."""
-    with Session(c.engine) as session:
-        rows = session.execute(
-            select(AgUiRunModel)
-            .where(
-                AgUiRunModel.tenant_id == c.tenant_id,
-                AgUiRunModel.scope_kind == "workflow",
-                AgUiRunModel.scope_id == c.workflow_id,
-                AgUiRunModel.external_thread_id == thread_id,
-            )
-            .order_by(AgUiRunModel.from_seq, AgUiRunModel.created_at, AgUiRunModel.external_run_id)
-        ).scalars().all()
-        for row in rows:
-            session.expunge(row)
-        return list(rows)
-
-
-def _as_user_messages(stored: Any) -> list[dict[str, Any]]:
-    return [
-        {"id": str(m["id"]), "role": "user", "content": str(m["content"])}
-        for m in (stored or ())
-        if isinstance(m, dict) and m.get("id")
-    ]
-
-
-def history_of(rows: list[AgUiRunModel]) -> list[dict[str, Any]]:
-    """The user messages the thread's first AG-UI run carried (`ag_ui_runs.input_messages` of its
-    starter row, from_seq -1), as AG-UI user messages: the prefix of every snapshot of the thread
-    and of its thread GET, so a client's merge keeps them (AGUI.16 follow-up)."""
-    starter = next((r for r in rows if r.from_seq < 0), None)
-    return [] if starter is None else _as_user_messages(starter.input_messages)
+    return c.svc.thread_rows(c.tenant_id, c.workflow_id, thread_id)
 
 
 def _thread_start(c: _WCtx, record: AgUiRunRecord) -> tuple[str, list[dict[str, Any]]]:
-    """The AG-UI runId that started the thread's run (the D13 prefix of child-run messages) and
-    the thread's input user messages (`history_of`). The starter record carries both, so a
-    stream of the thread's first run reads no rows; a later run reads the thread's rows once."""
-    if record.from_seq < 0:
-        return record.external_run_id, _as_user_messages(record.input_messages)
-    rows = _thread_rows(c, record.external_thread_id)
-    return (rows[0].external_run_id if rows else record.external_run_id), history_of(rows)
+    return c.svc.thread_start(c.tenant_id, c.workflow_id, record)
 
 
 def _run_info(run: dict[str, Any]) -> dict[str, Any]:
@@ -340,11 +257,11 @@ def _run_info(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _events(c: _WCtx, run_id: str) -> list[RunEvent]:
-    return c.event_log.list_events(c.tenant_id, uuid.UUID(run_id))
+    return c.svc.list_events(c.tenant_id, uuid.UUID(run_id))
 
 
 def _thread_interrupts(c: _WCtx, run_id: str) -> ThreadInterrupts:
-    return thread_interrupts(c.approvals.list_for_run(c.tenant_id, run_id))
+    return thread_interrupts(c.svc.approval_rows(c.tenant_id, run_id))
 
 
 # --------------------------------------------------------------------------- a stream to serve
@@ -417,7 +334,7 @@ class _Timeline:
 
 
 def _timeline(c: _WCtx, run_id: str) -> _Timeline:
-    return _Timeline(run_id, merged_events(run_id, c.event_log.list_root_events(c.tenant_id, run_id)))
+    return _Timeline(run_id, merged_events(run_id, c.svc.list_root_events(c.tenant_id, run_id)))
 
 
 def segment_end(tl: _Timeline, start: int | None, answered: frozenset[str] | set[str]) -> Merged | None:
@@ -512,14 +429,7 @@ def run_bounds(c: _WCtx, tl: _Timeline, record: AgUiRunRecord) -> tuple[int | No
     end = segment_end(tl, start, _answered(record))
     if end is None:
         return start, None
-    try:
-        recorded = c.ag_ui.set_end_order(
-            c.tenant_id, scope_kind="workflow", scope_id=record.scope_id,
-            external_thread_id=record.external_thread_id, external_run_id=record.external_run_id,
-            end_order=end.key,
-        )
-    except NoResultFound:  # an unrecorded run (the Q5 re-send) has no row
-        recorded = end.key
+    recorded = c.svc.record_end_order(c.tenant_id, record, end.key)
     return start, recorded
 
 
@@ -567,7 +477,7 @@ def _prepared(c: _WCtx, run: dict[str, Any], record: AgUiRunRecord, plan: Stream
 
 def _prepare_known(c: _WCtx, record: AgUiRunRecord, *, same_fingerprint: bool, last_event_id: str | None,
                    relaunch: bool) -> _WPrepared:
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(record.run_id))
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(record.run_id))
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
     tl = _timeline(c, record.run_id)
@@ -582,8 +492,7 @@ def _prepare_known(c: _WCtx, record: AgUiRunRecord, *, same_fingerprint: bool, l
         )
     )
     if relaunch and record.from_seq < 0:
-        _launch(c, run, created=False)
-        run = c.run_store.get_run(c.tenant_id, uuid.UUID(record.run_id)) or run
+        run = c.svc.relaunch(c.tenant_id, run, created=False)
     return _prepared(c, run, record, plan, tl)
 
 
@@ -597,94 +506,16 @@ def _fresh(c: _WCtx, run: dict[str, Any], record: AgUiRunRecord, created: bool) 
     return _prepared(c, run, record, plan)
 
 
-def _launch(c: _WCtx, run: dict[str, Any], *, created: bool) -> None:
-    """Hand the run to the worker (again: DBOS attaches a re-enqueue to the existing workflow).
-    A failed enqueue marks a run this request owns failed and answers 503; the same POST heals."""
-    assert c.launcher is not None
-    run_id = uuid.UUID(str(run["id"]))
-    with Session(c.engine) as db:
-        version_id = db.execute(
-            select(WorkflowVersionModel.id).where(
-                WorkflowVersionModel.tenant_id == c.tenant_id,
-                WorkflowVersionModel.workflow_id == str(run["workflow_id"]),
-                WorkflowVersionModel.version == run["workflow_version"],
-            )
-        ).scalar_one_or_none()
-    if version_id is None:  # the version is immutable; never expected
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
-    owns_handoff = created or c.run_store.requeue_after_enqueue_failure(c.tenant_id, run_id)
-    try:
-        c.launcher.launch_workflow(
-            run_id=run_id, tenant_id=c.tenant_id, workflow_version_id=str(version_id),
-            input_json=run["input"], traceparent=run.get("traceparent"),
-        )
-    except Exception as exc:
-        log_failure(log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
-                    run_id=str(run_id), tenant_id=c.tenant_id)
-        if owns_handoff:
-            try:
-                c.run_store.mark_enqueue_failed(c.tenant_id, run_id)
-            except Exception as mark_exc:  # noqa: BLE001 - the 503 below is the answer either way
-                log_failure(log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
-                            level=logging.ERROR, run_id=str(run_id), tenant_id=c.tenant_id)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Run recorded but could not be started; retry the same request (same runId)",
-        )
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
-def _input_errors(value: Any, spec: WorkflowSpec) -> list[dict[str, Any]]:
-    if not isinstance(value, dict):
-        return [{"loc": ["body", "forwardedProps", "pydanticos", "input"], "msg": "the workflow input must be an object",
-                 "type": WORKFLOW_INPUT_INVALID}]
-    return non_finite_errors(value) or input_schema_errors(spec.input_schema, value)
-
-
-def _start(c: _WCtx, workflow: WorkflowModel, mapped: AgUiInput, fp: str, run_id: str) -> _WPrepared:
+def _start(c: _WCtx, workflow: WorkflowRef, mapped: AgUiInput, fp: str, run_id: str) -> _WPrepared:
     """A new thread: validate the input and the version, record the run and its AG-UI row, hand off."""
     if workflow.archived:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=WORKFLOW_NOT_FOUND)
     value = workflow_input(mapped)
-    with Session(c.engine) as db:
-        version_row = _version_row(db, workflow, mapped.options.version)  # type: ignore[arg-type]
-        spec = WorkflowSpec.model_validate(version_row.spec)
-        errors = _input_errors(value, spec)
-        if errors:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=errors)
-        input_json = _canonical(value)
-        if len(input_json.encode("utf-8")) > MAX_WORKFLOW_INPUT_BYTES:
-            raise AgUiInputError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, WORKFLOW_INPUT_INVALID, ["forwardedProps", "pydanticos", "input"],
-                f"the workflow input must be at most {MAX_WORKFLOW_INPUT_BYTES // 1024} KiB as JSON",
-            )
-        archived = archived_step_problems(db, c.tenant_id, spec.steps)
-        if archived:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="; ".join(archived))
-        problems = reference_problems(db, spec, c.tenant_id)
-        if problems:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="; ".join(problems))
-        version = version_row.version
-    trace_id, traceparent = current_trace_context()
-    try:
-        _, created = c.run_store.create_workflow_run(
-            c.tenant_id, workflow.id, version, input_json, uuid.UUID(run_id), trace_id=trace_id, traceparent=traceparent
-        )
-    except RunIdConflict:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(run_id))
-    if run is None:  # pragma: no cover - deleted between insert and read
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
-    if not created and (run["kind"] != "workflow" or run["workflow_id"] != str(workflow.id) or run["input"] != input_json):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId is already in use")
-    record, rec_created = _record(c, mapped, fp, run_id, -1, input_messages=_input_messages(mapped))
-    _launch(c, run, created=created)
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(run_id)) or run
-    if created:
-        log.info("ag-ui workflow run %s recorded: tenant=%s workflow=%s", run_id, c.tenant_id, workflow.id)
+    run, record, rec_created = c.svc.start_thread_run(
+        c.tenant_id, workflow.id, version=mapped.options.version,  # type: ignore[arg-type]
+        value=value, run_id=run_id, key=c.key(mapped.thread_id, mapped.run_id), fingerprint=fp,
+        input_messages=_input_messages(mapped),
+    )
     return _fresh(c, run, record, rec_created)
 
 
@@ -705,16 +536,10 @@ def _record(
     c: _WCtx, mapped: AgUiInput, fp: str, run_id: str, from_seq: int, answered: tuple[str, ...] = (),
     from_order: int | None = None, input_messages: list[dict[str, str]] | None = None,
 ) -> tuple[AgUiRunRecord, bool]:
-    try:
-        record, created = c.ag_ui.record_ag_ui_run(
-            c.tenant_id, **c.key(mapped.thread_id, mapped.run_id), run_id=run_id, fingerprint=fp, from_seq=from_seq,
-            input_message_ids=answered, from_order=from_order, input_messages=input_messages,
-        )
-    except AgUiScopeMismatch:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId belongs to another workflow")
-    if not created and record.fingerprint != fp:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=FINGERPRINT_CONFLICT_DETAIL)
-    return record, created
+    return c.svc.record_thread_run(
+        c.tenant_id, c.key(mapped.thread_id, mapped.run_id), run_id=run_id, fingerprint=fp, from_seq=from_seq,
+        answered=answered, from_order=from_order, input_messages=input_messages,
+    )
 
 
 def _resume(c: _WCtx, run: dict[str, Any], mapped: AgUiInput, fp: str, decisions: list[ResumeDecision]) -> _WPrepared:
@@ -731,11 +556,11 @@ def _resume(c: _WCtx, run: dict[str, Any], mapped: AgUiInput, fp: str, decisions
     tl = _timeline(c, run_id)
     start = run_start(tl, answered)
     from_seq = _parent_seq_at(tl, start)
-    apply_decisions(c.event_log, c.launcher, c.tenant_id, decisions, c.principal.default_resource_id)
+    apply_decisions(c.svc, c.tenant_id, decisions, c.principal.default_resource_id)
     record, created = _record(
         c, mapped, fp, run_id, max(from_seq, 0), tuple(d.ref.interrupt_id for d in decisions), from_order=start
     )
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(run_id)) or run
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(run_id)) or run
     log.info("ag-ui workflow resume %s recorded on run %s: %d decision(s)", mapped.run_id, run_id, len(decisions))
     return _fresh(c, run, record, created)
 
@@ -746,7 +571,7 @@ def _seeded_formatter(c: _WCtx, run: dict[str, Any], thread_id: str, agui_run_id
     children = [
         ChildPrior(scope, _events(c, scope.run_id), SEED_ALL)
         for scope, _, _ in _agent_steps(events, events[-1].seq if events else -1)
-        if c.run_store.get_run(c.tenant_id, uuid.UUID(scope.run_id)) is not None
+        if c.svc.get_run(c.tenant_id, uuid.UUID(scope.run_id)) is not None
     ]
     return AgUiFormatter(
         AgUiStreamContext(
@@ -769,7 +594,7 @@ def _reinterrupt(
     formatter = _seeded_formatter(
         c, run, mapped.client_thread_id or mapped.thread_id, mapped.run_id, prefix, events, history_of(rows)
     )
-    approvals = open_approvals(c.event_log, c.tenant_id, interrupts.open_rows)
+    approvals = open_approvals(c.svc, c.tenant_id, interrupts.open_rows)
     record = AgUiRunRecord(
         tenant_id=c.tenant_id, scope_kind="workflow", scope_id=c.workflow_id, external_thread_id=mapped.thread_id,
         external_run_id=mapped.run_id, run_id=run_id, from_seq=max(events[-1].seq if events else 0, 0),
@@ -791,13 +616,13 @@ def _prepare_post(
     key = c.key(mapped.thread_id, mapped.run_id)
     workflow = _load_workflow(c)
     run_id = derive_workflow_run_id(c.tenant_id, c.workflow_id, mapped.thread_id)
-    record = c.ag_ui.get_ag_ui_run(c.tenant_id, **key)
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(run_id))
+    record = c.svc.get_ag_ui_run(c.tenant_id, **key)
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(run_id))
     if record is None and run is not None and not header and not _thread_rows(c, mapped.thread_id):
         # The run exists without any AG-UI row (a crash between the two writes): this is the
         # thread's first runId again when its input is the run's.
         try:
-            same = _canonical(workflow_input(mapped)) == run["input"]
+            same = canonical_input(workflow_input(mapped)) == run["input"]
         except (AgUiInputError, ValueError):
             same = False
         if not same:
@@ -822,7 +647,7 @@ def _prepare_post(
 
 
 def _prepare_new(
-    c: _WCtx, workflow: Any, run: dict[str, Any] | None, run_id: str, mapped: AgUiInput, fp: str,
+    c: _WCtx, workflow: WorkflowRef, run: dict[str, Any] | None, run_id: str, mapped: AgUiInput, fp: str,
     decisions: list[ResumeDecision], *, continuation: bool,
 ) -> _WPrepared:
     """A runId not recorded yet: a new thread, a resume, or the Q5 re-send (module docstring 4-6)."""
@@ -940,7 +765,7 @@ def _all_open_tail(d: _StreamDeps, p: _WPrepared, frame: str, shown: list[str]) 
     approvals = open_at(tl, end)
     if {a.interrupt().id for a in approvals} <= set(shown):
         return None
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(p.record.run_id)) or p.run
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(p.record.run_id)) or p.run
     formatter = _seeded_upto(c, tl, run, d.thread_id, p.record.external_run_id, p.prefix, end, p.history)
     return formatter.interrupt_tail(approvals, set(shown), _frame_id(frame))
 
@@ -967,8 +792,8 @@ def _frames(d: _StreamDeps, p: _WPrepared) -> AsyncIterator[str]:
         run_id=p.record.run_id,
         after=p.after,
         stop_after=p.stop_after,
-        load_ordered=lambda after: c.event_log.list_root_events(tenant, p.record.run_id, after),
-        load_run=lambda rid: c.run_store.get_run(tenant, uuid.UUID(rid)),
+        load_ordered=lambda after: c.svc.list_root_events(tenant, p.record.run_id, after),
+        load_run=lambda rid: c.svc.get_run(tenant, uuid.UUID(rid)),
         delta_source=d.delta_source,
         settings=d.settings,
         scopes=p.scopes,
@@ -1009,7 +834,7 @@ async def run_workflow(
     workflow_id: str,
     request: Request,
     principal: AgUiPrincipalDep,
-    launcher: Annotated[RunLauncher, Depends(get_run_launcher)],
+    svc: AgUiWorkflowServiceDep,
     settings: Annotated[StreamSettings, Depends(get_stream_settings)],
     limiter: Annotated[StreamLimiter, Depends(get_stream_limiter)],
     delta_source: Annotated[DeltaSource, Depends(get_delta_source)],
@@ -1023,7 +848,7 @@ async def run_workflow(
     check_principal_options(mapped.options, is_api_key=principal.is_api_key)
     check_workflow_options(mapped)
     decisions = resume_decisions(mapped.resume)
-    c = _wctx(request, principal, wid, launcher)
+    c = _wctx(svc, principal, wid)
     lease = _acquire(limiter, principal)
     try:
         prepared = await run_in_threadpool(_prepare_post, c, mapped, last_event_id, decisions)
@@ -1039,7 +864,7 @@ def _thread_json(c: _WCtx, thread_id: str) -> dict[str, Any]:
     _load_workflow(c)
     key = thread_key(thread_id)
     run_id = derive_workflow_run_id(c.tenant_id, c.workflow_id, key)
-    run = c.run_store.get_run(c.tenant_id, uuid.UUID(run_id))
+    run = c.svc.get_run(c.tenant_id, uuid.UUID(run_id))
     rows = _thread_rows(c, key) if run is not None else []
     if run is None or not rows:
         return {"threadId": thread_id, "run_id": None, "status": None, "display_status": None, "runs": [],
@@ -1049,7 +874,7 @@ def _thread_json(c: _WCtx, thread_id: str) -> dict[str, Any]:
     children = []
     for e in events:
         child = agent_step_child(e)
-        if child is not None and c.run_store.get_run(c.tenant_id, uuid.UUID(child.run_id)) is not None:
+        if child is not None and c.svc.get_run(c.tenant_id, uuid.UUID(child.run_id)) is not None:
             children.append(ChildPrior(child, _events(c, child.run_id), own_after=2**62))
     formatter = AgUiFormatter(
         AgUiStreamContext(
@@ -1072,7 +897,7 @@ def _thread_json(c: _WCtx, thread_id: str) -> dict[str, Any]:
 
 @router.get("/workflows/{workflow_id}/threads/{thread_id}")
 async def get_workflow_thread(
-    workflow_id: str, thread_id: str, request: Request, principal: AgUiPrincipalDep
+    workflow_id: str, thread_id: str, request: Request, principal: AgUiPrincipalDep, svc: AgUiWorkflowServiceDep
 ) -> JSONResponse:
     """The thread's workflow run (its status, AG-UI runs, state and agent-step messages), and
     `activeRunId`: the AG-UI runId to attach to while the run is not finished (else null). An
@@ -1080,13 +905,13 @@ async def get_workflow_thread(
     wid = _workflow_id_or_404(principal, workflow_id)
     _check_params(request)
     thread_id = _path_id(thread_id, "Thread not found")
-    c = _wctx(request, principal, wid)
+    c = _wctx(svc, principal, wid)
     return JSONResponse(content=await run_in_threadpool(_thread_json, c, thread_id))
 
 
 def _prepare_attach(c: _WCtx, thread_id: str, run_id: str, last_event_id: str | None) -> _WPrepared:
     _load_workflow(c)
-    record = c.ag_ui.get_ag_ui_run(c.tenant_id, **c.key(thread_key(thread_id), run_id))
+    record = c.svc.get_ag_ui_run(c.tenant_id, **c.key(thread_key(thread_id), run_id))
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
     return _prepare_known(c, record, same_fingerprint=True, last_event_id=last_event_id, relaunch=False)
@@ -1103,6 +928,7 @@ async def attach_workflow_run(
     run_id: str,
     request: Request,
     principal: AgUiPrincipalDep,
+    svc: AgUiWorkflowServiceDep,
     settings: Annotated[StreamSettings, Depends(get_stream_settings)],
     limiter: Annotated[StreamLimiter, Depends(get_stream_limiter)],
     delta_source: Annotated[DeltaSource, Depends(get_delta_source)],
@@ -1118,7 +944,7 @@ async def attach_workflow_run(
     header = last_event_id if last_event_id and last_event_id.strip() else (
         f"{run_id}:{after}" if after is not None else None
     )
-    c = _wctx(request, principal, wid)
+    c = _wctx(svc, principal, wid)
     lease = _acquire(limiter, principal)
     try:
         prepared = await run_in_threadpool(_prepare_attach, c, thread_id, run_id, header)

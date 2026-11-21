@@ -249,8 +249,6 @@ ignore_imports = [
     # ratchet: remove when this module moves its queries to eap_run_store or a service; never add lines
     "eap_api.mcp_control.auth -> sqlalchemy",
     "eap_api.mcp_control.routing -> sqlalchemy",
-    "eap_api.routes.ag_ui -> sqlalchemy",
-    "eap_api.routes.ag_ui_workflows -> sqlalchemy",
 ]
 
 [[tool.importlinter.contracts]]
@@ -271,9 +269,6 @@ ignore_imports = [
     "eap_api.mcp_control.routing -> eap_run_store.definition_errors",
     "eap_api.mcp_control.tools_manage -> eap_run_store.mcp_catalog",
     "eap_api.mcp_control.tools_manage -> eap_run_store.store",
-    "eap_api.routes.ag_ui -> eap_run_store",
-    "eap_api.routes.ag_ui -> eap_run_store.chat_attachments",
-    "eap_api.routes.ag_ui_workflows -> eap_run_store",
 ]
 
 [tool.pytest.ini_options]
