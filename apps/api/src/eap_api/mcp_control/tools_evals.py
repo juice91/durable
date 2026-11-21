@@ -28,7 +28,7 @@ from eap_api.routes.scorer_suggestions import SuggesterPorts
 from eap_api.routes.scorers import scorer_json
 from eap_api.services.evals import EvalService
 from eap_api.service_deps.architect import build_architect_service
-from eap_api.service_deps.runs import build_run_service  # TODO: confirm the runs group's builder name
+from eap_api.service_deps.runs import build_run_service
 from eap_api.services.scorer_suggestions import ScorerSuggestionService
 from eap_api.services.scorers import ScorerService
 from eap_observability import current_trace_context
@@ -139,7 +139,7 @@ def register_tools(tool: Any) -> None:
             kind, target = "workflow", uid(workflow_id, "workflow_id")
 
         def build(db: Any) -> Any:
-            architect = build_architect_service(ctx.engine, build_run_service(db, ctx.stores, ctx.launcher))
+            architect = build_architect_service(ctx.engine, build_run_service(db, ctx.stores[0], ctx.stores[1], ctx.launcher))
             ports = SuggesterPorts(architect, ctx.tenant_id)
             return ScorerSuggestionService(db, ctx.stores[0]), ports
 
