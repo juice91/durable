@@ -22,8 +22,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.deps import SessionDep
 from eap_api.auth import Principal, current_principal, get_api_key_store
-from eap_api.database import get_session
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route
 from eap_api.schemas import ErrorDetail
@@ -48,7 +48,6 @@ router = APIRouter(
 )
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
 ApiKeyStoreDep = Annotated[ApiKeyStore, Depends(get_api_key_store)]
 
 IdItem = Annotated[str, Field(min_length=1, max_length=API_KEY_ALLOWLIST_ID_MAX_CHARS)]

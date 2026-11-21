@@ -28,9 +28,11 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, sta
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from eap_api.deps import get_approval_store
 from eap_api.approvals import decide
 from eap_api.auth import Principal, current_principal
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.runs import StoresDep
 from eap_api.routes.workflow_runs import _parse_body
@@ -64,15 +66,6 @@ router = APIRouter(tags=["approvals"], route_class=ApprovalRoute)
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
-
-
-def get_approval_store(request: Request, stores: StoresDep) -> ApprovalStore:
-    """The ApprovalStore on the run stores' engine, made once per app."""
-    store = getattr(request.app.state, "approval_store", None)
-    if store is None:
-        run_store, _ = stores
-        store = request.app.state.approval_store = ApprovalStore(run_store.engine)
-    return store
 
 
 ApprovalStoreDep = Annotated[ApprovalStore, Depends(get_approval_store)]

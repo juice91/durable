@@ -38,13 +38,15 @@ import uuid
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from eap_observability import current_trace_context
 
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_memory_store
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.agent_archive import refuse_if_archived
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
@@ -107,13 +109,6 @@ def default_resource_id(user_id: str) -> str | None:
         return validate_resource_id(user_id)
     except ValueError:
         return None
-
-
-def get_memory_store(request: Request) -> MemoryStore:
-    store = getattr(request.app.state, "memory_store", None)
-    if store is None:  # built lazily on the API's engine (create_app does not wire it)
-        store = request.app.state.memory_store = MemoryStore(request.app.state.database_engine)
-    return store
 
 
 MemoryDep = Annotated[MemoryStore, Depends(get_memory_store)]

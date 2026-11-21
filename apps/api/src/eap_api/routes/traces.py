@@ -25,13 +25,13 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep, get_trace_feedback_store
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
 from eap_api.routes.runs import SpanStoreDep, StoresDep, _run_json, _utc
 from eap_api.models import AgentVersionModel
 from eap_api.schemas import ErrorDetail
@@ -53,7 +53,6 @@ router = APIRouter(
     tags=["traces"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}}, route_class=GuardedJsonRoute
 )
 
-SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
@@ -204,15 +203,7 @@ class FeedbackCreate(BaseModel):
     span_id: str | None = Field(default=None, min_length=1, max_length=FEEDBACK_SPAN_ID_MAX_CHARS)
 
 
-def _feedback_store(request: Request, stores: StoresDep) -> TraceFeedbackStore:
-    store = getattr(request.app.state, "trace_feedback_store", None)
-    if store is None:
-        run_store, _ = stores
-        store = request.app.state.trace_feedback_store = TraceFeedbackStore(run_store.engine)
-    return store
-
-
-FeedbackStoreDep = Annotated[TraceFeedbackStore, Depends(_feedback_store)]
+FeedbackStoreDep = Annotated[TraceFeedbackStore, Depends(get_trace_feedback_store)]
 
 
 @router.post("/traces/{trace_id}/feedback", status_code=status.HTTP_201_CREATED)

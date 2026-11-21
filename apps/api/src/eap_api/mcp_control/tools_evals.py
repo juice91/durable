@@ -42,7 +42,7 @@ async def _suite_target(ctx: Any, suite_id: str) -> tuple[str | None, str | None
     from eap_api.routes.evals import get_eval_store
     from eap_run_store.evals import EvalSuiteNotFound
 
-    store = get_eval_store(ctx.request, ctx.stores)
+    store = get_eval_store(ctx.request)
     try:
         suite = await run_in_threadpool(store.get_suite, ctx.tenant_id, uid(suite_id, "suite_id"))
     except EvalSuiteNotFound:
@@ -64,7 +64,7 @@ def register_tools(tool: Any) -> None:
         from eap_api.routes.scorers import get_scorer_store, list_scorers
 
         ctx = current_ctx()
-        out = await call(ctx, list_scorers, principal=ctx.actor, store=get_scorer_store(ctx.request, ctx.stores))
+        out = await call(ctx, list_scorers, principal=ctx.actor, store=get_scorer_store(ctx.request))
         rows = [{**s, "agent_ids": [a for a in s["agent_ids"] if ctx.agent_allowed(a)]} for s in out["items"]]
         return page(rows, limit, offset)
 
@@ -79,7 +79,7 @@ def register_tools(tool: Any) -> None:
         require_unrestricted(ctx, "create scorers")
         guard_json(evaluator, "evaluator", max_bytes=16 * 1024)
         body = _model(ScorerCreate, name=name, description=description, evaluator=evaluator)
-        return await call(ctx, create_scorer, body=body, principal=ctx.actor, store=get_scorer_store(ctx.request, ctx.stores))
+        return await call(ctx, create_scorer, body=body, principal=ctx.actor, store=get_scorer_store(ctx.request))
 
     @tool("scorer.attach", manage=True)
     async def scorer_attach(agent_id: str, scorer_id: str, sampling_rate: float = 1.0) -> dict[str, Any]:
@@ -91,7 +91,7 @@ def register_tools(tool: Any) -> None:
         require_agent(ctx, agent_id)
         body = _model(Attachment, sampling_rate=sampling_rate)
         return await call(ctx, attach_scorer, agent_id=uid(agent_id, "agent_id"), scorer_id=uid(scorer_id, "scorer_id"),
-                          body=body, principal=ctx.actor, db=DB, store=get_scorer_store(ctx.request, ctx.stores))
+                          body=body, principal=ctx.actor, db=DB, store=get_scorer_store(ctx.request))
 
     @tool("scorer.suggest", manage=True)
     async def scorer_suggest(agent_id: str | None = None, workflow_id: str | None = None, max: int = 8,
@@ -125,7 +125,7 @@ def register_tools(tool: Any) -> None:
 
         ctx = current_ctx()
         _one_target(agent_id, workflow_id)
-        store = get_eval_store(ctx.request, ctx.stores)
+        store = get_eval_store(ctx.request)
         if agent_id is not None:
             require_agent(ctx, agent_id)
             out = await call(ctx, list_suites, agent_id=uid(agent_id, "agent_id"), principal=ctx.actor, db=DB,
@@ -151,7 +151,7 @@ def register_tools(tool: Any) -> None:
         guard_json(evaluators or [], "evaluators", max_bytes=64 * 1024)
         body = _model(EvalSuiteCreate, name=name, description=description, evaluators=evaluators or [],
                       suite_id=uid(suite_id, "suite_id") if suite_id else None)
-        store = get_eval_store(ctx.request, ctx.stores)
+        store = get_eval_store(ctx.request)
         if agent_id is not None:
             require_agent(ctx, agent_id)
             return await call(ctx, create_suite, agent_id=uid(agent_id, "agent_id"), body=body, principal=ctx.actor, db=DB, store=store)
@@ -175,7 +175,7 @@ def register_tools(tool: Any) -> None:
         body = _model(EvalCaseCreate, name=name, input=input, expected_output=expected_output,
                       metadata=metadata or {}, evaluators=evaluators or [])
         return await call(ctx, add_case, suite_id=uid(suite_id, "suite_id"), body=body, principal=ctx.actor, db=DB,
-                          store=get_eval_store(ctx.request, ctx.stores))
+                          store=get_eval_store(ctx.request))
 
     # ----------------------------------------------------------------------------- eval runs
 
@@ -193,7 +193,7 @@ def register_tools(tool: Any) -> None:
         body = _model(EvalRunCreate, run_id=uid(run_id, "run_id") if run_id else uuid.uuid4(), suite_id=uid(suite_id, "suite_id"),
                       version=version, max_concurrency=max_concurrency)
         common = {"body": body, "principal": ctx.actor, "db": DB, "stores": ctx.stores,
-                  "store": get_eval_store(ctx.request, ctx.stores), "launcher": ctx.launcher}
+                  "store": get_eval_store(ctx.request), "launcher": ctx.launcher}
         if agent_id is not None:
             return await call(ctx, start_eval_run, agent_id=uid(agent_id, "agent_id"), **common)
         return await call(ctx, start_workflow_eval_run, workflow_id=uid(workflow_id, "workflow_id"), **common)
@@ -214,7 +214,7 @@ def register_tools(tool: Any) -> None:
         agent_id, workflow_id = run.get("agent_id"), run.get("workflow_id")
         if (agent_id and not ctx.agent_allowed(str(agent_id))) or (workflow_id and not ctx.workflow_allowed(str(workflow_id))):
             raise not_found("Run")
-        store = get_eval_store(ctx.request, ctx.stores)
+        store = get_eval_store(ctx.request)
         rid = uid(run_id, "run_id")
         limit = max(0, min(int(results_limit), MAX_RESULTS_PAGE))
         if agent_id:

@@ -14,7 +14,6 @@ from __future__ import annotations
 import functools
 import json
 import logging
-import os
 from contextvars import ContextVar
 from typing import Any, Callable
 
@@ -28,7 +27,7 @@ from starlette.routing import Route
 from eap_api.mcp_control.audit import audit_call
 from eap_api.mcp_control.auth import PRINCIPAL_SCOPE_KEY, McpAuthError, actor_id, authenticate, has_manage
 from eap_api.mcp_control.routing import Ctx, McpToolError
-from eap_api.sse import StreamLimiter
+from eap_api.deps import mcp_limiter_of
 
 log = logging.getLogger("eap_api.mcp_control")
 
@@ -47,16 +46,6 @@ _ctx: ContextVar[Ctx] = ContextVar("eap_mcp_ctx")
 def current_ctx() -> Ctx:
     """The calling tenant's context, inside a tool or resource body."""
     return _ctx.get()
-
-
-def _limiter(app: Any) -> StreamLimiter:
-    limiter = getattr(app.state, "mcp_limiter", None)
-    if limiter is None:
-        limiter = app.state.mcp_limiter = StreamLimiter(
-            max_global=int(os.environ.get("EAP_MCP_MAX_CONCURRENT_GLOBAL", "200")),
-            max_per_principal=int(os.environ.get("EAP_MCP_MAX_CONCURRENT_PER_KEY", "10")),
-        )
-    return limiter
 
 
 def _bound(data: Any) -> Any:
@@ -86,7 +75,7 @@ class _Guard:
         if self.manage and not has_manage(principal):
             audit_call(tool=self.name, tenant_id=ctx.tenant_id, principal_id=who, outcome="denied", code="scope_required")
             raise McpToolError("scope_required", f"{self.name} needs an API key with the manage scope")
-        lease = _limiter(app).acquire(f"{ctx.tenant_id}:{who}")
+        lease = mcp_limiter_of(app).acquire(f"{ctx.tenant_id}:{who}")
         if lease is None:
             audit_call(tool=self.name, tenant_id=ctx.tenant_id, principal_id=who, outcome="rate_limited", code="rate_limited")
             raise McpToolError("rate_limited", "too many concurrent calls for this key; retry shortly")
@@ -203,10 +192,10 @@ def build_server() -> FastMCP:
     return mcp
 
 
-def mount_mcp_control(app: Any) -> None:
+def mount_mcp_control(app: Any) -> Any:
     """Serve the control endpoint at POST /api/v1/mcp (and the transport's GET/DELETE) on `app`."""
     mcp = build_server()
     inner = mcp.http_app(path=MOUNT_PATH, stateless_http=True)
-    app.state.mcp_control_app = inner
     handler = McpControlASGI(app, inner)
     app.router.routes.append(Route(MOUNT_PATH, handler))
+    return inner

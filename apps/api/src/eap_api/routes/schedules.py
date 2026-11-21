@@ -14,15 +14,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep, get_schedule_store
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.database import get_session
 from eap_api.request_guard import GuardedJsonRoute
-from eap_api.routes.runs import StoresDep
 from eap_api.schedules import check_cron, get_zone, next_fire, validate_schedule_input
 from eap_api.schemas import ErrorDetail
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
@@ -36,15 +35,6 @@ router = APIRouter(
     responses={404: {"model": ErrorDetail}, 409: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
-
-
-def get_schedule_store(request: Request, stores: StoresDep) -> ScheduleStore:
-    store = getattr(request.app.state, "schedule_store", None)
-    if store is None:
-        run_store, _ = stores
-        store = request.app.state.schedule_store = ScheduleStore(run_store.engine)
-    return store
 
 
 StoreDep = Annotated[ScheduleStore, Depends(get_schedule_store)]

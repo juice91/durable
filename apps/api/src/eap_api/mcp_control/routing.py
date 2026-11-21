@@ -24,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import AgUiPrincipal, Principal
 from eap_api.concurrency import ConcurrencyError, Precondition
-from eap_api.launcher import get_run_launcher
+from eap_api.deps import database_engine_of, get_run_launcher, run_launcher_of, run_stores_of
 from eap_run_store.definition_errors import DefinitionError
 
 # One word per HTTP status when a route gives no `code` of its own.
@@ -126,22 +126,22 @@ class Ctx:
 
     @property
     def request(self) -> Any:
-        """Stands in for the `Request` of routes that only read `request.app.state`."""
+        """Stands in for the `Request` of routes that only read the app's state."""
         return SimpleNamespace(app=self.app)
 
     @property
     def stores(self) -> Any:
-        return self.app.state.run_stores
+        return run_stores_of(self.app)
 
     @property
     def launcher(self) -> Any:
         """The launcher FastAPI would inject (honours a dependency override, as the API's tests install)."""
         override = self.app.dependency_overrides.get(get_run_launcher)
-        return override() if override is not None else self.app.state.run_launcher
+        return override() if override is not None else run_launcher_of(self.app)
 
     @property
     def engine(self) -> Any:
-        return self.app.state.database_engine
+        return database_engine_of(self.app)
 
     def agent_allowed(self, agent_id: str) -> bool:
         return self.principal.allows_agent(agent_id)

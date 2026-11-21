@@ -27,8 +27,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 
+from eap_api.deps import get_otlp_limiter
 from eap_api.auth import AgUiPrincipal, otlp_principal
-from eap_api.otlp_limits import TokenBucketLimiter, rate_limit_from_env
 from eap_api.request_guard import read_capped_body, too_large_detail
 from eap_api.routes.runs import SpanStoreDep
 from eap_api.schemas import ErrorDetail
@@ -60,13 +60,6 @@ router = APIRouter(
 PrincipalDep = Annotated[AgUiPrincipal, Depends(otlp_principal)]
 
 
-def _limiter(request: Request) -> TokenBucketLimiter:
-    limiter = getattr(request.app.state, "otlp_limiter", None)
-    if limiter is None:
-        limiter = request.app.state.otlp_limiter = TokenBucketLimiter(rate_limit_from_env())
-    return limiter
-
-
 def _gunzip(body: bytes) -> bytes | None:
     """The decompressed body, or None past MAX_OTLP_BODY_BYTES (a compression bomb)."""
     try:
@@ -92,7 +85,7 @@ async def ingest_traces(
 ) -> Response:
     """Store the spans of an OTLP export request for the key's tenant and answer the OTLP response."""
     caller = principal.key_id or f"dev:{principal.tenant_id}"
-    retry_after = _limiter(request).acquire(caller)
+    retry_after = get_otlp_limiter(request).acquire(caller)
     if retry_after is not None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="OTLP rate limit exceeded; retry later",

@@ -56,8 +56,8 @@ from sqlalchemy.orm import Session
 from eap_api.agent_archive import archived_step_problems
 from eap_api.approvals import DecisionResult, decide
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import SessionDep, get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.routes.runs import StoresDep
 from eap_api.request_guard import guarded_json_route
 from eap_api.routes.workflows import reference_problems
@@ -89,7 +89,6 @@ WorkflowRunRoute = guarded_json_route(max_body_bytes=MAX_RUN_BODY_BYTES, max_dep
 
 router = APIRouter(prefix="/workflows", tags=["workflow runs"], route_class=WorkflowRunRoute)
 
-SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
 

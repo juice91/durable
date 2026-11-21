@@ -62,7 +62,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import aclosing
 import dataclasses
 from dataclasses import dataclass, field
@@ -77,6 +77,7 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_observability import log_failure
 
+from eap_api.deps import get_ag_ui_store, get_approval_store, get_chat_attachment_store, get_database_engine, get_delta_source, get_stream_limiter, require_run_storage
 from eap_api.ag_ui.frames import (
     KEEP_ALIVE,
     custom_frame,
@@ -128,14 +129,14 @@ from eap_api import model_discovery
 from eap_api.agent_archive import AGENT_ARCHIVED
 from eap_api.attachments_shared import (
     attachment_response,
-    attachment_store,
     created_by_for,
     delete_unsent_attachment,
     read_upload,
     store_upload,
 )
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, get_api_key_store, require_agui_agent
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, unstorable_params, unstorable_strings
 from eap_api.routes.conversations import new_turn_options, record_and_launch_turn
@@ -148,8 +149,6 @@ from eap_api.sse import (
     StreamLimiter,
     StreamSettings,
     TERMINAL_STATUSES,
-    get_delta_source,
-    get_stream_limiter,
     get_stream_settings,
     release_stream_slot,
 )
@@ -222,14 +221,6 @@ def get_agui_settings() -> AgUiRouteSettings:
     return AgUiRouteSettings(previous_turn_wait_s=wait if wait >= 0 else DEFAULT_PREVIOUS_TURN_WAIT_S)
 
 
-def _app_store(request: Request, name: str, factory: Callable[[Any], Any]) -> Any:
-    store = getattr(request.app.state, name, None)
-    if store is None:
-        store = factory(request.app.state.database_engine)
-        setattr(request.app.state, name, store)
-    return store
-
-
 @dataclass
 class _Ctx:
     """What one request needs, off the event loop."""
@@ -258,13 +249,13 @@ class _Ctx:
 
 
 def _ctx(request: Request, principal: AgUiPrincipal, agent_id: str, launcher: RunLauncher | None = None) -> _Ctx:
-    run_store, event_log = request.app.state.run_stores
+    run_store, event_log = require_run_storage(request)
     return _Ctx(
-        engine=request.app.state.database_engine,
+        engine=get_database_engine(request),
         run_store=run_store,
         event_log=event_log,
-        ag_ui=_app_store(request, "ag_ui_store", AgUiStore),
-        approvals=_app_store(request, "approval_store", ApprovalStore),
+        ag_ui=get_ag_ui_store(request),
+        approvals=get_approval_store(request),
         api_keys=get_api_key_store(request),
         principal=principal,
         agent_id=agent_id,
@@ -1325,7 +1316,7 @@ async def upload_attachment(request: Request, principal: AgUiPrincipalDep, file:
 async def get_attachment(attachment_id: str, request: Request, principal: AgUiPrincipalDep) -> Response:
     """The bytes. A key sees what it uploaded and what is linked to a message of a conversation of an
     agent it may use; anything else (and another tenant's) is 404. The dev bearer sees the tenant's."""
-    store = attachment_store(request)
+    store = get_chat_attachment_store(request)
     if principal.is_api_key:
         agents = None if principal.is_unrestricted else tuple(principal.agent_ids or ())
         meta = await run_in_threadpool(

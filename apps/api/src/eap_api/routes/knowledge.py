@@ -56,8 +56,10 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from eap_api.deps import get_knowledge_store
 from eap_api.auth import Principal, current_principal
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.request_guard import GuardedJsonRoute, guarded_json_route, too_large_detail
 from eap_api.routes.runs import StoresDep
 from eap_api.schemas import (
@@ -300,13 +302,6 @@ _upload = APIRouter(
 )
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-def get_knowledge_store(request: Request) -> KnowledgeStore:
-    store = getattr(request.app.state, "knowledge_store", None)
-    if store is None:  # an app built without create_app's wiring (tests)
-        store = request.app.state.knowledge_store = KnowledgeStore(request.app.state.database_engine)
-    return store
 
 
 KnowledgeDep = Annotated[KnowledgeStore, Depends(get_knowledge_store)]

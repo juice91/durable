@@ -3,9 +3,10 @@
 import os
 from typing import Generator
 
-from fastapi import Request
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+
+from eap_api.deps import get_session  # noqa: F401  (re-exported; the provider lives in eap_api.deps)
 
 
 def database_url_from_env() -> str:
@@ -37,12 +38,3 @@ def get_db(engine: create_engine) -> Generator[Session, None, None]:
     finally:
         session.close()
 
-
-def get_session(request: Request) -> Generator[Session, None, None]:
-    """Create a new database session using the engine from app state."""
-    engine = request.app.state.database_engine
-    session = Session(engine)
-    try:
-        yield session
-    finally:
-        session.close()

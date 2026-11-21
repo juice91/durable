@@ -35,9 +35,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep, get_database_engine
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.routes.architect import _run_drafter, _seed_one, _spec_model, seed_model
@@ -65,7 +66,6 @@ router = APIRouter(
     route_class=GuardedJsonRoute,
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
 
 AGENT_NOT_FOUND = "Agent not found"
 WORKFLOW_NOT_FOUND = "Workflow not found"
@@ -206,7 +206,7 @@ def _suggest(
     if cached is not None:
         return JSONResponse(content=cached)
 
-    engine: Engine = request.app.state.database_engine
+    engine: Engine = get_database_engine(request)
     suggester_id, judge = _suggester(engine, principal)
     runs: list[dict[str, Any]] = []
     if body.include_runs:

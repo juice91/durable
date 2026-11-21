@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from eap_api.deps import get_database_engine
 from eap_api.auth import Principal, current_principal
 from eap_api.schemas import ErrorDetail
 from eap_run_store.mcp_catalog import MAX_SEARCH_LIMIT, CatalogStore
@@ -66,7 +67,7 @@ async def search_catalog(
 ) -> JSONResponse:
     """`{items: [entry], next_after}`: pass `next_after` as `after` for the next page (null on the last)."""
     del principal  # any authenticated tenant reads the same mirror
-    store = CatalogStore(request.app.state.database_engine)
+    store = CatalogStore(get_database_engine(request))
     entries = await run_in_threadpool(store.search, q, limit, after, source=source)
     next_after = entries[-1].name if len(entries) == limit else None
     return JSONResponse(content={"items": [_entry_json(e) for e in entries], "next_after": next_after})
@@ -75,7 +76,7 @@ async def search_catalog(
 @router.get("/mcp-catalog/{name:path}")
 async def get_catalog_entry(name: str, request: Request, principal: PrincipalDep) -> JSONResponse:
     del principal
-    entry = await run_in_threadpool(CatalogStore(request.app.state.database_engine).get, name)
+    entry = await run_in_threadpool(CatalogStore(get_database_engine(request)).get, name)
     if entry is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="catalog entry not found")
     return JSONResponse(content=_entry_json(entry))

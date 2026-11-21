@@ -17,7 +17,7 @@ blob, then the row; the retention pass deletes the row first (conditional on `me
 then the blob. A crash can leave a row without a blob (410) or a blob without a row, never a message
 pointing at nothing.
 
-The bytes live in the BlobStore (`app.state.blob_store`, built from EAP_BLOB_* at startup), never in
+The bytes live in the BlobStore (the app's `blob_store`, built from EAP_BLOB_* at startup), never in
 Postgres: an upload is validated (size, type, sniff) and then streamed into the store, the row records
 its `storage_key`; a download streams out of the store.
 - PUT    /conversations/{id}/messages/{message_id}/feedback   {rating: up|down, comment?}: set (replaces).
@@ -41,9 +41,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.deps import get_chat_attachment_store, get_database_engine, get_message_feedback_store, require_run_storage
 from eap_api.attachments_shared import (
     attachment_response,
-    attachment_store,
     created_by_for,
     delete_unsent_attachment,
     read_upload,
@@ -54,7 +54,6 @@ from eap_api.schemas import ErrorDetail
 from eap_run_store import AgUiRunModel
 from eap_run_store.chat_attachments import (
     FEEDBACK_COMMENT_MAX_CHARS,
-    MessageFeedbackStore,
     max_attachment_bytes,
 )
 
@@ -65,13 +64,6 @@ router = APIRouter(
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 _MESSAGE_ID = re.compile(r"^(?P<prefix>.+)-m(?P<n>\d+)$")
-
-
-def feedback_store(request: Request) -> MessageFeedbackStore:
-    store = getattr(request.app.state, "message_feedback_store", None)
-    if store is None:
-        store = request.app.state.message_feedback_store = MessageFeedbackStore(request.app.state.database_engine)
-    return store
 
 
 @router.post(
@@ -86,7 +78,7 @@ async def upload_attachment(request: Request, principal: PrincipalDep, file: Upl
 
 @router.get("/attachments/{attachment_id}", responses={410: {"description": "the blob is gone"}})
 async def get_attachment(attachment_id: str, request: Request, principal: PrincipalDep) -> Response:
-    meta = await run_in_threadpool(attachment_store(request).get, principal.tenant_id, attachment_id)
+    meta = await run_in_threadpool(get_chat_attachment_store(request).get, principal.tenant_id, attachment_id)
     if meta is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
     return await attachment_response(request, meta)
@@ -115,7 +107,7 @@ class FeedbackBody(BaseModel):
 
 def _turn_for_message(request: Request, tenant_id: str, conversation_id: str, message_id: str) -> str:
     """The native run id of the turn whose assistant message `message_id` is (404 otherwise)."""
-    run_store, _ = request.app.state.run_stores
+    run_store, _ = require_run_storage(request)
     if run_store.get_conversation(tenant_id, conversation_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     found = _MESSAGE_ID.match(message_id)
@@ -126,7 +118,7 @@ def _turn_for_message(request: Request, tenant_id: str, conversation_id: str, me
     ids = [str(t["id"]) for t in turns]
     if prefix in ids:
         return prefix
-    with Session(request.app.state.database_engine) as session:
+    with Session(get_database_engine(request)) as session:
         row = session.execute(
             select(AgUiRunModel.run_id).where(
                 AgUiRunModel.tenant_id == tenant_id,
@@ -146,7 +138,7 @@ async def put_feedback(
     def run() -> dict[str, Any]:
         run_id = _turn_for_message(request, principal.tenant_id, conversation_id, message_id)
         comment = (body.comment or "").strip() or None
-        record = feedback_store(request).set(
+        record = get_message_feedback_store(request).set(
             principal.tenant_id, run_id, message_id, rating=body.rating, comment=comment,
             created_by=principal.user_id,
         )
@@ -162,7 +154,7 @@ async def delete_feedback(
     def run() -> None:
         _turn_for_message(request, principal.tenant_id, conversation_id, message_id)
         # Idempotent: deleting feedback that does not exist writes nothing.
-        feedback_store(request).delete(principal.tenant_id, message_id, created_by=principal.user_id)
+        get_message_feedback_store(request).delete(principal.tenant_id, message_id, created_by=principal.user_id)
 
     await run_in_threadpool(run)
     return Response(status_code=204)
@@ -171,9 +163,9 @@ async def delete_feedback(
 def conversation_feedback(request: Request, tenant_id: str, user_id: str, conversation_id: str) -> dict[str, Any]:
     """{message_id: {rating, comment, updated_at}} of one user on a conversation (shared with the AG-UI
     thread view)."""
-    run_store, _ = request.app.state.run_stores
+    run_store, _ = require_run_storage(request)
     ids = [str(t["id"]) for t in run_store.list_turns(tenant_id, conversation_id)]
-    rows = feedback_store(request).for_runs(tenant_id, ids, created_by=user_id)
+    rows = get_message_feedback_store(request).for_runs(tenant_id, ids, created_by=user_id)
     return {
         r.message_id: {"rating": r.rating, "comment": r.comment, "updated_at": r.updated_at.isoformat()}
         for r in rows
@@ -183,7 +175,7 @@ def conversation_feedback(request: Request, tenant_id: str, user_id: str, conver
 @router.get("/conversations/{conversation_id}/feedback")
 async def list_feedback(conversation_id: str, request: Request, principal: PrincipalDep) -> JSONResponse:
     def run() -> dict[str, Any]:
-        run_store, _ = request.app.state.run_stores
+        run_store, _ = require_run_storage(request)
         if run_store.get_conversation(principal.tenant_id, conversation_id) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Conversation not found")
         viewer = feedback_viewer(principal)

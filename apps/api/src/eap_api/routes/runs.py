@@ -12,16 +12,17 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from eap_observability import current_trace_context, log_failure
 
+from eap_api.deps import SessionDep, StoresDep, get_delta_source, get_span_store, get_stream_limiter, require_run_storage  # noqa: F401  (require_run_storage: re-exported)
 from eap_api.auth import Principal, current_principal
 from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY
-from eap_api.database import get_session
-from eap_api.launcher import RunLauncher, get_run_launcher
+from eap_api.deps import get_run_launcher
+from eap_api.launcher import RunLauncher
 from eap_api.agent_archive import refuse_if_archived
 from eap_api.models import AgentModel
 from eap_api.request_guard import GuardedJsonRoute
@@ -38,15 +39,12 @@ from eap_api.sse import (
     StreamLimiter,
     StreamSettings,
     event_json,
-    get_delta_source,
-    get_stream_limiter,
     get_stream_settings,
     release_stream_slot,
     run_event_stream,
 )
 from eap_run_store import (
     ENQUEUE_FAILED_ERROR,
-    EventLog,
     InvalidRunCursor,
     MetricsQueryTimeout,
     RunCursor,
@@ -59,15 +57,7 @@ from eap_run_store.store import run_tags
 
 log = logging.getLogger("eap_api")
 
-SessionDep = Annotated[Session, Depends(get_session)]
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-def require_run_storage(request: Request) -> tuple[RunStore, EventLog]:
-    return request.app.state.run_stores
-
-
-StoresDep = Annotated[tuple[RunStore, EventLog], Depends(require_run_storage)]
 
 router = APIRouter(
     tags=["runs"], responses={404: {"model": ErrorDetail}, 503: {"model": ErrorDetail}}, route_class=GuardedJsonRoute
@@ -488,15 +478,6 @@ def list_runs(
 HISTOGRAM_DEFAULT_RANGE = timedelta(days=7)
 HISTOGRAM_HOURLY_UNDER = timedelta(hours=72)
 HISTOGRAM_MAX_RANGE = timedelta(days=366)
-
-
-def get_span_store(request: Request, stores: StoresDep) -> SpanStore:
-    """The tenant-agnostic span store (every call takes the tenant), one per app."""
-    store = getattr(request.app.state, "span_store", None)
-    if store is None:
-        run_store, _ = stores
-        store = request.app.state.span_store = SpanStore(run_store.engine)
-    return store
 
 
 SpanStoreDep = Annotated[SpanStore, Depends(get_span_store)]

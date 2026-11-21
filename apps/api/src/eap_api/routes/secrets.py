@@ -30,8 +30,8 @@ from eap_schemas.secrets import SECRET_VALUE_MAX_CHARS, is_secret_name
 from eap_secrets import SecretsError, load_keyring
 
 from eap_mcp_runtime import McpRuntime
+from eap_api.deps import SessionDep, get_database_engine
 from eap_api.auth import Principal, current_principal
-from eap_api.database import get_session
 from eap_api.mcp_servers import managed
 from eap_api.mcp_servers.managed import get_mcp_runtime
 from eap_api.mcp_servers.models import McpRuntimeModel, McpServerModel
@@ -52,7 +52,6 @@ router = APIRouter(
 )
 
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-SessionDep = Annotated[Session, Depends(get_session)]
 RuntimeDep = Annotated[McpRuntime, Depends(get_mcp_runtime)]
 NameParam = Annotated[str, Path(max_length=200)]
 
@@ -69,7 +68,7 @@ def get_secret_store(request: Request) -> SecretStore:
         ring = load_keyring()
     except SecretsError as exc:  # messages carry no key material
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from None
-    return SecretStore(request.app.state.database_engine, ring)
+    return SecretStore(get_database_engine(request), ring)
 
 
 def _name_invalid() -> JSONResponse:
@@ -117,7 +116,7 @@ def _restart_users(db: Session, tenant_id: str, name: str, runtime: McpRuntime) 
 
 @router.get("/secrets")
 async def list_secrets(principal: PrincipalDep, request: Request, db: SessionDep) -> JSONResponse:
-    store = SecretStore(request.app.state.database_engine, None)  # names never decrypt
+    store = SecretStore(get_database_engine(request), None)  # names never decrypt
     rows = await run_in_threadpool(store.names, principal.tenant_id)
     used = await run_in_threadpool(managed.servers_using, db, principal.tenant_id)
     return JSONResponse(content=[
@@ -135,7 +134,7 @@ async def delete_secret(name: NameParam, principal: PrincipalDep, request: Reque
             status_code=status.HTTP_409_CONFLICT,
             content={"detail": "secret is in use by a managed MCP server", "code": SECRET_IN_USE, "servers": users},
         )
-    store = SecretStore(request.app.state.database_engine, None)
+    store = SecretStore(get_database_engine(request), None)
     removed = await run_in_threadpool(store.delete, principal.tenant_id, name)
     if not removed:
         return JSONResponse(

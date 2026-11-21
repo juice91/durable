@@ -125,7 +125,7 @@ def register_tools(tool: Any) -> None:
         from eap_api.routes.schedules import get_schedule_store, list_all_schedules, list_workflow_schedules
 
         ctx = current_ctx()
-        store = get_schedule_store(ctx.request, ctx.stores)
+        store = get_schedule_store(ctx.request)
         limit = max(1, min(limit, 100))
         if workflow_id is not None:
             require_workflow(ctx, workflow_id)
@@ -225,7 +225,7 @@ def register_tools(tool: Any) -> None:
         if agent_id is not None:
             require_agent(ctx, agent_id)
         out = await call(
-            ctx, list_approvals, principal=ctx.actor, store=get_approval_store(ctx.request, ctx.stores), stores=ctx.stores,
+            ctx, list_approvals, principal=ctx.actor, store=get_approval_store(ctx.request), stores=ctx.stores,
             approval_status=status, kind=kind, agent_id=uid(agent_id, "agent_id") if agent_id else None,
             cursor=cursor, limit=max(1, min(limit, 100)),
         )

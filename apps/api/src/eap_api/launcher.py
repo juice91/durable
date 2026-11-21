@@ -22,7 +22,6 @@ from eap_observability import dbos_trace_attributes
 # eap_run_store.approvals so the API's wake-up and the worker's wait (AC.6) share one builder.
 from eap_run_store.approvals import tool_approval_topic
 from eap_schemas.knowledge import kb_ingest_partition_key
-from fastapi import Request
 
 QUEUE_NAME = "eap-agent-runs"
 WORKFLOW_NAME = "eap.agent_run"
@@ -384,5 +383,11 @@ class DBOSRunLauncher:
             client.destroy()
 
 
-def get_run_launcher(request: Request) -> RunLauncher:
-    return request.app.state.run_launcher
+def __getattr__(name: str):
+    # `get_run_launcher` lives in eap_api.deps (the one module that reads app.state); importing it here
+    # eagerly would be a cycle, since deps imports RunLauncher from this module.
+    if name == "get_run_launcher":
+        from eap_api.deps import get_run_launcher
+
+        return get_run_launcher
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
