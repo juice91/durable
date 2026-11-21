@@ -1,6 +1,6 @@
 """Agent memory: working memory, observations and forget-resource (RAG and memory milestone, RM.9).
 
-Working memory (one note per agent and scope key; see eap_run_store.memory):
+Working memory (one note per agent and scope key; see the memory store):
 
 - GET    /conversations/{cid}/memory/working[?missing=null]     the conversation-scoped note of the
 - PUT    /conversations/{cid}/memory/working                    conversation's agent

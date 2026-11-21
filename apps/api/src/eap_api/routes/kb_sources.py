@@ -6,7 +6,7 @@
 - GET  /knowledge-bases/{kb}/sources/{id}              the source (config is non-secret; the checkpoint as a summary)
 - PATCH /knowledge-bases/{kb}/sources/{id}             any of name, config, enabled
 - POST /knowledge-bases/{kb}/sources/{id}/sync         202 {run_id, status: "queued"} through the shared launch
-                                                       (eap_run_store.kb_source_launch); body {mode, part_numbers?, restart?, run_id?}
+                                                       (the shared sync launch); body {mode, part_numbers?, restart?, run_id?}
 - GET  /knowledge-bases/{kb}/sources/{id}/syncs        {items: [sync]}, newest first (`limit` 1-100, default 20)
 - GET  /knowledge-bases/{kb}/sources/{id}/syncs/{run}  the sync plus `report` (the run's bounded report once it ends)
                                                        and `run_status`
