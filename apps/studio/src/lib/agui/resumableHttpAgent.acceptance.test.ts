@@ -395,16 +395,16 @@ describe("dependency pins (acceptance)", () => {
   const lock = readFileSync(resolve(root, "pnpm-lock.yaml"), "utf8");
 
   it("package.json pins exact versions", () => {
-    expect(pkg.dependencies["@ag-ui/client"]).toBe("1.0.3");
-    expect(pkg.dependencies["@ag-ui/core"]).toBe("1.0.3");
+    expect(pkg.dependencies["@ag-ui/client"]).toBe("1.0.5");
+    expect(pkg.dependencies["@ag-ui/core"]).toBe("1.0.5");
     expect(pkg.dependencies.rxjs).toBe("7.8.1");
   });
 
   it("the studio importer in the lockfile resolves those exact versions", () => {
     const studio = lock.slice(lock.indexOf("\n  apps/studio:"));
     for (const [name, version] of [
-      ["'@ag-ui/client'", "1.0.3"],
-      ["'@ag-ui/core'", "1.0.3"],
+      ["'@ag-ui/client'", "1.0.5"],
+      ["'@ag-ui/core'", "1.0.5"],
       ["rxjs", "7.8.1"],
     ]) {
       const m = new RegExp(`\\n      ${name}:\\n        specifier: ${version.replace(/\./g, "\\.")}\\n        version: ${version.replace(/\./g, "\\.")}`).exec(
@@ -418,7 +418,7 @@ describe("dependency pins (acceptance)", () => {
     for (const name of ["client", "core", "encoder", "proto"]) {
       const keys = lock.match(new RegExp(`^  '@ag-ui/${name}@[^']+':`, "gm")) ?? [];
       expect(new Set(keys.map((k) => k.replace(/(\(.*\))?':$/, ""))).size, name).toBe(1);
-      expect(keys.every((k) => k.includes("@1.0.3"))).toBe(true);
+      expect(keys.every((k) => k.includes("@1.0.5"))).toBe(true);
     }
     expect(lock).not.toMatch(/^ {2}rxjs@7\.8\.(?!1:)/m);
   });

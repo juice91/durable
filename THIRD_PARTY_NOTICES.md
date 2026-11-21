@@ -162,8 +162,8 @@ Generated on 2026-11-20 19:43:24 UTC.
 
 | Name | Version | License | URL |
 |------|---------|---------|-----|
-| @ag-ui/client | 1.0.3 | MIT | https://github.com/ag-ui-protocol/ag-ui#readme |
-| @ag-ui/core | 1.0.3 | MIT | https://github.com/ag-ui-protocol/ag-ui#readme |
+| @ag-ui/client | 1.0.5 | MIT | https://github.com/ag-ui-protocol/ag-ui#readme |
+| @ag-ui/core | 1.0.5 | MIT | https://github.com/ag-ui-protocol/ag-ui#readme |
 | @ag-ui/encoder | 1.0.3 | MIT | https://github.com/ag-ui-protocol/ag-ui#readme |
 | @ag-ui/proto | 1.0.3 | MIT | https://github.com/ag-ui-protocol/ag-ui#readme |
 | @assistant-ui/core | 0.3.35 | MIT | https://www.assistant-ui.com/ |
@@ -402,7 +402,7 @@ Generated on 2026-11-20 19:43:24 UTC.
 | node-releases | 2.0.63 | MIT | https://github.com/chicoxyzzy/node-releases#readme |
 | parse-entities | 4.0.2 | MIT | https://github.com/wooorm/parse-entities#readme |
 | picocolors | 1.1.1 | ISC | https://github.com/alexeyraspopov/picocolors#readme |
-| postcss | 8.4.31 | MIT | https://postcss.org/ |
+| postcss | 8.5.23 | MIT | https://postcss.org/ |
 | property-information | 7.2.0 | MIT | https://github.com/wooorm/property-information#readme |
 | radix-ui | 1.8.1 | MIT | https://radix-ui.com/primitives |
 | react | 19.3.1 | MIT | https://react.dev/ |
@@ -452,7 +452,7 @@ Generated on 2026-11-20 19:43:24 UTC.
 | vfile | 6.0.3 | MIT | https://github.com/vfile/vfile#readme |
 | vfile-message | 4.0.4 | MIT | https://github.com/vfile/vfile-message#readme |
 | yallist | 3.1.1 | ISC | https://github.com/isaacs/yallist#readme |
-| zod | 3.25.76 | MIT | https://zod.dev |
+| zod | 4.6.7 | MIT | https://zod.dev |
 | zustand | 4.5.7 | MIT | https://github.com/pmndrs/zustand |
 | zwitch | 2.0.4 | MIT | https://github.com/wooorm/zwitch#readme |
 

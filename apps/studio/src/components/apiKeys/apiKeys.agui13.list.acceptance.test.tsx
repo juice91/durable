@@ -158,7 +158,7 @@ describe("scopes and allowlists in the dialog", () => {
     const detail = "wildcards are not allowed in an origin; list each origin: 'https://*.x.com'";
     const base = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (input: string, init: RequestInit = {}) =>
-      String(input).endsWith("/api/v1/api-keys") && init.method === "POST" ? json({ detail }, 422) : base(input, init));
+      String(input).endsWith("/api/v1/api-keys") && init.method === "POST" ? json({ detail }, 422) : (base as (i: string, o?: RequestInit) => unknown)(input, init));
     render(<ApiKeysSection />);
     const dialog = await openCreate();
     fireEvent.change(within(dialog).getByTestId("api-key-name"), { target: { value: "x" } });
