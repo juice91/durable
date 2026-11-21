@@ -14,7 +14,6 @@ members = [
     "eap-blob-store",
     "eap-db",
     "eap-kb-sources",
-    "eap-kb-sources-acme",
     "eap-knowledge",
     "eap-mcp-runtime",
     "eap-observability",
@@ -882,17 +881,6 @@ requires-dist = [
     { name = "eap-schemas", editable = "packages/shared-schemas" },
     { name = "eap-secrets", editable = "packages/secrets" },
 ]
-
-[[package]]
-name = "eap-kb-sources-acme"
-version = "0.1.0"
-source = { editable = "packages/kb-sources-acme" }
-dependencies = [
-    { name = "eap-kb-sources" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "eap-kb-sources", editable = "packages/kb-sources" }]
 
 [[package]]
 name = "eap-knowledge"

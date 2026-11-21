@@ -120,7 +120,6 @@ jobs:
           unit="packages/shared-schemas/tests
           packages/agent-runtime/runtime_tests
           packages/kb-sources/kb_sources_tests
-          packages/kb-sources-acme/kb_sources_ti_tests
           packages/knowledge/knowledge_tests
           packages/observability/tests
           packages/pricing/pricing_tests
@@ -270,7 +269,7 @@ jobs:
       - name: Validate rendered manifests
         run: kubectl kustomize deploy/k8s | kubeconform -strict -summary
       - name: Shellcheck deployment scripts
-        run: shellcheck deploy/scripts/*.sh deploy/runner/*.sh scripts/ci/*.sh
+        run: shellcheck deploy/scripts/*.sh scripts/ci/*.sh
       - name: Validate Actions workflows
         run: actionlint
       - name: Deployment tests without image builds

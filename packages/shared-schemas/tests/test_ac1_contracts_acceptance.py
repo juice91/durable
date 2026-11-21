@@ -102,7 +102,7 @@ json.dump(res, open(out, "w"))
 
 # The last main commit before AC landed (main now contains AC, so `main` itself can no longer serve
 # as the pre-AC baseline).
-PRE_AC_MAIN = "8acdda2b7d6a4c911a17a6455f7cd8a823aac93f"
+PRE_AC_MAIN = "54a5ac49d4131b53e622009d4b36c86a3193b0a8"
 
 
 def _git(*args: str) -> str:
