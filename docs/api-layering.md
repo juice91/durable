@@ -42,6 +42,10 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
     must not import `sqlalchemy`. Modules that did when the rule landed are listed in `ignore_imports`.
     That list is a ratchet: remove a line when a module is clean, never add one. A new module fails lint if
     it imports `sqlalchemy`.
+- "Observability core has no web framework imports": `eap_observability.redaction`, `.context`, `.logcontext` and
+    `.pathredact` must not import fastapi, starlette or `eap_observability.http`. A service imports what it needs
+    from those submodules directly (`from eap_observability.redaction import log_failure, redact`,
+    `from eap_observability.context import current_trace_context`), never the package root or `.http`.
 - `apps/api/api_tests/test_architecture_app_state.py` parses every module under `eap_api` and fails on any
   `app.state` access outside `app.py` and `deps.py`.
 

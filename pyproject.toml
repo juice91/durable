@@ -199,6 +199,20 @@ source_modules = ["eap_worker"]
 forbidden_modules = ["eap_api"]
 
 [[tool.importlinter.contracts]]
+name = "Observability core has no web framework imports"
+type = "forbidden"
+# What a service may import (redaction, trace context, log context): web-free, so a service that logs does not
+# pull fastapi into the services layer. eap_observability.http (the access log, the instrumentor hook) is the
+# web-facing part; the package root imports it, so a service imports these submodules, never the root.
+source_modules = [
+    "eap_observability.redaction",
+    "eap_observability.context",
+    "eap_observability.logcontext",
+    "eap_observability.pathredact",
+]
+forbidden_modules = ["fastapi", "starlette", "eap_observability.http"]
+
+[[tool.importlinter.contracts]]
 name = "API services have no web framework imports"
 type = "forbidden"
 # A service receives its collaborators through its constructor and refuses with ServiceError; the
