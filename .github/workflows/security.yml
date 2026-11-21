@@ -236,8 +236,9 @@ jobs:
           name: sboms
           path: ${{ runner.temp }}/sbom/*.cdx.json
           if-no-files-found: error
-      # Everything HIGH/CRITICAL is listed; only CRITICAL vulnerabilities with a fix available fail the job.
-      - name: Scan images
+      # One scanner per gate. Everything HIGH/CRITICAL is listed (report only); only CRITICAL
+      # vulnerabilities with a fix available fail the job.
+      - name: Scan images for vulnerabilities
         if: steps.images.outputs.scan == 'true'
         run: |
           for name in python studio; do
@@ -247,7 +248,20 @@ jobs:
           done
           rc=0
           for name in python studio; do
-            "$RUNNER_TEMP/trivy/trivy" image --quiet --severity CRITICAL --ignore-unfixed --exit-code 1 \
-              --ignorefile .trivyignore "durable-${name}:scan" || rc=1
+            "$RUNNER_TEMP/trivy/trivy" image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed \
+              --exit-code 1 --ignorefile .trivyignore "durable-${name}:scan" || rc=1
+          done
+          exit "$rc"
+      # Secrets baked into our own files fail the build. Third-party dependency trees are skipped: they
+      # carry example credential strings (the Anthropic SDK has a fake service-account key in its docs),
+      # and a secret can only originate in this repository, which the gitleaks job scans.
+      - name: Scan images for secrets
+        if: steps.images.outputs.scan == 'true'
+        run: |
+          rc=0
+          for name in python studio; do
+            "$RUNNER_TEMP/trivy/trivy" image --quiet --scanners secret --exit-code 1 \
+              --skip-dirs /app/.venv --skip-dirs /usr/local/lib --skip-dirs /usr/lib \
+              --skip-dirs '**/node_modules' "durable-${name}:scan" || rc=1
           done
           exit "$rc"
