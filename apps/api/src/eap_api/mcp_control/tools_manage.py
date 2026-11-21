@@ -132,31 +132,34 @@ def register_tools(tool: Any) -> None:
     @tool("workflow.save_draft", manage=True)
     async def workflow_save_draft(spec: dict[str, Any], workflow_id: str | None = None) -> dict[str, Any]:
         """Create a workflow from `spec` (a WorkflowSpec), or replace the draft of `workflow_id`."""
-        from eap_api.routes.workflows import create_workflow, patch_workflow
+        from eap_api.services.workflows import WorkflowService
         from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
 
         ctx = current_ctx()
         guard_json(spec, "spec")
         if workflow_id is None:
             require_unrestricted(ctx, "create workflows")
-            return await call(ctx, create_workflow, request=_model(WorkflowCreate, spec=spec), principal=ctx.actor, db=DB)
+            created = _model(WorkflowCreate, spec=spec)
+            return await call(ctx, lambda db: WorkflowService(db).create(ctx.tenant_id, created.spec)[0], db=DB)
         require_workflow(ctx, workflow_id)
         wid = uid(workflow_id, "workflow_id")
         update = _model(WorkflowUpdate, spec=spec)
         return await call_with_revision(
             ctx, revision_reader(ctx, "workflows", str(wid)),
-            lambda pre: call(ctx, patch_workflow, workflow_id=wid, request=update, principal=ctx.actor, db=DB, pre=pre),
+            lambda pre: call(
+                ctx, lambda db: WorkflowService(db).replace_draft(ctx.tenant_id, str(wid), update.spec, pre.expected)[0],
+                db=DB),
             "workflow")
 
     @tool("workflow.publish", manage=True)
     async def workflow_publish(workflow_id: str) -> dict[str, Any]:
         """Publish the workflow's draft as the next immutable version (409 when it equals the latest)."""
-        from eap_api.routes.workflows import publish_workflow_version
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, publish_workflow_version, workflow_id=uid(workflow_id, "workflow_id"),
-                          principal=ctx.actor, db=DB)
+        wid = str(uid(workflow_id, "workflow_id"))
+        return await call(ctx, lambda db: WorkflowService(db).publish(ctx.tenant_id, ctx.actor.user_id, wid)[0], db=DB)
 
     @tool("workflow.archive", manage=True)
     async def workflow_archive(workflow_id: str, archived: bool = True, force: bool = False) -> dict[str, Any]:
@@ -164,12 +167,12 @@ def register_tools(tool: Any) -> None:
         pauses its schedules and is refused (409 runs_active) while runs are queued or running, unless
         force=true; an archived workflow refuses new runs and schedules (workflow_archived). Unarchiving
         does not resume schedules. Returns the workflow with `archived`, `archived_at`, `paused_schedules`."""
-        from eap_api.routes.workflows import WorkflowArchive, archive_workflow
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, archive_workflow, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor,
-                          db=DB, body=WorkflowArchive(archived=archived, force=force))
+        wid = str(uid(workflow_id, "workflow_id"))
+        return await call(ctx, lambda db: WorkflowService(db).archive(ctx.tenant_id, wid, archived, force)[0], db=DB)
 
     @tool("workflow.run.start", manage=True)
     async def workflow_run_start(workflow_id: str, input: dict[str, Any], version: int | None = None,

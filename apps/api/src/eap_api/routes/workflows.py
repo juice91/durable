@@ -41,30 +41,18 @@ warning `path` is `steps[<i>].body.steps[<j>]`.
 from __future__ import annotations
 
 import uuid
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func
-from sqlalchemy.orm import Session
 
-from eap_api.deps import SessionDep
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.models import AgentModel
 from eap_api.request_guard import guarded_json_route, schema_checks_storable
-from eap_api.routes import _run_definition_op
 from eap_api.schemas import ErrorDetail
-from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
-from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
-from eap_run_store.revisions import bump_row
-from eap_run_store.definitions import (
-    publish_workflow,
-    restore_workflow_version,
-    set_workflow_archived,
-)
-from eap_run_store.workflow_checks import (  # noqa: F401 - re-exported: the API's users and tests import them from here
+from eap_api.service_deps.workflows import WorkflowServiceDep
+from eap_api.services.workflows import (  # noqa: F401 - re-exported: the API's users and tests import them from here
     CAP_BOUNDS,
     LOOP_ITERATIONS_ENV,
     RUN_CONCURRENCY_ENV,
@@ -74,6 +62,7 @@ from eap_run_store.workflow_checks import (  # noqa: F401 - re-exported: the API
     WARNING_UNLISTED_OUTPUT_FIELD,
     WARNING_UNPINNED_OUTPUT_REF,
     RefProblem,
+    WorkflowService,
     _agent_version,
     _env_cap,
     agent_step_cost_cap_warnings,
@@ -87,7 +76,7 @@ from eap_run_store.workflow_checks import (  # noqa: F401 - re-exported: the API
     output_ref_problem,
     output_schema_of,
 )
-from eap_run_store.workflow_checks import reference_problems as _reference_problems
+from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
 from eap_schemas.workflows import MAX_SPEC_DEPTH, WorkflowSpec
 
 # A request body is {"spec": <spec>}: one level above the spec's own nesting cap.
@@ -111,71 +100,11 @@ router = APIRouter(prefix="/workflows", tags=["workflows"], route_class=BoundedJ
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
-def _get_workflow(db: Session, workflow_id: uuid.UUID, tenant_id: str) -> WorkflowModel:
-    workflow = (
-        db.query(WorkflowModel)
-        .filter(WorkflowModel.id == str(workflow_id), WorkflowModel.tenant_id == tenant_id)
-        .first()
-    )
-    if workflow is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-    return workflow
-
-
-def _latest_version(db: Session, workflow: WorkflowModel) -> int | None:
-    return (
-        db.query(func.max(WorkflowVersionModel.version))
-        .filter(
-            WorkflowVersionModel.workflow_id == workflow.id,
-            WorkflowVersionModel.tenant_id == workflow.tenant_id,
-        )
-        .scalar()
-    )
-
-
-def _workflow_response(workflow: WorkflowModel, latest_version: int | None) -> dict:
-    return {
-        "id": str(workflow.id),
-        "name": workflow.name,
-        "draft_spec": workflow.draft_spec,
-        "latest_version": latest_version,
-        "archived": bool(workflow.archived),
-        "archived_at": workflow.archived_at.isoformat() if workflow.archived_at else None,
-        "revision": workflow.revision,
-    }
-
-
-def _version_response_dict(version: dict) -> dict:
-    """A version row as the shared definition operations return it."""
-    return {
-        "workflow_id": str(version["workflow_id"]),
-        "version": version["version"],
-        "spec": version["spec"],
-        "spec_hash": version["spec_hash"],
-        "created_at": version["created_at"].isoformat(),
-        "created_by": version["created_by"],
-        "created_via": version["created_via"],
-    }
-
-
-def _version_response(version: WorkflowVersionModel) -> dict:
-    return {
-        "workflow_id": str(version.workflow_id),
-        "version": version.version,
-        "spec": version.spec,
-        "spec_hash": version.spec_hash,
-        "created_at": version.created_at.isoformat(),
-        "created_by": version.created_by,
-        "created_via": version.created_via,
-    }
-
-
 # The publish-time validation (loop caps, references, output refs, warnings) lives in
-# eap_run_store.workflow_checks, shared with the Architect tools; re-exported above for the API's users.
-def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str, *, lock: bool = False) -> list[str]:
-    """What a spec points at that this tenant cannot run (see eap_run_store.workflow_checks)."""
-    return _reference_problems(db.connection(), spec, tenant_id, lock=lock)
-
+# the run store's workflow_checks, shared with the Architect tools; re-exported above for the API's users.
+def reference_problems(db: Any, spec: WorkflowSpec, tenant_id: str, *, lock: bool = False) -> list[str]:
+    """What a spec points at that this tenant cannot run (see the run store's workflow_checks)."""
+    return WorkflowService(db).reference_problems(spec, tenant_id, lock=lock)
 
 
 @router.get(
@@ -185,32 +114,14 @@ def reference_problems(db: Session, spec: WorkflowSpec, tenant_id: str, *, lock:
 )
 def get_agent_output_schema(
     principal: PrincipalDep,
-    db: SessionDep,
+    service: WorkflowServiceDep,
     agent_id: Annotated[uuid.UUID, Query()],
     version: Annotated[int | None, Query(ge=1)] = None,
 ) -> JSONResponse:
     """The output schema an agent step would read (AC.9): the pinned `version`, else the latest
     published one. `json_schema` is null for a text agent (its step output is a string), and
     `fields` lists the paths `steps.<id>.output.<path>` can read."""
-    agent = (
-        db.query(AgentModel)
-        .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == principal.tenant_id)
-        .first()
-    )
-    if agent is None or agent.archived:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-    row = _agent_version(db.connection(), principal.tenant_id, str(agent_id), version)
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
-    schema = output_schema_of(row.spec)
-    return JSONResponse(content={
-        "agent_id": str(agent_id),
-        "version": row.version,
-        "pinned": version is not None,
-        "structured": schema is not None,
-        "json_schema": schema,
-        "fields": output_fields(schema) if schema is not None else [],
-    })
+    return JSONResponse(content=service.agent_output_schema(principal.tenant_id, str(agent_id), version))
 
 
 @router.post(
@@ -220,39 +131,28 @@ def get_agent_output_schema(
     responses={422: {"model": ErrorDetail}},
 )
 @schema_checks_storable
-def create_workflow(request: WorkflowCreate, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
+def create_workflow(request: WorkflowCreate, principal: PrincipalDep, service: WorkflowServiceDep) -> JSONResponse:
     """Create a workflow with an initial draft."""
-    workflow = WorkflowModel(
-        tenant_id=principal.tenant_id,
-        name=request.spec.name,
-        draft_spec=request.spec.model_dump(mode="json"),
-    )
-    db.add(workflow)
-    db.commit()
-    db.refresh(workflow)
-    return stamp(JSONResponse(content=_workflow_response(workflow, None), status_code=201), workflow.revision)
+    body, revision = service.create(principal.tenant_id, request.spec)
+    return stamp(JSONResponse(content=body, status_code=201), revision)
 
 
 @router.get("", response_class=JSONResponse)
 def list_workflows(
-    principal: PrincipalDep, db: SessionDep, archived: Literal["true", "false", "all"] = "false"
+    principal: PrincipalDep, service: WorkflowServiceDep, archived: Literal["true", "false", "all"] = "false"
 ) -> JSONResponse:
     """List this tenant's workflows, oldest first: the active ones, or with `?archived=true` the
     archived ones only, or with `?archived=all` both."""
-    query = db.query(WorkflowModel).filter(WorkflowModel.tenant_id == principal.tenant_id)
-    if archived != "all":
-        query = query.filter(WorkflowModel.archived.is_(archived == "true"))
-    workflows = query.order_by(WorkflowModel.created_at, WorkflowModel.id).all()
-    return JSONResponse(content=[_workflow_response(w, _latest_version(db, w)) for w in workflows])
+    return JSONResponse(content=service.list(principal.tenant_id, archived))
 
 
 @router.get(
     "/{workflow_id}", response_class=JSONResponse,
     responses={404: {"model": ErrorDetail}, **etag_responses(write=False)},
 )
-def get_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
-    workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-    return read_response(_workflow_response(workflow, _latest_version(db, workflow)), workflow.revision)
+def get_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, service: WorkflowServiceDep) -> JSONResponse:
+    body, revision = service.get(principal.tenant_id, str(workflow_id))
+    return read_response(body, revision)
 
 
 @router.patch(
@@ -262,24 +162,12 @@ def get_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep
 )
 @schema_checks_storable
 def patch_workflow(
-    workflow_id: uuid.UUID, request: WorkflowUpdate, principal: PrincipalDep, db: SessionDep, pre: IfMatch
+    workflow_id: uuid.UUID, request: WorkflowUpdate, principal: PrincipalDep, service: WorkflowServiceDep, pre: IfMatch
 ) -> JSONResponse:
     """Replace the draft. Published versions never change. Send the ETag you read as `If-Match`: a
     stale one is 412 `revision_mismatch` with the current workflow (see eap_api.concurrency)."""
-    workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-
-    def current() -> tuple[dict, int]:
-        db.refresh(workflow)
-        return _workflow_response(workflow, _latest_version(db, workflow)), workflow.revision
-
-    pre.check(workflow.revision, current)
-    with pre.guard(current, db):
-        bump_row(db, workflow, pre.expected)
-        workflow.name = request.spec.name
-        workflow.draft_spec = request.spec.model_dump(mode="json")
-        db.commit()
-    db.refresh(workflow)
-    return pre.respond(_workflow_response(workflow, _latest_version(db, workflow)), workflow.revision)
+    body, revision = service.replace_draft(principal.tenant_id, str(workflow_id), request.spec, pre.expected)
+    return pre.respond(body, revision)
 
 
 @router.post(
@@ -288,19 +176,14 @@ def patch_workflow(
     response_class=JSONResponse,
     responses={404: {"model": ErrorDetail}, 409: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
-def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
+def publish_workflow_version(workflow_id: uuid.UUID, principal: PrincipalDep, service: WorkflowServiceDep) -> JSONResponse:
     """Publish the draft as the next immutable version (409 when it equals the latest one): 201 with
     the version and `warnings` (AC.9: refs into unpinned or text agents' output; LP.5: pinned loop
     body agents with an approval policy; LP.16: `cost_cap_unpriced_model` for an llm_judge model,
     or an agent step's agent model, that counts as $0 toward `limits.max_cost_usd`). The work is
-    eap_run_store.definitions.publish_workflow, shared with the Architect's publish tool."""
-    result = _run_definition_op(
-        db, lambda conn: publish_workflow(conn, principal.tenant_id, str(workflow_id), created_by=principal.user_id)
-    )
-    return stamp(
-        JSONResponse(content={**_version_response_dict(result.version), "warnings": result.warnings}, status_code=201),
-        result.revision,
-    )
+    publish_workflow (run store definitions), shared with the Architect's publish tool."""
+    body, revision = service.publish(principal.tenant_id, principal.user_id, str(workflow_id))
+    return stamp(JSONResponse(content=body, status_code=201), revision)
 
 
 class WorkflowVersionRestore(BaseModel):
@@ -321,7 +204,7 @@ def restore_workflow_version_route(
     workflow_id: uuid.UUID,
     version_num: int,
     principal: PrincipalDep,
-    db: SessionDep,
+    service: WorkflowServiceDep,
     request: Annotated[WorkflowVersionRestore | None, Body()] = None,
 ) -> JSONResponse:
     """Roll back by publishing version `latest + 1` whose spec equals version `version_num`
@@ -329,22 +212,12 @@ def restore_workflow_version_route(
     restored spec). 409 when the source is (or equals) the latest version, when the draft has
     unpublished changes and `discard_draft` is not set, or for an archived workflow. 201 with the
     version, `restored_from` (not stored: workflow versions have no such column) and `warnings`.
-    The work is eap_run_store.definitions.restore_workflow_version."""
+    The work is restore_workflow_version (run store definitions)."""
     discard = request.discard_draft if request is not None else False
-    result = _run_definition_op(
-        db,
-        lambda conn: restore_workflow_version(
-            conn, principal.tenant_id, str(workflow_id), version_num, created_by=principal.user_id,
-            discard_draft=discard,
-        ),
+    body, revision = service.restore(
+        principal.tenant_id, principal.user_id, str(workflow_id), version_num, discard_draft=discard
     )
-    return stamp(
-        JSONResponse(
-            content={**_version_response_dict(result.version), "restored_from": version_num, "warnings": result.warnings},
-            status_code=201,
-        ),
-        result.revision,
-    )
+    return stamp(JSONResponse(content=body, status_code=201), revision)
 
 
 class WorkflowArchive(BaseModel):
@@ -355,21 +228,6 @@ class WorkflowArchive(BaseModel):
     force: bool = False
 
 
-def _archive(
-    workflow_id: uuid.UUID, principal: Principal, db: Session, archived: bool, force: bool = False
-) -> JSONResponse:
-    result = _run_definition_op(
-        db,
-        lambda conn: set_workflow_archived(conn, principal.tenant_id, str(workflow_id), archived, force=force),
-    )
-    workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-    db.refresh(workflow)
-    return read_response(
-        {**_workflow_response(workflow, _latest_version(db, workflow)), "paused_schedules": list(result.paused_schedules)},
-        workflow.revision,
-    )
-
-
 @router.post(
     "/{workflow_id}/archive",
     response_class=JSONResponse,
@@ -378,7 +236,7 @@ def _archive(
 def archive_workflow(
     workflow_id: uuid.UUID,
     principal: PrincipalDep,
-    db: SessionDep,
+    service: WorkflowServiceDep,
     body: Annotated[WorkflowArchive | None, Body()] = None,
 ) -> JSONResponse:
     """Archive the workflow, or with `{"archived": false}` unarchive it (body optional, default
@@ -389,7 +247,8 @@ def archive_workflow(
     schedules stay readable. 409 `runs_active` (with `active_runs`) while it has queued or running
     runs, unless `force`. Unarchiving does not resume schedules. Another tenant's workflow is 404."""
     body = body or WorkflowArchive()
-    return _archive(workflow_id, principal, db, body.archived, body.force)
+    result, revision = service.archive(principal.tenant_id, str(workflow_id), body.archived, body.force)
+    return read_response(result, revision)
 
 
 @router.post(
@@ -397,26 +256,17 @@ def archive_workflow(
     response_class=JSONResponse,
     responses={404: {"model": ErrorDetail}},
 )
-def unarchive_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
+def unarchive_workflow(workflow_id: uuid.UUID, principal: PrincipalDep, service: WorkflowServiceDep) -> JSONResponse:
     """Unarchive the workflow (idempotent; same as POST archive with `{"archived": false}`). Its
     paused schedules stay paused; resume them with PATCH /workflows/schedules/{id} `{"active": true}`."""
-    return _archive(workflow_id, principal, db, False)
+    result, revision = service.archive(principal.tenant_id, str(workflow_id), False)
+    return read_response(result, revision)
 
 
 @router.get("/{workflow_id}/versions", response_class=JSONResponse, responses={404: {"model": ErrorDetail}})
-def list_workflow_versions(workflow_id: uuid.UUID, principal: PrincipalDep, db: SessionDep) -> JSONResponse:
+def list_workflow_versions(workflow_id: uuid.UUID, principal: PrincipalDep, service: WorkflowServiceDep) -> JSONResponse:
     """Published versions, newest first."""
-    workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-    versions = (
-        db.query(WorkflowVersionModel)
-        .filter(
-            WorkflowVersionModel.workflow_id == workflow.id,
-            WorkflowVersionModel.tenant_id == principal.tenant_id,
-        )
-        .order_by(WorkflowVersionModel.version.desc())
-        .all()
-    )
-    return JSONResponse(content=[_version_response(v) for v in versions])
+    return JSONResponse(content=service.list_versions(principal.tenant_id, str(workflow_id)))
 
 
 @router.get(
@@ -425,18 +275,6 @@ def list_workflow_versions(workflow_id: uuid.UUID, principal: PrincipalDep, db: 
     responses={404: {"model": ErrorDetail}},
 )
 def get_workflow_version(
-    workflow_id: uuid.UUID, version_num: int, principal: PrincipalDep, db: SessionDep
+    workflow_id: uuid.UUID, version_num: int, principal: PrincipalDep, service: WorkflowServiceDep
 ) -> JSONResponse:
-    workflow = _get_workflow(db, workflow_id, principal.tenant_id)
-    version = (
-        db.query(WorkflowVersionModel)
-        .filter(
-            WorkflowVersionModel.workflow_id == workflow.id,
-            WorkflowVersionModel.tenant_id == principal.tenant_id,
-            WorkflowVersionModel.version == version_num,
-        )
-        .first()
-    )
-    if version is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
-    return JSONResponse(content=_version_response(version))
+    return JSONResponse(content=service.get_version(principal.tenant_id, str(workflow_id), version_num))

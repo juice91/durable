@@ -73,29 +73,31 @@ def register_tools(tool: Any) -> None:
     @tool("workflow.list")
     async def workflow_list(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, Any]:
         """List the tenant's workflows (not archived): id, name, draft_spec, latest_version. Paged: limit <= 100."""
-        from eap_api.routes.workflows import list_workflows
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
-        rows = await call(ctx, list_workflows, principal=ctx.actor, db=DB)
+        rows = await call(ctx, lambda db: WorkflowService(db).list(ctx.tenant_id), db=DB)
         return page([r for r in rows if ctx.workflow_allowed(r["id"])], limit, offset)
 
     @tool("workflow.get")
     async def workflow_get(workflow_id: str) -> dict[str, Any]:
         """One workflow with its draft spec and latest published version number."""
-        from eap_api.routes.workflows import get_workflow
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, get_workflow, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor, db=DB)
+        return await call(ctx, lambda db, wid: WorkflowService(db).get(ctx.tenant_id, wid)[0], db=DB,
+                          wid=str(uid(workflow_id, "workflow_id")))
 
     @tool("workflow.versions")
     async def workflow_versions(workflow_id: str, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         """Published versions of a workflow, newest first (each with its spec). Paged: limit <= 100."""
-        from eap_api.routes.workflows import list_workflow_versions
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        rows = await call(ctx, list_workflow_versions, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor, db=DB)
+        rows = await call(ctx, lambda db, wid: WorkflowService(db).list_versions(ctx.tenant_id, wid), db=DB,
+                          wid=str(uid(workflow_id, "workflow_id")))
         return page(rows, limit, offset)
 
     @tool("workflow.run.get")

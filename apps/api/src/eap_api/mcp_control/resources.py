@@ -22,11 +22,12 @@ def register_resources(resource: Any) -> None:
     @resource("pydanticos://workflows/{workflow_id}")
     async def workflow_resource(workflow_id: str) -> Any:
         """A workflow's draft spec."""
-        from eap_api.routes.workflows import get_workflow
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, get_workflow, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor, db=DB)
+        return await call(ctx, lambda db, wid: WorkflowService(db).get(ctx.tenant_id, wid)[0], db=DB,
+                          wid=str(uid(workflow_id, "workflow_id")))
 
     @resource("pydanticos://runs/{run_id}/report")
     async def run_report_resource(run_id: str) -> Any:
