@@ -109,8 +109,13 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(function 
   const options = readOptions(children);
   // Inside a <form> Radix keeps a hidden native <select> in step with `value` and reports its `change`
   // back; while the matching <option> is not registered yet (a value set before its options load, or in
-  // the same render) that report is "" and would wipe the caller's state. Only a change that comes from
-  // the user's own pointer or key press, caught while the event is being handled, is passed on.
+  // the same render) that report is "" and would wipe the caller's state. Only a change the user caused
+  // is passed on. The flag is set by handlers on the Item / Trigger themselves (Radix composes the
+  // caller's handler before its own inside one listener, so the flag is up exactly when Radix calls
+  // onValueChange synchronously) and cleared right after. Do NOT set it from a capture listener on
+  // Content: a real browser runs a microtask checkpoint after every listener, so a flag cleared by a
+  // microtask is already down when Radix's bubble-phase pointerup handler selects the item (jsdom
+  // dispatches synchronously and hides this).
   const userAction = React.useRef(false);
   const markUserAction = () => {
     userAction.current = true;
@@ -144,7 +149,7 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(function 
         data-select-trigger=""
         data-options={JSON.stringify(options.map((option) => ({ value: option.value, label: textOf(option.label), disabled: option.disabled })))}
         onBlur={onBlur}
-        onKeyDownCapture={markUserAction}
+        onKeyDown={markUserAction}
         className={cn(
           "inline-flex w-full min-w-0 items-center justify-between gap-2 rounded-md border border-input bg-surface text-left text-foreground transition-colors hover:bg-fill-hover motion-reduce:transition-none",
           "disabled:pointer-events-none disabled:opacity-50 data-[placeholder]:text-muted-foreground aria-[invalid=true]:border-destructive",
@@ -165,9 +170,6 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(function 
       <SelectPrimitive.Portal>
         <SelectPrimitive.Content
           position="popper"
-          onKeyDownCapture={markUserAction}
-          onPointerUpCapture={markUserAction}
-          onClickCapture={markUserAction}
           sideOffset={6}
           collisionPadding={8}
           className={cn(
@@ -182,6 +184,9 @@ export const Select = React.forwardRef<HTMLButtonElement, SelectProps>(function 
                 value={toInternal(option.value)}
                 data-value={option.value}
                 disabled={option.disabled}
+                onPointerUp={markUserAction}
+                onClick={markUserAction}
+                onKeyDown={markUserAction}
                 className="relative flex min-h-7 cursor-default select-none items-center gap-2 rounded-sm py-1 pl-7 pr-2 outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-fill-active"
               >
                 <span className="absolute left-2 flex size-icon items-center justify-center">
