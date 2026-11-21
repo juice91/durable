@@ -220,7 +220,7 @@ def _pause_inside_lock(monkeypatch):
     gate is call order, not the caller's thread."""
     import threading
 
-    import eap_api.routes as routes
+    import eap_api.services.agents as routes
 
     entered, go = threading.Event(), threading.Event()
     real = routes._latest_version

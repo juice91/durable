@@ -13,11 +13,13 @@ def register_resources(resource: Any) -> None:
     @resource("pydanticos://agents/{agent_id}")
     async def agent_resource(agent_id: str) -> Any:
         """An agent's draft spec."""
-        from eap_api.routes import get_agent
+        from eap_api.services.agents import AgentService
 
         ctx = current_ctx()
         require_agent(ctx, agent_id)
-        return await call(ctx, get_agent, agent_id=uid(agent_id, "agent_id"), principal=ctx.actor, db=DB)
+        aid = uid(agent_id, "agent_id")
+        agent, _revision = await call_service(ctx, AgentService, lambda s: s.get(ctx.tenant_id, aid))
+        return agent
 
     @resource("pydanticos://workflows/{workflow_id}")
     async def workflow_resource(workflow_id: str) -> Any:
