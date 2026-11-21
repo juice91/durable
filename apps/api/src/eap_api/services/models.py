@@ -16,6 +16,7 @@ from eap_api.services.model_catalog import SCRIPTED_TEST_MODELS, model_items  # 
 from eap_api.services.run_filters import plain_refusals
 from eap_schemas.models_policy import ModelPolicy
 
+
 @plain_refusals
 class ModelService:
     def models(self) -> dict[str, Any]:
