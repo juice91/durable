@@ -4,6 +4,12 @@
 # (optional, comma separated requirement specifiers such as "mcp<2") is written to a constraints file
 # for uv, so a transitive dependency that breaks a server can be held back without rebuilding.
 FROM ghcr.io/astral-sh/uv:0.9.11-python3.13-bookworm-slim
+# The uv base image lags Debian security updates, so pull the fixed versions of the packages that
+# carry fixable CRITICAL/HIGH findings (openssl, gnutls, perl, pcre2, apt, libcap2, gpgv).
+RUN apt-get update \
+    && apt-get install --only-upgrade --no-install-recommends --yes \
+         openssl libssl3 libgnutls30 perl-base libpcre2-8-0 apt libapt-pkg6.0 libcap2 gpgv \
+    && rm -rf /var/lib/apt/lists/*
 COPY mcp-run-python.sh /usr/local/bin/mcp-run
 RUN chmod 0555 /usr/local/bin/mcp-run \
     && groupadd --system --gid 10001 mcp \

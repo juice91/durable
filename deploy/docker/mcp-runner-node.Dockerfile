@@ -2,7 +2,7 @@
 # variable MCP_PACKAGE (e.g. "@scope/name@1.2.3"); it is passed to npx as a single argv element and
 # never goes through a shell string. The pod runs with a read-only root filesystem, so the npm cache
 # and HOME live under /tmp, which the operator mounts as an emptyDir.
-FROM node:22.21.1-bookworm-slim
+FROM node:22.23.5-bookworm-slim
 RUN printf '%s\n' '#!/bin/sh' \
       ': "${MCP_PACKAGE:?MCP_PACKAGE is required}"' \
       'exec npx --yes -- "$MCP_PACKAGE"' > /usr/local/bin/mcp-run \
