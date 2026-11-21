@@ -1,5 +1,5 @@
 # Public access: an in-cluster Cloudflare Tunnel connector (deploy/README.md, "Public access via Cloudflare Tunnel").
-# The tunnel `durable` publishes durable.example-org.ai behind Cloudflare Access: path ^/api/ goes to
+# The tunnel publishes your public hostname (<public-host>) behind Cloudflare Access: path ^/api/ goes to
 # http://api.pydanticos.svc.cluster.local:8000, everything else to http://studio.pydanticos.svc.cluster.local:3000.
 #
 # Off by default (replicas: 0), like studio. up.sh scales it to 1 only when the deploy secret carries a non-empty
