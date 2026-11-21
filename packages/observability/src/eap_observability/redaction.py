@@ -34,7 +34,7 @@ from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Status, StatusCode
 
-from eap_observability.http import template_route_attributes
+from eap_observability.pathredact import template_route_attributes
 from eap_observability.logcontext import RUN_LOG_ATTRIBUTE, TENANT_LOG_ATTRIBUTE
 
 REDACTED = "[REDACTED]"
