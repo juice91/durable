@@ -38,6 +38,7 @@ import { useUrlSheet } from "@/components/ui/useUrlSheet";
 import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { ApprovalSheet } from "./ApprovalSheet";
 import { ApprovalStatusBadge } from "./ApprovalStatusBadge";
+import { Select } from "@/components/ui/Select";
 
 const inputClass =
   "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
@@ -439,26 +440,26 @@ export function ApprovalsInbox() {
           </div>
           <div className="flex min-w-0 flex-col gap-1">
             <label htmlFor="approvals-kind-filter" className={labelClass}>Kind</label>
-            <select
+            <Select
               id="approvals-kind-filter"
               data-testid="approvals-kind-filter"
               value={filters.kind ?? "all"}
-              onChange={(event) => setFilters({ kind: event.target.value === "all" ? null : (event.target.value as ApprovalKind) })}
+              onValueChange={(v) => setFilters({ kind: v === "all" ? null : (v as ApprovalKind) })}
               className={inputClass}
             >
               <option value="all">All</option>
               {APPROVAL_KINDS.map((kind) => (
                 <option key={kind} value={kind}>{APPROVAL_KIND_LABELS[kind]}</option>
               ))}
-            </select>
+            </Select>
           </div>
           <div className="flex min-w-0 flex-col gap-1">
             <label htmlFor="approvals-agent-filter" className={labelClass}>Agent</label>
-            <select
+            <Select
               id="approvals-agent-filter"
               data-testid="approvals-agent-filter"
               value={filters.agent_id ?? ""}
-              onChange={(event) => setFilters({ agent_id: event.target.value || null })}
+              onValueChange={(v) => setFilters({ agent_id: v || null })}
               className={`${inputClass} max-w-48`}
             >
               <option value="">All agents</option>
@@ -466,7 +467,7 @@ export function ApprovalsInbox() {
                 <option key={id} value={id}>{name}</option>
               ))}
               {filters.agent_id && !agentNames[filters.agent_id] ? <option value={filters.agent_id}>{filters.agent_id.slice(0, 8)}...</option> : null}
-            </select>
+            </Select>
           </div>
           {hasActiveApprovalFilters(filters) ? (
             <Button variant="ghost" size="sm" onClick={() => setFilters({ kind: null, agent_id: null })} data-testid="approvals-clear-filters">

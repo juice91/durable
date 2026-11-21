@@ -8,6 +8,7 @@ import { ApiError } from "@/lib/api";
 import { mcpCatalog, networkSummary, packageLabel, type CatalogEntry, type CatalogInstall } from "@/lib/mcpCatalog";
 import type { McpServer } from "@/lib/mcpServers";
 import { listSecrets, putSecret, secretRef } from "@/lib/secrets";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -207,26 +208,26 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
                   {variable.secret ? <Badge variant="warning">secret</Badge> : null}
                 </label>
                 {variable.secret ? (
-                  <select
+                  <Select
                     aria-label={`Source for ${variable.name}`}
                     value={source[variable.name] ?? "new"}
-                    onChange={(event) => setSource((current) => ({ ...current, [variable.name]: event.target.value as SecretSource }))}
+                    onValueChange={(v) => setSource((current) => ({ ...current, [variable.name]: v as SecretSource }))}
                     className={inputClass}
                   >
                     <option value="new">Enter a new value</option>
                     <option value="stored" disabled={storedNames.length === 0}>Use a stored secret</option>
-                  </select>
+                  </Select>
                 ) : null}
                 {fromStore ? (
-                  <select
+                  <Select
                     aria-label={`Stored secret for ${variable.name}`}
                     value={stored[variable.name] ?? ""}
-                    onChange={(event) => setStored((current) => ({ ...current, [variable.name]: event.target.value }))}
+                    onValueChange={(v) => setStored((current) => ({ ...current, [variable.name]: v }))}
                     className={inputClass}
                   >
                     <option value="">Choose a secret…</option>
                     {storedNames.map((storedName) => <option key={storedName} value={storedName}>{storedName}</option>)}
-                  </select>
+                  </Select>
                 ) : (
                   <input
                     id={`env-${variable.name}`}

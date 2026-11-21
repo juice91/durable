@@ -25,6 +25,7 @@ import {
   type UploadRefusal,
 } from "@/lib/knowledge";
 import { alertClass, fieldClass, hintClass, labelClass } from "./knowledgeUi";
+import { Select } from "@/components/ui/Select";
 
 type ItemStatus = "refused" | "ready" | "reading" | "uploading" | "started" | "unchanged" | "failed";
 
@@ -358,9 +359,9 @@ export function UploadSheet({ open, onOpenChange, kbId, kbName, onUploaded }: Up
                   <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                     <div className="min-w-0 space-y-1">
                       <label htmlFor={`${id}-format`} className={labelClass}>Format</label>
-                      <select id={`${id}-format`} data-testid="knowledge-paste-format" value={pasteFormat} onChange={(event) => setPasteFormat(event.target.value)} className={fieldClass}>
+                      <Select id={`${id}-format`} data-testid="knowledge-paste-format" value={pasteFormat} onValueChange={(v) => setPasteFormat(v)} className={fieldClass}>
                         {PASTE_FORMATS.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}
-                      </select>
+                      </Select>
                     </div>
                     <div className="min-w-0 space-y-1">
                       <label htmlFor={`${id}-url`} className={labelClass}>Source URL <span className="font-normal text-muted-foreground">(optional)</span></label>

@@ -27,6 +27,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { IconButton } from "./IconButton";
 import { ResizableGroup, ResizableHandle, ResizablePanel, readStoredLayout, writeStoredLayout } from "./Resizable";
 import { SegmentedControl } from "./SegmentedControl";
+import { Select } from "./Select";
+import { chooseOption, selectValue } from "@/test/select";
 import { Sheet, SheetBody, SheetContent, SheetHeader, openSheetIds } from "./Sheet";
 import { Switch } from "./Switch";
 import { LinkTabs, Tabs, TabsContent, TabsList, TabsTrigger, isLinkTabActive } from "./Tabs";
@@ -445,6 +447,125 @@ describe("Combobox", () => {
     fireEvent.click(screen.getByRole("option", { name: /Billing helper/ }));
     expect(onValueChange).toHaveBeenCalledWith("a2");
     await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
+  });
+});
+
+describe("Select", () => {
+  function Harness({ onChange, disabled = false }: { onChange?: (value: string) => void; disabled?: boolean }) {
+    const [value, setValue] = useState("");
+    return (
+      <Select
+        aria-label="Kind"
+        data-testid="kind"
+        value={value}
+        disabled={disabled}
+        onValueChange={(next) => {
+          setValue(next);
+          onChange?.(next);
+        }}
+      >
+        <option value="">All kinds</option>
+        <option value="tool">Tool approval</option>
+        <option value="secret" disabled>Secret input</option>
+        <option value="plan">Plan review</option>
+      </Select>
+    );
+  }
+
+  it("opens, picks an option and shows its label, including the empty-value option", async () => {
+    const onChange = vi.fn();
+    render(<Harness onChange={onChange} />);
+    const trigger = screen.getByRole("combobox", { name: "Kind" });
+    expect(trigger).toHaveTextContent("All kinds");
+    expect(selectValue(trigger)).toBe("");
+    await chooseOption(trigger, "Tool approval");
+    expect(onChange).toHaveBeenCalledWith("tool");
+    expect(trigger).toHaveTextContent("Tool approval");
+    expect(selectValue(trigger)).toBe("tool");
+    await chooseOption(trigger, "All kinds");
+    expect(onChange).toHaveBeenLastCalledWith("");
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it("supports the keyboard: arrows move, Enter picks, Escape closes", async () => {
+    const onChange = vi.fn();
+    render(<Harness onChange={onChange} />);
+    const trigger = screen.getByRole("combobox", { name: "Kind" });
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const listbox = screen.getByRole("listbox");
+    expect(within(listbox).getAllByRole("option")).toHaveLength(4);
+    // jsdom has no layout, so the arrow-key focus move is driven by focusing the option itself.
+    const plan = within(listbox).getByRole("option", { name: "Plan review" });
+    act(() => plan.focus());
+    expect(plan).toHaveAttribute("data-highlighted");
+    fireEvent.keyDown(plan, { key: "Enter" });
+    await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
+    expect(onChange).toHaveBeenCalledWith("plan");
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("listbox")).not.toBeInTheDocument());
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks disabled options and does not pick them", async () => {
+    const onChange = vi.fn();
+    render(<Harness onChange={onChange} />);
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Kind" }), { key: "Enter" });
+    const option = screen.getByRole("option", { name: "Secret input" });
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(option);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("does not open when disabled", () => {
+    render(<Harness disabled />);
+    const trigger = screen.getByRole("combobox", { name: "Kind" });
+    expect(trigger).toBeDisabled();
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("uses theme tokens, never the OS control, and passes axe when open", async () => {
+    render(<Harness />);
+    const trigger = screen.getByRole("combobox", { name: "Kind" });
+    expect(trigger.className).toMatch(/bg-surface/);
+    expect(trigger.className).toMatch(/border-input/);
+    expect(trigger.className).toMatch(/focus-visible:ring-ring/);
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    const listbox = screen.getByRole("listbox");
+    const surface = listbox.closest("[data-radix-popper-content-wrapper]")?.firstElementChild as HTMLElement;
+    expect(surface.className).toMatch(/bg-surface-raised/);
+    expect(surface.className).toMatch(/border-border/);
+    expect(within(listbox).getByRole("option", { name: "Plan review" }).className).toMatch(/data-\[highlighted\]:bg-fill-active/);
+    await expectNoAxeViolations(document.body);
+  }, AXE_TIMEOUT_MS);
+
+  it("renders a leading element, a size and a placeholder", () => {
+    render(
+      <Select aria-label="Sort" value="zzz" placeholder="Pick one" size="sm" leading={<span data-testid="lead">⇅</span>}>
+        <option value="a">A</option>
+      </Select>,
+    );
+    const trigger = screen.getByRole("combobox", { name: "Sort" });
+    expect(trigger).toHaveTextContent("Pick one");
+    expect(trigger.className).toMatch(/h-7/);
+    expect(within(trigger).getByTestId("lead")).toBeInTheDocument();
+  });
+
+  it("opens above a Dialog and stays usable inside its focus trap", async () => {
+    const onChange = vi.fn();
+    render(
+      <Dialog open>
+        <DialogContent>
+          <DialogTitle>Edit</DialogTitle>
+          <DialogDescription>Fields</DialogDescription>
+          <Harness onChange={onChange} />
+        </DialogContent>
+      </Dialog>,
+    );
+    await chooseOption(screen.getByRole("combobox", { name: "Kind" }), "Plan review");
+    expect(onChange).toHaveBeenCalledWith("plan");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });
 

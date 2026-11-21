@@ -7,5 +7,11 @@
     "lint": "pnpm -r lint",
     "build": "pnpm -r build",
     "test": "pnpm -r test"
+  },
+  "//": "pnpm.overrides next>postcss: next 15.5.x pins postcss 8.4.31 exactly (GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849, GHSA-fxqj-rqcc-2cmp, GHSA-qx2v-qp2m-jg93, fixed in 8.5.23); no 15.x release has a fixed pin. Drop it once next ships postcss >= 8.5.23.",
+  "pnpm": {
+    "overrides": {
+      "next>postcss": "8.5.23"
+    }
   }
 }

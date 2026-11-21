@@ -5,6 +5,9 @@ Control-plane API for the Enterprise Agent Platform.
 Upgrading (migrations, deploy order, queue draining, `EAP_APP_VERSION`): see the "Upgrading"
 section of `apps/worker/README.md`.
 
+Code layout and layering rules (controllers, services, data access, dependency providers): see
+`docs/api-layering.md`.
+
 ## Settings (RAG and memory)
 
 All optional; the commented defaults are in `.dev.env.example`. The API parses the knowledge

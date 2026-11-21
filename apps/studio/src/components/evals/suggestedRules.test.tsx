@@ -141,7 +141,7 @@ describe("SuggestedRules", () => {
   });
 
   it("a scorer name already in use gets a numeric suffix", async () => {
-    const original = fetch as unknown as ReturnType<typeof vi.fn>;
+    const original = fetch as unknown as (input: unknown, init?: RequestInit) => Promise<Response>;
     let first = true;
     vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
       if (String(input).endsWith("/scorers") && init?.method === "POST" && first) {

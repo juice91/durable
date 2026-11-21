@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from eap_api.routes import kb_sources
+from eap_api.services import kb_sources
 from eap_schemas.workflows import WorkflowSpec
 
 from .conftest import get_auth_header

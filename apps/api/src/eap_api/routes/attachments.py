@@ -17,7 +17,7 @@ blob, then the row; the retention pass deletes the row first (conditional on `me
 then the blob. A crash can leave a row without a blob (410) or a blob without a row, never a message
 pointing at nothing.
 
-The bytes live in the BlobStore (`app.state.blob_store`, built from EAP_BLOB_* at startup), never in
+The bytes live in the BlobStore (the app's `blob_store`, built from EAP_BLOB_* at startup), never in
 Postgres: an upload is validated (size, type, sniff) and then streamed into the store, the row records
 its `storage_key`; a download streams out of the store.
 - PUT    /conversations/{id}/messages/{message_id}/feedback   {rating: up|down, comment?}: set (replaces).
@@ -31,19 +31,15 @@ user) tied to the run that produced the message; AG-UI thread snapshots return i
 
 from __future__ import annotations
 
-import re
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from eap_api.attachments_shared import (
     attachment_response,
-    attachment_store,
     created_by_for,
     delete_unsent_attachment,
     read_upload,
@@ -51,27 +47,14 @@ from eap_api.attachments_shared import (
 )
 from eap_api.auth import Principal, current_principal, feedback_viewer
 from eap_api.schemas import ErrorDetail
-from eap_run_store import AgUiRunModel
-from eap_run_store.chat_attachments import (
-    FEEDBACK_COMMENT_MAX_CHARS,
-    MessageFeedbackStore,
-    max_attachment_bytes,
-)
+from eap_api.service_deps.knowledge import AttachmentServiceDep
+from eap_api.services.attachments import FEEDBACK_COMMENT_MAX_CHARS, max_attachment_bytes
 
 router = APIRouter(
     tags=["attachments"],
     responses={401: {"model": ErrorDetail}, 404: {"model": ErrorDetail}},
 )
 PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-_MESSAGE_ID = re.compile(r"^(?P<prefix>.+)-m(?P<n>\d+)$")
-
-
-def feedback_store(request: Request) -> MessageFeedbackStore:
-    store = getattr(request.app.state, "message_feedback_store", None)
-    if store is None:
-        store = request.app.state.message_feedback_store = MessageFeedbackStore(request.app.state.database_engine)
-    return store
 
 
 @router.post(
@@ -85,10 +68,10 @@ async def upload_attachment(request: Request, principal: PrincipalDep, file: Upl
 
 
 @router.get("/attachments/{attachment_id}", responses={410: {"description": "the blob is gone"}})
-async def get_attachment(attachment_id: str, request: Request, principal: PrincipalDep) -> Response:
-    meta = await run_in_threadpool(attachment_store(request).get, principal.tenant_id, attachment_id)
-    if meta is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Attachment not found")
+async def get_attachment(
+    attachment_id: str, request: Request, principal: PrincipalDep, service: AttachmentServiceDep
+) -> Response:
+    meta = await run_in_threadpool(service.get_attachment, principal.tenant_id, attachment_id)
     return await attachment_response(request, meta)
 
 
@@ -113,82 +96,30 @@ class FeedbackBody(BaseModel):
     comment: str | None = Field(default=None, max_length=FEEDBACK_COMMENT_MAX_CHARS)
 
 
-def _turn_for_message(request: Request, tenant_id: str, conversation_id: str, message_id: str) -> str:
-    """The native run id of the turn whose assistant message `message_id` is (404 otherwise)."""
-    run_store, _ = request.app.state.run_stores
-    if run_store.get_conversation(tenant_id, conversation_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    found = _MESSAGE_ID.match(message_id)
-    if found is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found")
-    prefix = found.group("prefix")
-    turns = run_store.list_turns(tenant_id, conversation_id)
-    ids = [str(t["id"]) for t in turns]
-    if prefix in ids:
-        return prefix
-    with Session(request.app.state.database_engine) as session:
-        row = session.execute(
-            select(AgUiRunModel.run_id).where(
-                AgUiRunModel.tenant_id == tenant_id,
-                AgUiRunModel.external_run_id == prefix,
-                AgUiRunModel.run_id.in_(ids or [""]),
-            )
-        ).first()
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Message not found")
-    return str(row[0])
-
-
 @router.put("/conversations/{conversation_id}/messages/{message_id}/feedback")
 async def put_feedback(
-    conversation_id: str, message_id: str, body: FeedbackBody, request: Request, principal: PrincipalDep
+    conversation_id: str, message_id: str, body: FeedbackBody, principal: PrincipalDep, service: AttachmentServiceDep
 ) -> JSONResponse:
-    def run() -> dict[str, Any]:
-        run_id = _turn_for_message(request, principal.tenant_id, conversation_id, message_id)
-        comment = (body.comment or "").strip() or None
-        record = feedback_store(request).set(
-            principal.tenant_id, run_id, message_id, rating=body.rating, comment=comment,
-            created_by=principal.user_id,
+    record = await run_in_threadpool(
+        lambda: service.set_feedback(
+            principal.tenant_id, principal.user_id, conversation_id, message_id,
+            rating=body.rating, comment=body.comment,
         )
-        return record.as_json()
-
-    return JSONResponse(content=await run_in_threadpool(run))
+    )
+    return JSONResponse(content=record)
 
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}/feedback", status_code=204)
 async def delete_feedback(
-    conversation_id: str, message_id: str, request: Request, principal: PrincipalDep
+    conversation_id: str, message_id: str, principal: PrincipalDep, service: AttachmentServiceDep
 ) -> Response:
-    def run() -> None:
-        _turn_for_message(request, principal.tenant_id, conversation_id, message_id)
-        # Idempotent: deleting feedback that does not exist writes nothing.
-        feedback_store(request).delete(principal.tenant_id, message_id, created_by=principal.user_id)
-
-    await run_in_threadpool(run)
+    await run_in_threadpool(service.clear_feedback, principal.tenant_id, principal.user_id, conversation_id, message_id)
     return Response(status_code=204)
 
 
-def conversation_feedback(request: Request, tenant_id: str, user_id: str, conversation_id: str) -> dict[str, Any]:
-    """{message_id: {rating, comment, updated_at}} of one user on a conversation (shared with the AG-UI
-    thread view)."""
-    run_store, _ = request.app.state.run_stores
-    ids = [str(t["id"]) for t in run_store.list_turns(tenant_id, conversation_id)]
-    rows = feedback_store(request).for_runs(tenant_id, ids, created_by=user_id)
-    return {
-        r.message_id: {"rating": r.rating, "comment": r.comment, "updated_at": r.updated_at.isoformat()}
-        for r in rows
-    }
-
-
 @router.get("/conversations/{conversation_id}/feedback")
-async def list_feedback(conversation_id: str, request: Request, principal: PrincipalDep) -> JSONResponse:
-    def run() -> dict[str, Any]:
-        run_store, _ = request.app.state.run_stores
-        if run_store.get_conversation(principal.tenant_id, conversation_id) is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-        viewer = feedback_viewer(principal)
-        if viewer is None:
-            return {"feedback": {}}
-        return {"feedback": conversation_feedback(request, principal.tenant_id, viewer, conversation_id)}
-
-    return JSONResponse(content=await run_in_threadpool(run))
+async def list_feedback(conversation_id: str, principal: PrincipalDep, service: AttachmentServiceDep) -> JSONResponse:
+    content: dict[str, Any] = await run_in_threadpool(
+        service.list_feedback, principal.tenant_id, conversation_id, feedback_viewer(principal)
+    )
+    return JSONResponse(content=content)

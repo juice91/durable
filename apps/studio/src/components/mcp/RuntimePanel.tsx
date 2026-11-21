@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { ApiError } from "@/lib/api";
 import { listSecrets, secretRef } from "@/lib/secrets";
 import { mcpServers, runtimeActionsFor, type McpRuntime, type McpRuntimeAction, type McpRuntimeState } from "@/lib/mcpServers";
+import { Select } from "@/components/ui/Select";
 
 export const RUNTIME_STATE_LABEL: Record<McpRuntimeState, string> = {
   pending: "Pending",
@@ -99,15 +100,15 @@ function EnvList({ serverId, env, onChanged }: { serverId: string; env: { name: 
             </div>
             {editing === variable.name ? (
               <div className="flex min-w-0 flex-wrap items-center gap-2">
-                <select
+                <Select
                   aria-label={`Secret for ${variable.name}`}
                   value={choice}
-                  onChange={(event) => setChoice(event.target.value)}
+                  onValueChange={(v) => setChoice(v)}
                   className="rounded-md border border-input bg-background px-2 py-1 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <option value="">Choose a secret…</option>
                   {names.map((storedName) => <option key={storedName} value={storedName}>{storedName}</option>)}
-                </select>
+                </Select>
                 <Button size="sm" variant="primary" aria-label={`Save ${variable.name}`} disabled={!choice || saving} onClick={() => void save(variable.name)}>{saving ? "Saving…" : "Save"}</Button>
                 <Button size="sm" disabled={saving} onClick={() => setEditing(null)}>Cancel</Button>
                 <span className="basis-full text-caption text-muted-foreground">Saving restarts the server.</span>
@@ -260,14 +261,14 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
           <h2 id="runtime-logs-title" className="text-title font-semibold text-foreground">Logs</h2>
           <div className="flex flex-wrap items-center gap-2">
             <label htmlFor="runtime-log-tail" className="text-label text-muted-foreground">Lines</label>
-            <select
+            <Select
               id="runtime-log-tail"
-              value={tail}
-              onChange={(event) => setTail(Number(event.target.value))}
+              value={String(tail)}
+              onValueChange={(v) => setTail(Number(v))}
               className="rounded-md border border-input bg-background px-2 py-1 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {TAILS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
+            </Select>
             <Button size="sm" disabled={logsLoading} onClick={() => void loadLogs()}>Refresh</Button>
           </div>
         </div>

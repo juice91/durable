@@ -5,7 +5,8 @@ import re
 from typing import Annotated, Any, Literal
 
 from eap_observability import bind_log_context
-from eap_run_store import ApiKeyStore, looks_like_api_key, normalize_origin
+from eap_run_store import looks_like_api_key, normalize_origin
+from eap_api.deps import get_api_key_store
 from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -197,14 +198,6 @@ class AgUiPrincipal(BaseModel):
         if self.is_unrestricted:
             return True
         return self.workflow_ids is not None and str(workflow_id) in self.workflow_ids
-
-
-def get_api_key_store(request: Request) -> ApiKeyStore:
-    """The ApiKeyStore on the app's database engine, made once per app."""
-    store = getattr(request.app.state, "api_key_store", None)
-    if store is None:
-        store = request.app.state.api_key_store = ApiKeyStore(request.app.state.database_engine)
-    return store
 
 
 def _unauthorized(detail: str) -> HTTPException:

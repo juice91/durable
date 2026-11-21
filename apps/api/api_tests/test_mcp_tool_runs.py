@@ -225,12 +225,12 @@ def test_header_secret_is_sent_but_never_stored_in_the_run(app_client, tenant_he
 def test_mcp_tool_run_marks_ledger_needs_attention_when_the_call_raises_and_stores_no_exception_text(
     app_client, tenant_headers, dev_allow_loopback, monkeypatch
 ):
-    from eap_api.routes import mcp_servers
+    from eap_api.services import mcp_connection
 
     async def explode(*args, **kwargs):
         raise RuntimeError("transport blew up https://x/?token=SECRET-MARKER")
 
-    monkeypatch.setattr(mcp_servers, "call_server_tool", explode)
+    monkeypatch.setattr(mcp_connection, "call_server_tool", explode)
     client, _ = app_client
     _, h = tenant_headers()
     with hard_timeout(60), ToolServer() as mcp:
@@ -253,8 +253,6 @@ def test_mcp_tool_run_marks_ledger_needs_attention_when_the_call_raises_and_stor
 def test_mcp_tool_run_row_never_stays_running_when_the_event_log_fails(
     app_client, tenant_headers, dev_allow_loopback, monkeypatch
 ):
-    from eap_api.routes import mcp_servers
-
     client, app = app_client
     _, event_log = app.state.run_stores
     original = event_log.append

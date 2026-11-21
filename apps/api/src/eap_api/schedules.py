@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
-from eap_api.routes.workflow_runs import MAX_WORKFLOW_INPUT_BYTES, input_schema_errors, non_finite_errors
+from eap_api.services.workflow_inputs import input_schema_errors, non_finite_errors
+from eap_api.services.workflow_runs import MAX_WORKFLOW_INPUT_BYTES
 
 
 def check_cron(cron: str) -> bool:

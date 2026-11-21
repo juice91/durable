@@ -13,12 +13,13 @@ import uuid
 from typing import Any
 
 from eap_observability import bind_log_context
-from eap_run_store import ApiKeyStore, looks_like_api_key
+from eap_run_store import looks_like_api_key
 from eap_run_store.run_tokens import looks_like_run_token, signing_key, verify_run_token
 from eap_run_store.store import TERMINAL_RUN_STATUSES
 from sqlalchemy import text
 from starlette.concurrency import run_in_threadpool
 
+from eap_api.deps import api_key_store_of, database_engine_of
 from eap_api.auth import (
     DEV_AUTH_DISABLED_DETAIL,
     INVALID_API_KEY_DETAIL,
@@ -69,7 +70,7 @@ async def _authenticate_run_token(app: Any, credential: str) -> AgUiPrincipal:
         raise McpAuthError(401, INVALID_API_KEY_DETAIL) from None
 
     def lookup() -> Any:
-        with app.state.database_engine.connect() as conn:
+        with database_engine_of(app).connect() as conn:
             return conn.execute(
                 text(
                     "SELECT r.status, a.slug, a.builtin FROM runs r JOIN agents a ON a.id = r.agent_id "
@@ -99,9 +100,7 @@ async def authenticate(app: Any, authorization: str | None, origin: str | None) 
     if scheme.lower() == "bearer" and looks_like_run_token(credential):
         return await _authenticate_run_token(app, credential)
     if scheme.lower() == "bearer" and looks_like_api_key(credential):
-        store = getattr(app.state, "api_key_store", None)
-        if store is None:
-            store = app.state.api_key_store = ApiKeyStore(app.state.database_engine)
+        store = api_key_store_of(app)
         record = await run_in_threadpool(store.authenticate, credential, touch=False)
         if record is None:
             raise McpAuthError(401, INVALID_API_KEY_DETAIL)

@@ -7,6 +7,7 @@ import { decideToolApproval, findApproval, listApprovals, refreshPendingApproval
 import { getRun } from "@/lib/runs";
 import { routes } from "@/lib/routes";
 import ApprovalsPage from "@/app/approvals/page";
+import { findSelectOption } from "@/test/select";
 
 vi.mock("next/navigation", async () => (await import("@/test/nextRouterMock")).navigationModule);
 
@@ -95,7 +96,7 @@ describe("Approvals inbox", () => {
     await act(() => nextRouter.settle());
     expect(nextRouter.url).toBe(routes.approvals({ kind: "tool" }));
     await waitFor(() => expect(vi.mocked(listApprovals).mock.calls.at(-1)?.[0]).toEqual({ status: "pending", kind: "tool", agent_id: null }));
-    await screen.findByRole("option", { name: "Support bot" });
+    await findSelectOption("Support bot");
     fireEvent.change(screen.getByTestId("approvals-agent-filter"), { target: { value: AGENT } });
     await act(() => nextRouter.settle());
     expect(nextRouter.url).toBe(routes.approvals({ kind: "tool", agent: AGENT }));

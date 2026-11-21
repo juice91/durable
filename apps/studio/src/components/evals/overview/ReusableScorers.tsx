@@ -15,6 +15,7 @@ import {
   type ReusableScorer,
   type ScorerKind,
 } from "@/lib/scorers";
+import { Select } from "@/components/ui/Select";
 
 const field =
   "rounded-md border border-input bg-surface px-2 py-1.5 text-label text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -125,9 +126,9 @@ export function ReusableScorers() {
         </label>
         <label className="flex flex-col gap-1 text-caption text-muted-foreground">
           Check
-          <select className={field} value={kind} onChange={(e) => setKind(e.target.value as ScorerKind)}>
+          <Select className={field} value={kind} onValueChange={(v) => setKind(v as ScorerKind)}>
             {SCORER_KINDS.map((k) => <option key={k} value={k}>{SCORER_KIND_LABELS[k]}</option>)}
-          </select>
+          </Select>
         </label>
         {primaryField ? (
           <label className="flex flex-col gap-1 text-caption text-muted-foreground">

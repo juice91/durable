@@ -16,6 +16,7 @@ import {
   type BreakdownSort,
   type MetricsFilters,
 } from "@/lib/metrics";
+import { Select } from "@/components/ui/Select";
 
 export interface BreakdownTableProps {
   title: string;
@@ -115,16 +116,16 @@ export function BreakdownTable({
         {onSortChange && (
           <label htmlFor={sortId} className="flex items-center gap-2 text-xs text-muted-foreground">
             Top by
-            <select
+            <Select
               id={sortId}
               value={sort}
-              onChange={(e) => onSortChange(e.target.value as BreakdownSort)}
+              onValueChange={(v) => onSortChange(v as BreakdownSort)}
               className="rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {SORT_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
-            </select>
+            </Select>
           </label>
         )}
         {actions}

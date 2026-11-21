@@ -48,6 +48,7 @@ from eap_observability.logcontext import (
     log_context,
     reset_log_context,
 )
+from eap_observability.context import current_trace_context, current_trace_id  # noqa: F401 - re-exported
 from eap_observability.http import install_access_logging, server_request_hook
 from eap_observability.redaction import (
     LOCAL_ONLY_LOG_ATTRIBUTE,
@@ -203,20 +204,6 @@ def dbos_trace_attributes(traceparent: str | None) -> dict[str, Any] | None:
     if not traceparent:
         return None
     return {DBOS_OTEL_CARRIER_ATTRIBUTE: {"traceparent": traceparent}}
-
-
-def current_trace_id() -> str | None:
-    """The active span's 32-hex trace id, or None outside a (recording or propagated) span."""
-    return current_trace_context()[0]
-
-
-def current_trace_context() -> tuple[str | None, str | None]:
-    """(trace_id, W3C traceparent) of the active span, or (None, None) when there is none."""
-    ctx = trace.get_current_span().get_span_context()
-    if not ctx.is_valid:
-        return None, None
-    trace_id = format(ctx.trace_id, "032x")
-    return trace_id, f"00-{trace_id}-{format(ctx.span_id, '016x')}-{int(ctx.trace_flags):02x}"
 
 
 @contextmanager

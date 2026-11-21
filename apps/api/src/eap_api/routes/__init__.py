@@ -11,9 +11,9 @@ from sqlalchemy import func
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
+from eap_api.deps import SessionDep
 from eap_api.auth import Principal, current_principal
 from eap_api.concurrency import IfMatch, etag_responses, read_response, stamp
-from eap_api.database import get_session
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.request_guard import GuardedJsonRoute
 from eap_api.schemas import AgentCreate, AgentUpdate, ErrorDetail, VersionRestore
@@ -46,7 +46,6 @@ log = logging.getLogger("eap_api")
 
 router = APIRouter(route_class=GuardedJsonRoute)
 
-SessionDep = Annotated[Session, Depends(get_session)]
 
 # Tool ids of the Architect's management tools: valid registry ids, but only an agent whose row is
 # `builtin` may list them (the check lives here, on create and patch; the worker re-checks per run).

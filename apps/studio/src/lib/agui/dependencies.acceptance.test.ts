@@ -24,8 +24,8 @@ describe("AGUI.11 exact pins in package.json", () => {
   const deps = { ...pkg.devDependencies, ...pkg.dependencies };
   it.each([
     ["@assistant-ui/react-ag-ui", "0.1.1"],
-    ["@ag-ui/client", "1.0.3"],
-    ["@ag-ui/core", "1.0.3"],
+    ["@ag-ui/client", "1.0.5"],
+    ["@ag-ui/core", "1.0.5"],
   ])("%s is pinned exactly to %s", (name, version) => {
     expect(deps[name]).toBe(version);
   });
@@ -34,8 +34,8 @@ describe("AGUI.11 exact pins in package.json", () => {
 describe("AGUI.11 lockfile resolves one version", () => {
   it.each([
     ["@assistant-ui/react-ag-ui", "0.1.1"],
-    ["@ag-ui/client", "1.0.3"],
-    ["@ag-ui/core", "1.0.3"],
+    ["@ag-ui/client", "1.0.5"],
+    ["@ag-ui/core", "1.0.5"],
   ])("%s resolves to %s", (name, version) => {
     expect(lockVersions(name)).toEqual([version]);
   });

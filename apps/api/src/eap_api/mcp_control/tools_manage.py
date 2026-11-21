@@ -18,7 +18,9 @@ from eap_api.mcp_control.helpers import (
     MAX_WAIT_SECONDS, clip, guard_json, require_agent, require_unrestricted, require_workflow, tenant_run, uid,
     wait_for_run,
 )
-from eap_api.mcp_control.routing import DB, McpToolError, call, call_with_revision, revision_reader, translate
+from eap_api.mcp_control.routing import (
+    DB, McpToolError, call, call_service, call_with_revision, revision_reader, translate,
+)
 from eap_api.mcp_control.server import current_ctx
 from eap_run_store.store import TERMINAL_RUN_STATUSES
 
@@ -88,7 +90,8 @@ def register_tools(tool: Any) -> None:
         pending_approvals}. A run that waits for approval is not done: decide each pending approval with
         approvals.decide, then read the finished run at pydanticos://runs/{run_id}/report (or send the next
         message on the same conversation once it is done). `done` false otherwise means the run goes on."""
-        from eap_api.routes.approvals import approval_json, get_approval_store
+        from eap_api.deps import get_approval_store
+        from eap_api.services.approvals import approval_json
         from eap_api.routes.conversations import create_conversation, start_turn
         from eap_api.schemas import ConversationCreate, TurnCreate
 
@@ -114,7 +117,7 @@ def register_tools(tool: Any) -> None:
         terminal = run["status"] in TERMINAL_RUN_STATUSES
         pending: list[dict[str, Any]] = []
         if run.get("display_status") == "waiting_approval":
-            store = get_approval_store(ctx.request, ctx.stores)
+            store = get_approval_store(ctx.request)
             rows, _ = store.list(ctx.tenant_id, status="pending", kind=None, agent_id=str(agent_id), cursor=None, limit=100)
             for row in rows:
                 if str(row["run_id"]) == str(run_id):
@@ -132,31 +135,34 @@ def register_tools(tool: Any) -> None:
     @tool("workflow.save_draft", manage=True)
     async def workflow_save_draft(spec: dict[str, Any], workflow_id: str | None = None) -> dict[str, Any]:
         """Create a workflow from `spec` (a WorkflowSpec), or replace the draft of `workflow_id`."""
-        from eap_api.routes.workflows import create_workflow, patch_workflow
+        from eap_api.services.workflows import WorkflowService
         from eap_api.workflows.schemas import WorkflowCreate, WorkflowUpdate
 
         ctx = current_ctx()
         guard_json(spec, "spec")
         if workflow_id is None:
             require_unrestricted(ctx, "create workflows")
-            return await call(ctx, create_workflow, request=_model(WorkflowCreate, spec=spec), principal=ctx.actor, db=DB)
+            created = _model(WorkflowCreate, spec=spec)
+            return await call(ctx, lambda db: WorkflowService(db).create(ctx.tenant_id, created.spec)[0], db=DB)
         require_workflow(ctx, workflow_id)
         wid = uid(workflow_id, "workflow_id")
         update = _model(WorkflowUpdate, spec=spec)
         return await call_with_revision(
             ctx, revision_reader(ctx, "workflows", str(wid)),
-            lambda pre: call(ctx, patch_workflow, workflow_id=wid, request=update, principal=ctx.actor, db=DB, pre=pre),
+            lambda pre: call(
+                ctx, lambda db: WorkflowService(db).replace_draft(ctx.tenant_id, str(wid), update.spec, pre.expected)[0],
+                db=DB),
             "workflow")
 
     @tool("workflow.publish", manage=True)
     async def workflow_publish(workflow_id: str) -> dict[str, Any]:
         """Publish the workflow's draft as the next immutable version (409 when it equals the latest)."""
-        from eap_api.routes.workflows import publish_workflow_version
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, publish_workflow_version, workflow_id=uid(workflow_id, "workflow_id"),
-                          principal=ctx.actor, db=DB)
+        wid = str(uid(workflow_id, "workflow_id"))
+        return await call(ctx, lambda db: WorkflowService(db).publish(ctx.tenant_id, ctx.actor.user_id, wid)[0], db=DB)
 
     @tool("workflow.archive", manage=True)
     async def workflow_archive(workflow_id: str, archived: bool = True, force: bool = False) -> dict[str, Any]:
@@ -164,36 +170,46 @@ def register_tools(tool: Any) -> None:
         pauses its schedules and is refused (409 runs_active) while runs are queued or running, unless
         force=true; an archived workflow refuses new runs and schedules (workflow_archived). Unarchiving
         does not resume schedules. Returns the workflow with `archived`, `archived_at`, `paused_schedules`."""
-        from eap_api.routes.workflows import WorkflowArchive, archive_workflow
+        from eap_api.services.workflows import WorkflowService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        return await call(ctx, archive_workflow, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor,
-                          db=DB, body=WorkflowArchive(archived=archived, force=force))
+        wid = str(uid(workflow_id, "workflow_id"))
+        return await call(ctx, lambda db: WorkflowService(db).archive(ctx.tenant_id, wid, archived, force)[0], db=DB)
 
     @tool("workflow.run.start", manage=True)
     async def workflow_run_start(workflow_id: str, input: dict[str, Any], version: int | None = None,
                                  run_id: str | None = None) -> dict[str, Any]:
         """Start a run of a published workflow version (the latest unless `version`). `run_id` makes a retry
         idempotent. Returns {run_id, status, ...}; follow it with workflow.run.wait and workflow.run.result."""
-        from eap_api.routes.workflow_runs import WorkflowRunCreate, start_workflow_run
+        from eap_api.routes.workflow_runs import WorkflowRunCreate
+        from eap_api.services.workflow_runs import WorkflowRunService
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
         guard_json(input, "input", max_bytes=32 * 1024)
         body = _model(WorkflowRunCreate, input=input, version=version, run_id=uid(run_id, "run_id") if run_id else None)
-        return await call(ctx, start_workflow_run, workflow_id=uid(workflow_id, "workflow_id"), principal=ctx.actor,
-                          body=body, db=DB, stores=ctx.stores, launcher=ctx.launcher)
+        wid = uid(workflow_id, "workflow_id")
+        return await call(
+            ctx, lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher).start(
+                ctx.tenant_id, wid, body.input, version=body.version, run_id=body.run_id,
+                rerun_of=body.rerun_of, pause_after_each_step=body.pause_after_each_step),
+            db=DB)
 
     @tool("workflow.run.cancel", manage=True)
     async def workflow_run_cancel(run_id: str) -> dict[str, Any]:
         """Cancel a workflow run and its whole tree (idempotent)."""
-        from eap_api.routes.workflow_runs import cancel_run
+        from eap_api.schemas import RunCancelResponse
+        from eap_api.services.workflow_runs import WorkflowRunService
 
         ctx = current_ctx()
         await tenant_run(ctx, run_id, kind="workflow")
-        return await call(ctx, cancel_run, run_id=uid(run_id, "run_id"), principal=ctx.actor, stores=ctx.stores,
-                          launcher=ctx.launcher)
+        rid = uid(run_id, "run_id")
+        return await call(
+            ctx, lambda db: RunCancelResponse(
+                **WorkflowRunService(db, *ctx.stores, ctx.launcher).cancel(ctx.tenant_id, ctx.actor.user_id, rid)
+            ).model_dump(),
+            db=DB)
 
     @tool("workflow.schedule.set", manage=True)
     async def workflow_schedule_set(workflow_id: str, name: str | None = None, cron: str | None = None,
@@ -201,20 +217,25 @@ def register_tools(tool: Any) -> None:
                                     schedule_id: str | None = None, active: bool | None = None) -> dict[str, Any]:
         """Create a schedule (name and cron required; it runs the latest version with `input`), or with
         `schedule_id` change that schedule's fields or pause/resume it with `active`."""
-        from eap_api.routes.schedules import create_schedule, get_schedule_store, update_schedule
+        from eap_api.deps import get_schedule_store
+        from eap_api.services.schedules import ScheduleService
         from eap_schemas.workflows import WorkflowScheduleSpec, WorkflowScheduleUpdate
 
         ctx = current_ctx()
         require_workflow(ctx, workflow_id)
-        store = get_schedule_store(ctx.request, ctx.stores)
+        store = get_schedule_store(ctx.request)
         if input is not None:
             guard_json(input, "input", max_bytes=32 * 1024)
         if schedule_id is None:
             if name is None or cron is None:
                 raise McpToolError("invalid", "name and cron are required to create a schedule")
             body = _model(WorkflowScheduleSpec, name=name, cron=cron, timezone=timezone, input=input or {})
-            return await call(ctx, create_schedule, workflow_id=uid(workflow_id, "workflow_id"), body=body,
-                              principal=ctx.actor, db=DB, store=store)
+            wid = str(uid(workflow_id, "workflow_id"))
+            return await call(
+                ctx, lambda db: ScheduleService(db, store).create(
+                    ctx.tenant_id, wid, name=body.name, cron=body.cron, timezone_name=body.timezone,
+                    input=body.input)[0],
+                db=DB)
         given = {k: v for k, v in (("name", name), ("cron", cron), ("input", input), ("active", active)) if v is not None}
         if timezone != "UTC":
             given["timezone"] = timezone
@@ -230,8 +251,10 @@ def register_tools(tool: Any) -> None:
 
         return await call_with_revision(
             ctx, read_schedule_revision,
-            lambda pre: call(ctx, update_schedule, schedule_id=sid, body=update, principal=ctx.actor, db=DB,
-                             store=store, pre=pre),
+            lambda pre: call(
+                ctx, lambda db: ScheduleService(db, store).update(
+                    ctx.tenant_id, sid, update.model_dump(exclude_unset=True), pre.expected)[0],
+                db=DB),
             "schedule")
 
     # ------------------------------------------------------------------------------- knowledge
@@ -241,14 +264,17 @@ def register_tools(tool: Any) -> None:
                         chunking: dict[str, Any] | None = None) -> dict[str, Any]:
         """Create a knowledge base. `embedding_model` must be on the platform's allowlist (kb.list shows the
         models existing bases use)."""
-        from eap_api.routes.knowledge import create_knowledge_base, get_knowledge_store
         from eap_api.schemas import KnowledgeBaseCreate
+        from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
         body = _model(KnowledgeBaseCreate, name=name, embedding_model=embedding_model, description=description,
                       chunking=chunking)
-        return await call(ctx, create_knowledge_base, body=body, principal=ctx.actor,
-                          store=get_knowledge_store(ctx.request))
+        return await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request, ctx.launcher),
+            lambda s: s.create_knowledge_base(
+                ctx.tenant_id, name=body.name, description=body.description,
+                embedding_model=body.embedding_model, chunking=body.chunking_config()))
 
     @tool("kb.source.create", manage=True)
     async def kb_source_create(kb_id: str, connection_id: str, name: str, provider: str,
@@ -256,7 +282,8 @@ def register_tools(tool: Any) -> None:
                                enabled: bool = True) -> dict[str, Any]:
         """Add a data source to a knowledge base over a connection (provider = the adapter name, config as that
         adapter validates it)."""
-        from eap_api.routes.kb_sources import create_source
+        from eap_api.service_deps.knowledge import kb_source_service_of
+        from eap_api.services.kb_sources import SourceCreate, parse_payload
 
         ctx = current_ctx()
         guard_json(config or {}, "config", max_bytes=64 * 1024, max_depth=6)
@@ -264,8 +291,10 @@ def register_tools(tool: Any) -> None:
                                    "config": config or {}, "enabled": enabled}
         if kind is not None:
             payload["kind"] = kind
-        return await call(ctx, create_source, kb_id=str(uid(kb_id, "kb_id")), request=ctx.request,
-                          principal=ctx.actor, payload=payload)
+        view, _revision = await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request, ctx.launcher),
+            lambda s: s.create_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), parse_payload(payload, SourceCreate)))
+        return view
 
     @tool("kb.source.sync", manage=True)
     async def kb_source_sync(kb_id: str, source_id: str, mode: Literal["targeted", "incremental", "full"],
@@ -273,14 +302,17 @@ def register_tools(tool: Any) -> None:
                              run_id: str | None = None) -> dict[str, Any]:
         """Start a sync of a data source (the shared launcher: eap_run_store.kb_source_launch.launch_sync).
         Read progress with kb.source.syncs."""
-        from eap_api.routes.kb_sources import start_sync
+        from eap_api.service_deps.knowledge import kb_source_service_of
+        from eap_api.services.kb_sources import SyncCreate, parse_payload
 
         ctx = current_ctx()
         payload: dict[str, Any] = {"mode": mode, "part_numbers": part_numbers or [], "restart": restart}
         if run_id:
             payload["run_id"] = run_id
-        return await call(ctx, start_sync, kb_id=str(uid(kb_id, "kb_id")), source_id=str(uid(source_id, "source_id")),
-                          request=ctx.request, principal=ctx.actor, launcher=ctx.launcher, payload=payload)
+        return await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request, ctx.launcher),
+            lambda s: s.start_sync(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
+                                   parse_payload(payload, SyncCreate), ctx.actor.user_id))
 
     # ------------------------------------------------------------------------------- settings and MCP servers
 
@@ -290,7 +322,7 @@ def register_tools(tool: Any) -> None:
         """Register a connection to an external provider (`config.provider` names the adapter). Credentials are
         `secret:<name>` references to secrets stored through Studio; a value is refused, and no tool stores
         or reads a secret."""
-        from eap_api.routes.connections import create_connection
+        from eap_api.service_deps.connections import build_connection_service
 
         ctx = current_ctx()
         guard_json(config, "config", max_bytes=64 * 1024, max_depth=6)
@@ -299,7 +331,7 @@ def register_tools(tool: Any) -> None:
         for key, value in (("kind", kind), ("base_url", base_url)):
             if value is not None:
                 payload[key] = value
-        return await call(ctx, create_connection, request=ctx.request, principal=ctx.actor, payload=payload)
+        return await call(ctx, build_connection_service(ctx.engine).create, tenant_id=ctx.tenant_id, payload=payload)
 
     @tool("mcp.server.install", manage=True)
     async def mcp_server_install(catalog_name: str, package_index: int | None = None, remote_index: int | None = None,
@@ -308,7 +340,6 @@ def register_tools(tool: Any) -> None:
         once), a remote registers as an external one. `env` carries variables the entry declares; a variable
         the entry marks secret must be a `secret:<name>` reference (values are refused, headers are not
         accepted here): store the secret in Studio first."""
-        from eap_api.routes.mcp_servers import install_from_catalog
         from eap_run_store.mcp_catalog import CatalogStore
 
         ctx = current_ctx()
@@ -331,21 +362,22 @@ def register_tools(tool: Any) -> None:
         if env:
             payload["env"] = env
         from eap_api.mcp_servers.managed import get_mcp_runtime
-        from eap_api.routes.mcp_servers import get_outbound_policy
+        from eap_api.service_deps.connections import build_mcp_server_service, get_outbound_policy
 
-        return await call(ctx, install_from_catalog, request=ctx.request, principal=ctx.actor, db=DB,
-                          policy=_override(ctx, get_outbound_policy), runtime=_override(ctx, get_mcp_runtime),
-                          payload=payload)
+        policy, runtime = _override(ctx, get_outbound_policy), _override(ctx, get_mcp_runtime)
+        return await call(ctx, lambda db: build_mcp_server_service(db, ctx.engine, policy, runtime)
+                          .install_from_catalog(ctx.tenant_id, payload), db=DB)
 
     @tool("mcp.server.runtime", manage=True)
     async def mcp_server_runtime(server_id: str, action: Literal["start", "stop", "restart"]) -> dict[str, Any]:
         """Start, stop or restart a managed MCP server's pod; returns the runtime state."""
         from eap_api.mcp_servers.managed import get_mcp_runtime
-        from eap_api.routes.mcp_servers import control_runtime
+        from eap_api.service_deps.connections import build_mcp_runtime_service
 
         ctx = current_ctx()
-        return await call(ctx, control_runtime, server_id=uid(server_id, "server_id"), action=action,
-                          principal=ctx.actor, db=DB, runtime=_override(ctx, get_mcp_runtime))
+        runtime = _override(ctx, get_mcp_runtime)
+        return await call(ctx, lambda db: build_mcp_runtime_service(db, ctx.engine, runtime)
+                          .control(ctx.tenant_id, uid(server_id, "server_id"), action), db=DB)
 
     # ------------------------------------------------------------------------------- approvals
 
@@ -356,24 +388,35 @@ def register_tools(tool: Any) -> None:
         """Decide a pending approval: `kind` tool (key = tool_call_id) or step (key = step_id of a workflow
         approval or input step; an input step takes `resume_data` instead of a bare approve). A denial's
         comment reaches the model. Returns {decision, decided_by, notified, ...}; 409 when already decided."""
-        from eap_api.routes.approvals import ToolApprovalDecision, approve_tool_call, deny_tool_call
-        from eap_api.routes.workflow_runs import (
-            ApprovalDecision, ResumeSubmission, approve_step, reject_step, resume_step,
-        )
+        from eap_api.deps import get_approval_store
+        from eap_api.routes.approvals import ToolApprovalDecision
+        from eap_api.services.approvals import ApprovalService
+        from eap_api.routes.workflow_runs import ApprovalDecision, ResumeSubmission
+        from eap_api.services.workflow_runs import WorkflowRunService
 
         ctx = current_ctx()
         await tenant_run(ctx, run_id)
         rid = uid(run_id, "run_id")
-        common = {"run_id": rid, "principal": ctx.actor, "stores": ctx.stores, "launcher": ctx.launcher}
         if kind == "tool":
             body = _model(ToolApprovalDecision, comment=comment)
-            fn = approve_tool_call if decision == "approve" else deny_tool_call
-            return await call(ctx, fn, tool_call_id=key, body=body, **common)
+            service = ApprovalService(get_approval_store(ctx.request), ctx.stores[1], ctx.launcher)
+            return await call(
+                ctx, lambda: service.decide_tool(
+                    ctx.tenant_id, ctx.actor.user_id, rid, key, "approved" if decision == "approve" else "denied",
+                    body.comment))
         if resume_data is not None:
             guard_json(resume_data, "resume_data", max_bytes=32 * 1024)
-            return await call(ctx, resume_step, step_id=key, body=_model(ResumeSubmission, data=resume_data, comment=comment), **common)
-        fn = approve_step if decision == "approve" else reject_step
-        return await call(ctx, fn, step_id=key, body=_model(ApprovalDecision, comment=comment), **common)
+            answer = _model(ResumeSubmission, data=resume_data, comment=comment)
+            return await call(
+                ctx, lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher).resume_step(
+                    ctx.tenant_id, ctx.actor.user_id, rid, key, answer.data, answer.comment),
+                db=DB)
+        answer = _model(ApprovalDecision, comment=comment)
+        return await call(
+            ctx, lambda db: WorkflowRunService(db, *ctx.stores, ctx.launcher).decide_step(
+                ctx.tenant_id, ctx.actor.user_id, rid, key, "approved" if decision == "approve" else "rejected",
+                answer.comment),
+            db=DB)
 
 
 def _override(ctx: Any, dependency: Any) -> Any:

@@ -14,6 +14,7 @@ import { FrameHarness, mockMatchMedia, setWindowWidth, TEST_WIDE_WIDTH } from "@
 import { EditorTab } from "@/components/agentPage/EditorTab";
 import { TestsTab } from "./TestsTab";
 import { AGENT, RUN_A, RUN_B, SUITE, callsTo, installFakeApi, resultOf, runOf, type FakeApi } from "./evalsFakeApi";
+import { optionsOf } from "@/test/select";
 
 vi.mock("next/navigation", async () => (await import("@/test/nextRouterMock")).navigationModule);
 
@@ -102,7 +103,7 @@ describe("run history", () => {
     fake.state.results[RUN_B] = [resultOf()];
     renderAt(routes.agentTests(AGENT, { suite: SUITE, run: RUN_B }));
     const select = await screen.findByTestId("eval-compare-with");
-    expect(within(select).getAllByRole("option")).toHaveLength(2);
+    expect(optionsOf(select)).toHaveLength(2);
     expect(screen.getByTestId("eval-compare-go")).toBeDisabled();
     fireEvent.change(select, { target: { value: RUN_A } });
     fireEvent.click(screen.getByTestId("eval-compare-go"));

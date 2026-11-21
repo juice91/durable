@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ApiError } from "@/lib/api";
 import { mcpCatalog, networkSummary, type CatalogEntry, type CatalogSource } from "@/lib/mcpCatalog";
+import { Select } from "@/components/ui/Select";
 
 const PAGE_SIZE = 30;
 
@@ -96,16 +97,16 @@ export function CatalogList({ onOpen, debounceMs = 300, autoFocusSearch = false 
   return (
     <div className="flex min-w-0 flex-col gap-4" data-testid="mcp-catalog">
       <div className="flex min-w-0 flex-wrap gap-2">
-      <select
+      <Select
         aria-label="Source"
         value={source}
-        onChange={(event) => setSource(event.target.value as SourceFilter)}
+        onValueChange={(v) => setSource(v as SourceFilter)}
         className="rounded-md border border-input bg-background px-3 py-2 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <option value="toolhive">ToolHive</option>
         <option value="official">Official registry</option>
         <option value="all">All sources</option>
-      </select>
+      </Select>
       <input
         type="search"
         autoFocus={autoFocusSearch}

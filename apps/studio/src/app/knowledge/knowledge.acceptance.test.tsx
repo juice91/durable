@@ -37,6 +37,7 @@ import { checkUploadFile, DEFAULT_MAX_DOCUMENT_BYTES, documentPutBytes, document
 import { resetPaletteCache } from "@/components/palette/paletteData";
 import KnowledgePage from "./page";
 import KnowledgeBasePage from "./[id]/page";
+import { optionsOf } from "@/test/select";
 
 const T0 = "2026-11-14T10:00:00Z";
 
@@ -200,7 +201,7 @@ describe("knowledge bases: create with the model picker", () => {
 
   it("offers exactly the allowlisted models: the concrete one with its dims, the wildcard as 'any model'", async () => {
     const { picker } = await openCreate();
-    expect(Array.from(picker.options).map((o) => [o.value, o.textContent])).toEqual([
+    expect(optionsOf(picker).map((o) => [o.value, o.textContent])).toEqual([
       ["", "Choose a model"],
       ["test:hash", "test:hash (1536 dims)"],
       ["litellm:*", "litellm: any model (1024 dims)"],

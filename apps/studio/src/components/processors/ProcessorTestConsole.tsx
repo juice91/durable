@@ -18,6 +18,7 @@ import {
   type ProcessorTestResult,
   type ProcessorType,
 } from "@/lib/processors";
+import { Select } from "@/components/ui/Select";
 
 const inputClass = "w-full min-w-0 rounded-md border border-input bg-surface px-3 py-2 text-label text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -184,9 +185,9 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
       <form onSubmit={(event) => void run(event)} aria-label="Processor test console" className="min-w-0 space-y-4">
         <div className="min-w-0">
           <label htmlFor="console-phase" className="block text-label font-medium text-foreground">Phase</label>
-          <select id="console-phase" className={inputClass} value={phase} onChange={(event) => changePhase(event.target.value as ProcessorPhase)}>
+          <Select id="console-phase" className={inputClass} value={phase} onValueChange={(v) => changePhase(v as ProcessorPhase)}>
             {PROCESSOR_PHASES.map((item) => <option key={item} value={item}>{PROCESSOR_PHASE_LABELS[item]}</option>)}
-          </select>
+          </Select>
           <p className="mt-1 text-caption text-muted-foreground">Only the types that run in this phase are offered. The test runs the same checks in every phase.</p>
         </div>
         <ol className="space-y-3">
@@ -195,18 +196,18 @@ export function ProcessorTestConsole({ catalog, initialType }: { catalog: Proces
               <div className="mb-3 space-y-2">
                 <div className="min-w-0">
                   <label htmlFor={`console-type-${step.key}`} className="block text-label font-medium text-foreground">Processor {index + 1}</label>
-                  <select
+                  <Select
                     id={`console-type-${step.key}`}
                     className={inputClass}
                     value={step.type}
-                    onChange={(event) => {
-                      const type = event.target.value as ProcessorType;
+                    onValueChange={(v) => {
+                      const type = v as ProcessorType;
                       update(step.key, { type, config: defaultConfig(schemaOf(type)) });
                     }}
                   >
                     {testable.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
                     {untestable.map((item) => <option key={item.id} value={item.id} disabled>{item.title} (test in the chat)</option>)}
-                  </select>
+                  </Select>
                 </div>
                 <div className="flex flex-wrap gap-1">
                   <Button size="sm" disabled={index === 0} onClick={() => move(index, -1)} aria-label={`Move processor ${index + 1} up`}>Up</Button>

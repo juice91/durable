@@ -35,6 +35,7 @@ import {
 import { routes } from "@/lib/routes";
 import { PageHeader } from "@/components/frame/PageHeader";
 import { navCrumb } from "@/lib/nav";
+import { Select } from "@/components/ui/Select";
 
 const inputClass =
   "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
@@ -293,24 +294,24 @@ function LogsSearch() {
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor="logs-level" className="text-xs font-medium text-muted-foreground">Level</label>
-          <select
+          <Select
             id="logs-level"
             value={filters.level ?? ""}
-            onChange={(e) => setFilters({ level: (e.target.value || null) as LogLevel | null })}
+            onValueChange={(v) => setFilters({ level: (v || null) as LogLevel | null })}
             className={inputClass}
           >
             <option value="">Any level</option>
             {LOG_LEVELS.map((level) => (
               <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor="logs-agent" className="text-xs font-medium text-muted-foreground">Agent</label>
-          <select
+          <Select
             id="logs-agent"
             value={filters.agent_id ?? ""}
-            onChange={(e) => setFilters({ agent_id: e.target.value || null })}
+            onValueChange={(v) => setFilters({ agent_id: v || null })}
             className={`${inputClass} max-w-48`}
           >
             <option value="">All agents</option>
@@ -320,7 +321,7 @@ function LogsSearch() {
             {filters.agent_id && !agents.some((a) => a.id === filters.agent_id) ? (
               <option value={filters.agent_id}>{filters.agent_id.slice(0, 8)}...</option>
             ) : null}
-          </select>
+          </Select>
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor="logs-run" className="text-xs font-medium text-muted-foreground">Run</label>
@@ -346,7 +347,7 @@ function LogsSearch() {
         </div>
         <div className="flex flex-col gap-1">
           <label htmlFor="logs-range" className="text-xs font-medium text-muted-foreground">Time range</label>
-          <select id="logs-range" value={rangeValue} onChange={(e) => onRangeChange(e.target.value)} className={inputClass}>
+          <Select id="logs-range" value={rangeValue} onValueChange={(v) => onRangeChange(v)} className={inputClass}>
             <option value="auto">
               {!filters.run_id ? "Last hour (default)" : selected.status === "failed" ? "Since the run started" : "Run lifetime"}
             </option>
@@ -354,7 +355,7 @@ function LogsSearch() {
               <option key={p.value} value={p.value}>{p.label}</option>
             ))}
             <option value="custom">Custom</option>
-          </select>
+          </Select>
         </div>
         {rangeValue === "custom" ? (
           <>

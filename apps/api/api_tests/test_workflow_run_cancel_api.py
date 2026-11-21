@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from eap_api.routes import workflow_runs
+from eap_api.services import workflow_runs
 
 from .test_workflow_runs_api import FakeClient, api, fake, publish_demo  # noqa: F401 - fixtures
 from .run_helpers import requires_pg, hard_timeout

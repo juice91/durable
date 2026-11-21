@@ -15,6 +15,7 @@ import {
   type MetricsPageState,
   type RangePreset,
 } from "@/lib/metrics";
+import { Select } from "@/components/ui/Select";
 
 export interface MetricsFilterBarProps {
   state: MetricsPageState;
@@ -94,12 +95,12 @@ export function MetricsFilterBar({
       <div className="flex flex-wrap items-end gap-3">
         <label className={labelCls}>
           Date range
-          <select aria-label="Date range" className={control} value={state.range} onChange={(e) => onRange(e.target.value as RangePreset)}>
+          <Select aria-label="Date range" className={control} value={state.range} onValueChange={(v) => onRange(v as RangePreset)}>
             {RANGE_PRESETS.map((p) => (
               <option key={p.value} value={p.value}>{p.label}</option>
             ))}
             <option value="custom">Custom range</option>
-          </select>
+          </Select>
         </label>
 
         {state.range === "custom" && (
@@ -121,16 +122,16 @@ export function MetricsFilterBar({
         {showInterval && (
           <label className={labelCls}>
             Interval
-            <select
+            <Select
               aria-label="Interval"
               className={control}
               value={state.interval ?? "auto"}
-              onChange={(e) => set({ interval: e.target.value === "auto" ? null : (e.target.value as "hour" | "day") })}
+              onValueChange={(v) => set({ interval: v === "auto" ? null : (v as "hour" | "day") })}
             >
               <option value="auto">Auto</option>
               <option value="hour" disabled={hourlyTooMany}>Hourly{hourlyTooMany ? " (range too long)" : ""}</option>
               <option value="day">Daily</option>
-            </select>
+            </Select>
           </label>
         )}
 
@@ -138,56 +139,56 @@ export function MetricsFilterBar({
           <>
             <label className={labelCls}>
               Agent
-              <select aria-label="Agent" className={control} value={state.agent_id ?? ""} onChange={(e) => set({ agent_id: e.target.value || null })}>
+              <Select aria-label="Agent" className={control} value={state.agent_id ?? ""} onValueChange={(v) => set({ agent_id: v || null })}>
                 <option value="">All agents</option>
                 {!agentKnown && <option value={state.agent_id!}>{state.agent_id!.slice(0, 8)}…</option>}
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>{a.name}</option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className={labelCls}>
               Model
-              <select aria-label="Model" className={control} value={state.model ?? ""} onChange={(e) => set({ model: e.target.value || null })}>
+              <Select aria-label="Model" className={control} value={state.model ?? ""} onValueChange={(v) => set({ model: v || null })}>
                 <option value="">All models</option>
                 {modelOptions.map((m) => (
                   <option key={m} value={m}>{m}</option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className={labelCls}>
               Provider
-              <select aria-label="Provider" className={control} value={state.provider ?? ""} onChange={(e) => set({ provider: e.target.value || null })}>
+              <Select aria-label="Provider" className={control} value={state.provider ?? ""} onValueChange={(v) => set({ provider: v || null })}>
                 <option value="">All providers</option>
                 {providerOptions.map((p) => (
                   <option key={p} value={p}>{p}</option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className={labelCls}>
               Kind
-              <select aria-label="Kind" className={control} value={state.kind ?? ""} onChange={(e) => set({ kind: (e.target.value || null) as MetricsKind | null })}>
+              <Select aria-label="Kind" className={control} value={state.kind ?? ""} onValueChange={(v) => set({ kind: (v || null) as MetricsKind | null })}>
                 <option value="">All kinds</option>
                 <option value="agent">Agent</option>
                 <option value="workflow">Workflow</option>
                 <option value="tool">Tool</option>
                 <option value="kb_ingest">Knowledge ingest</option>
                 <option value="eval">Eval</option>
-              </select>
+              </Select>
             </label>
             <label className={labelCls}>
               Operation
-              <select
+              <Select
                 aria-label="Operation"
                 className={control}
                 value={state.operation ?? ""}
-                onChange={(e) => set({ operation: (e.target.value || null) as MetricsOperation | null })}
+                onValueChange={(v) => set({ operation: (v || null) as MetricsOperation | null })}
               >
                 <option value="">All operations</option>
                 {(Object.keys(OPERATION_LABELS) as MetricsOperation[]).map((op) => (
                   <option key={op} value={op}>{OPERATION_LABELS[op]}</option>
                 ))}
-              </select>
+              </Select>
             </label>
           </>
         )}

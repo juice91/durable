@@ -12,6 +12,7 @@ import { fetchModels, type ModelOption } from "@/lib/metrics";
 import { getRequestContext, validateRequestContext } from "@/lib/requestContext";
 import type { AgentSpec, AgentVersion } from "@/lib/api";
 import { routes } from "@/lib/routes";
+import { findSelectOption, getSelectOption, optionsOf } from "@/test/select";
 
 vi.mock("@/lib/api", () => ({
   BASE_URL: "http://api.test",
@@ -106,9 +107,9 @@ async function renderReady() {
   const { agentId, conversationId } = routeChat();
   const view = render(<ChatTab key={`${agentId}/${conversationId}`} agentId={agentId} conversationId={conversationId} />);
   await screen.findByRole("combobox", { name: "Version" });
-  await screen.findByRole("option", { name: "openai:gpt-4.1" });
+  await findSelectOption("openai:gpt-4.1");
   await waitFor(() => expect(api.agents.get).toHaveBeenCalledWith(agentId));
-  if (agentId === "agent-3") await screen.findByRole("option", { name: "v2" });
+  if (agentId === "agent-3") await findSelectOption("v2");
   return view;
 }
 
@@ -474,7 +475,7 @@ describe("reload keeps the options", () => {
     // Was choosing agent-3 in the picker; the chat route names the agent now.
     window.history.replaceState({}, "", routes.agentChat("agent-3"));
     const first = await renderReady();
-    await screen.findByRole("option", { name: "v1" });
+    await findSelectOption("v1");
     choose("Version", "v1");
     choose("Model", "test:echo");
     await waitFor(() => expect(new URLSearchParams(window.location.search).get("model")).toBe("test:echo"));
@@ -491,7 +492,7 @@ describe("reload keeps the options", () => {
     await renderReady();
     // Was the Agent picker's value: the remounted tab shows agent-3 itself (its own versions, latest v2).
     expect(api.agents.get).toHaveBeenLastCalledWith("agent-3");
-    expect(screen.getByRole("option", { name: "Latest (v2)" })).toBeInTheDocument();
+    expect(getSelectOption("Latest (v2)")).toBeTruthy();
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Version" })).toHaveValue("v1"));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model" })).toHaveValue("test:echo"));
     await screen.findByRole("button", { name: /1 of 1 set/ });
@@ -766,7 +767,7 @@ describe("draft-only agents", () => {
     expect(api.agents.get).toHaveBeenCalledWith("agent-2");
     const version = screen.getByRole("combobox", { name: "Version" });
     expect(version).toHaveValue("draft");
-    expect(within(version).getAllByRole("option").map((o) => o.textContent)).toEqual(["Draft (unpublished)"]);
+    expect(optionsOf(version).map((o) => o.textContent)).toEqual(["Draft (unpublished)"]);
   });
 
   it("runs the draft on every turn, even when the URL asks for a version", async () => {

@@ -11,6 +11,7 @@ import { listMcpToolRuns, mcpToolDefinition, startMcpToolRun } from "@/lib/mcpTo
 import type { McpDiscoveredTool, McpServer } from "@/lib/mcpServers";
 import { routes } from "@/lib/routes";
 import type { Run } from "@/lib/runs";
+import { Select } from "@/components/ui/Select";
 
 interface McpRunTabProps {
   server: McpServer;
@@ -64,15 +65,15 @@ export function McpRunTab({ server, tools, onLoadTools, loadingTools }: McpRunTa
     <div className="flex min-w-0 flex-col gap-6" data-testid="mcp-run-tab">
       <div className="flex min-w-0 flex-col gap-1">
         <label htmlFor="mcp-run-tool" className="text-label font-semibold text-foreground">Tool</label>
-        <select
+        <Select
           id="mcp-run-tool"
           value={selected}
-          onChange={(event) => setSelected(event.target.value)}
+          onValueChange={(v) => setSelected(v)}
           className="h-9 w-full max-w-sm rounded-md border border-input bg-background px-2 font-mono text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           <option value="">Select a tool</option>
           {tools.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}
-        </select>
+        </Select>
         {tool?.description ? <p className="text-caption text-muted-foreground">{tool.description}</p> : null}
       </div>
 

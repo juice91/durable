@@ -33,33 +33,17 @@ to it is left to the agent-capabilities branch.)
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
-import hashlib
-import json
-import logging
-import os
-import re
-import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from datetime import date, datetime, timezone
-from decimal import Decimal
-from typing import Annotated, Any, TypeVar
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
 
 from eap_api.auth import Principal, current_principal
-from eap_api.launcher import RunLauncher, get_run_launcher
-from eap_api.request_guard import GuardedJsonRoute, guarded_json_route, too_large_detail
-from eap_api.routes.runs import StoresDep
+from eap_api.request_guard import GuardedJsonRoute, guarded_json_route
 from eap_api.schemas import (
     DocumentPut,
     DocumentPutResponse,
@@ -80,184 +64,25 @@ from eap_api.schemas import (
     ReextractResponse,
     ReindexCreate,
     ReindexEstimateResponse,
-    document_key_problem,
 )
-from eap_knowledge import ExtractionFailed, ExtractLimits, UnsupportedMimeType, extract
-from eap_knowledge.formats import (
+from eap_api.service_deps.knowledge import KnowledgeServiceDep
+from eap_api.services.knowledge import (  # noqa: F401  (re-exported: app.py, the guard and tests use these names)
+    DEFAULT_KB_MAX_DOCUMENT_BYTES,
     EXTRACTOR_VERSIONS,
-    FORMAT_SPECS,
-    PDF_SIGNATURE_WINDOW,
-    FormatSpec,
-    detect_binary_type,
-    extractor_for,
-    format_by_name,
-    format_for_mime,
-    has_pdf_signature,
+    MAX_CURSOR_LENGTH,
+    InvalidDocumentCursor,
+    check_knowledge_configuration,
+    decode_document_cursor,
+    document_error_codes,
+    document_view,
+    encode_document_cursor,
+    estimate_embedding_cost,
+    max_document_bytes,
+    safe_errors,
+    upload_guard_bytes,
 )
-from eap_observability import current_trace_context, log_failure
-from eap_pricing import (
-    COST_QUANTUM,
-    OVERRIDE_ONLY_PROVIDERS,
-    PRICES_FILE_ENV,
-    SOURCE_OVERRIDE,
-    InvalidPriceFile,
-    Usage,
-    format_cost,
-    load_overrides,
-    override_cost,
-    override_period,
-)
-from eap_run_store import ENQUEUE_FAILED_ERROR, TERMINAL_RUN_STATUSES, RunIdConflict, RunStore
-from eap_run_store import kb_ingest_handoff as handoff
-from eap_run_store.kb_ingest_handoff import (  # noqa: F401  (re-exported: tests and routes use these names)
-    EMBED_SPLIT_KEY,
-    ENQUEUE_FAILED_DETAIL,
-    ORPHAN_AFTER_SECONDS,
-    ingest_input,
-    reindex_input,
-)
-from eap_run_store.cursor import MAX_CURSOR_LENGTH
-from eap_run_store.knowledge import (
-    DocumentNotFound,
-    IngestRunConflict,
-    content_hash,
-    KnowledgeBaseLimitExceeded,
-    KnowledgeBaseNameConflict,
-    KnowledgeStore,
-    ReindexInProgress,
-)
-from eap_schemas import KnowledgeBaseNotFound
-from eap_schemas.knowledge import (
-    EXTRACTION_ERROR_MESSAGES,
-    INGEST_FAILURE_CODES,
-    ChunkingConfig,
-    ExtractConfig,
-)
-from eap_schemas.embedding_policy import EmbeddingModel, EmbeddingModelNotAllowed, EmbeddingModelPolicy
-from eap_schemas.tools import KNOWLEDGE_SEARCH_TOOL_ID, KnowledgeSearchInput
 
-log = logging.getLogger("eap_api")
-
-KB_MAX_DOCUMENT_BYTES_ENV = "EAP_KB_MAX_DOCUMENT_BYTES"
-DEFAULT_KB_MAX_DOCUMENT_BYTES = 5 * 1024 * 1024
-KB_MAX_INGEST_TOKENS_ENV = "EAP_KB_MAX_INGEST_TOKENS"
-DEFAULT_KB_MAX_INGEST_TOKENS = 2_000_000
-DEADLOCK_SQLSTATE = "40P01"
-
-KB_NOT_FOUND = "Knowledge base not found"
-DOCUMENT_NOT_FOUND = "Document not found"
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from None
-    if value <= 0:
-        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
-    return value
-
-
-def max_document_bytes() -> int:
-    """EAP_KB_MAX_DOCUMENT_BYTES: the upload route's request body cap (default 5 MiB)."""
-    return _env_int(KB_MAX_DOCUMENT_BYTES_ENV, DEFAULT_KB_MAX_DOCUMENT_BYTES)
-
-
-def max_ingest_tokens() -> int:
-    """EAP_KB_MAX_INGEST_TOKENS: the per-run embedding budget the worker enforces (default 2,000,000)."""
-    return _env_int(KB_MAX_INGEST_TOKENS_ENV, DEFAULT_KB_MAX_INGEST_TOKENS)
-
-
-BINARY_UPLOAD_CONCURRENCY_ENV = "EAP_KB_BINARY_UPLOAD_CONCURRENCY"
-DEFAULT_BINARY_UPLOAD_CONCURRENCY = 4
-MAX_BINARY_UPLOAD_CONCURRENCY = 64
-# How long a binary upload waits for a slot before answering 503.
-BINARY_UPLOAD_WAIT_SECONDS = 30.0
-
-
-def binary_upload_concurrency() -> int:
-    """EAP_KB_BINARY_UPLOAD_CONCURRENCY: binary (base64) uploads this API process decodes and
-    stores at once (default 4, 1..64). Each holds its decoded bytes (up to EAP_KB_MAX_BINARY_BYTES)
-    while it is checked and hashed, so this bounds that memory per process."""
-    value = _env_int(BINARY_UPLOAD_CONCURRENCY_ENV, DEFAULT_BINARY_UPLOAD_CONCURRENCY)
-    if value > MAX_BINARY_UPLOAD_CONCURRENCY:
-        raise ValueError(
-            f"{BINARY_UPLOAD_CONCURRENCY_ENV} must be an integer from 1 to {MAX_BINARY_UPLOAD_CONCURRENCY}, got {value}"
-        )
-    return value
-
-
-_binary_slots_lock = threading.Lock()
-_binary_slots: tuple[int, threading.BoundedSemaphore] | None = None
-
-
-def _binary_upload_slots() -> threading.BoundedSemaphore:
-    """The process-wide semaphore for binary uploads, rebuilt when the configured size changes."""
-    global _binary_slots
-    try:
-        size = binary_upload_concurrency()
-    except ValueError:  # checked at startup; the environment changed under the process
-        size = DEFAULT_BINARY_UPLOAD_CONCURRENCY
-    with _binary_slots_lock:
-        if _binary_slots is None or _binary_slots[0] != size:
-            _binary_slots = (size, threading.BoundedSemaphore(size))
-        return _binary_slots[1]
-
-
-@contextmanager
-def binary_upload_slot(spec: FormatSpec | None) -> Iterator[None]:
-    """Hold one binary-upload slot for a binary format (no-op otherwise). 503 after
-    BINARY_UPLOAD_WAIT_SECONDS without one."""
-    if spec is None or not spec.binary:
-        yield
-        return
-    slots = _binary_upload_slots()
-    if not slots.acquire(timeout=BINARY_UPLOAD_WAIT_SECONDS):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="too many binary uploads in progress; retry shortly",
-        )
-    try:
-        yield
-    finally:
-        slots.release()
-
-
-def extract_limits() -> ExtractLimits:
-    """The RAG P1 upload caps (EAP_KB_MAX_BINARY_BYTES, EAP_KB_MAX_STRUCTURED_BYTES, ...), read per
-    request like EAP_KB_MAX_DOCUMENT_BYTES. ValueError for a malformed value (checked at startup)."""
-    return ExtractLimits.from_env(os.environ)
-
-
-def upload_guard_bytes() -> int:
-    """The upload route's request-body guard: `max(text cap, ceil(binary cap × 4/3) + 64 KiB)`, so a
-    base64 PDF at the binary cap fits. Only a body with `content_base64` may stream past the text
-    cap (EAP_KB_MAX_DOCUMENT_BYTES, `_is_base64_upload`); any other is refused there, before it is
-    buffered further, and the route checks the text cap on the body again. Every format's
-    decoded-size cap is checked after decoding."""
-    try:
-        limits = extract_limits()
-    except ValueError:  # checked at startup; the environment changed under the process
-        limits = ExtractLimits()
-    return limits.upload_guard_bytes(max_document_bytes())
-
-
-def check_knowledge_configuration() -> None:
-    """Fail startup on a malformed EAP_ALLOWED_EMBEDDING_MODELS, EAP_EMBEDDING_QUERY_INSTRUCTIONS,
-    EAP_KB_MAX_DOCUMENT_BYTES, EAP_KB_MAX_INGEST_TOKENS, EAP_KB_EXACT_SEARCH_MAX_CHUNKS or the RAG P1
-    extraction limits (EAP_KB_MAX_BINARY_BYTES and the others of ExtractLimits) (ValueError), not
-    at the first request."""
-    from eap_run_store.knowledge import check_exact_search_max_chunks
-
-    EmbeddingModelPolicy.from_env()
-    max_document_bytes()
-    max_ingest_tokens()
-    check_exact_search_max_chunks()
-    extract_limits()
-    binary_upload_concurrency()
+PrincipalDep = Annotated[Principal, Depends(current_principal)]
 
 
 def _guard_text_cap() -> int:
@@ -299,19 +124,6 @@ _upload = APIRouter(
     responses={404: {"model": ErrorDetail}},
 )
 
-PrincipalDep = Annotated[Principal, Depends(current_principal)]
-
-
-def get_knowledge_store(request: Request) -> KnowledgeStore:
-    store = getattr(request.app.state, "knowledge_store", None)
-    if store is None:  # an app built without create_app's wiring (tests)
-        store = request.app.state.knowledge_store = KnowledgeStore(request.app.state.database_engine)
-    return store
-
-
-KnowledgeDep = Annotated[KnowledgeStore, Depends(get_knowledge_store)]
-LauncherDep = Annotated[RunLauncher, Depends(get_run_launcher)]
-
 
 async def _request_body_size(request: Request) -> int:
     """The request body's size in bytes (the guard has read and cached it)."""
@@ -321,504 +133,29 @@ async def _request_body_size(request: Request) -> int:
 BodySizeDep = Annotated[int, Depends(_request_body_size)]
 
 
-# ----------------------------------------------------------------------------------- helpers
-
-
-def _policy() -> EmbeddingModelPolicy:
-    try:
-        return EmbeddingModelPolicy.from_env()
-    except ValueError as exc:  # checked at startup; the environment changed under the process
-        log_failure(log, "embedding model allowlist invalid", exc, code="embedding_policy_invalid", level=logging.ERROR)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="the embedding model allowlist (EAP_ALLOWED_EMBEDDING_MODELS) is misconfigured",
-        )
-
-
-def _resolve_model(model_id: str) -> EmbeddingModel:
-    """The allowed embedding model, or 422 with the policy's message."""
-    try:
-        return _policy().resolve(model_id)
-    except EmbeddingModelNotAllowed as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
-
-
-def _kb_or_404(store: KnowledgeStore, tenant_id: str, kb_id: str) -> dict[str, Any]:
-    kb = store.get_knowledge_base(tenant_id, kb_id)
-    if kb is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-    return kb
-
-
-def _check_document_key(document_key: str) -> None:
-    problem = document_key_problem(document_key)
-    if problem is not None:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=problem)
-
-
-_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|$)", re.S)
-
-
-def _has_text(document: Any) -> bool:
-    """Whether the extracted document has any text besides HTML comments. eap_knowledge drops
-    script, style and nav, but keeps an HTML comment in Markdown as section text (RM.3)."""
-    if document.extracted_chars == 0:
-        return False
-    return any(
-        _HTML_COMMENT.sub("", f"{section.heading}\n{section.text}").strip() for section in document.sections
-    )
-
-
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-
-_same_ingest_input = handoff.same_ingest_input
-
-# ------------------------------------------------------------------ formats and uploads (RAG P1.A4)
-
-
-class UploadRejected(Exception):
-    """An upload refused before anything is written: the route answers `status_code` with `body`."""
-
-    def __init__(self, status_code: int, body: dict[str, Any]) -> None:
-        self.status_code = status_code
-        self.body = body
-        super().__init__(status_code, body)
-
-    def response(self) -> JSONResponse:
-        return _json(self.status_code, self.body)
-
-
-def _reject(status_code: int, detail: str, **extra: Any) -> UploadRejected:
-    return UploadRejected(status_code, {"detail": detail, **extra})
-
-
-def _unsupported_content(declared: str, detected: str | None, reason: str | None = None) -> UploadRejected:
-    """415 `unsupported_content`: the bytes are not what `declared` says. `detected_type` names the
-    binary signature found, when one was."""
-    base = EXTRACTION_ERROR_MESSAGES["unsupported_content"]
-    if detected is not None:
-        detail = f"{base} It looks like {detected}, not {declared}."
-    else:
-        detail = f"{base} {reason or ''}".strip()
-    return _reject(
-        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail, code="unsupported_content", detected_type=detected
-    )
-
-
-def _text_signature(content: str) -> str | None:
-    """The binary type a TEXT upload really is (signatures at offset 0), or None. The prefix is
-    checked as UTF-8 and, when every character is below U+0100, as the bytes those code points name
-    (a file read as Latin-1 keeps its signature bytes that way)."""
-    head = content[:16]
-    detected = detect_binary_type(head.encode("utf-8"))
-    if detected is None and all(ord(ch) < 256 for ch in head):
-        detected = detect_binary_type(head.encode("latin-1"))
-    return detected
-
-
-def _decode_base64(value: str) -> bytes:
-    try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError):
-        raise _reject(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "content_base64 is not valid base64 (the standard alphabet with padding, no line breaks)",
-        ) from None
-
-
-def _format_or_422(mime_type: str) -> FormatSpec:
-    try:
-        return format_for_mime(mime_type)
-    except UnsupportedMimeType as exc:
-        raise _reject(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
-
-
-def _limits_or_503() -> ExtractLimits:
-    try:
-        return extract_limits()
-    except ValueError as exc:
-        log_failure(log, "extraction limits invalid", exc, code="extract_limits_invalid", level=logging.ERROR)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="the knowledge base upload limits (EAP_KB_MAX_*) are misconfigured",
-        ) from None
-
-
-class PreparedUpload:
-    """What the upload stores: `content` (UTF-8 text, or canonical base64 for a binary type), the
-    canonical `mime_type`, and `digest` (sha256 of the decoded bytes for a binary type, else None:
-    the store hashes the text)."""
-
-    __slots__ = ("content", "digest", "mime_type", "spec")
-
-    def __init__(self, spec: FormatSpec, content: str, digest: str | None) -> None:
-        self.spec = spec
-        self.mime_type = spec.mime_type
-        self.content = content
-        self.digest = digest
-
-    @property
-    def content_hash(self) -> str:
-        return self.digest if self.digest is not None else content_hash(self.content)
-
-
-def prepare_upload(body: DocumentPut, body_size: int) -> PreparedUpload:
-    """Check an upload against the format registry, its caps and its magic bytes, before anything is
-    written. Raises UploadRejected:
-
-    - 422: an unsupported MIME type; `content` for a binary type, or `content_base64` for a text
-      type (unless its bytes are a known binary type: then 415); invalid or empty base64; empty text.
-    - 413: a text upload whose request body is over EAP_KB_MAX_DOCUMENT_BYTES (the guard's own
-      message); YAML or JSON over EAP_KB_MAX_STRUCTURED_BYTES; a decoded binary over
-      EAP_KB_MAX_BINARY_BYTES.
-    - 415 (`code: unsupported_content`, `detected_type`): a PDF without `%PDF-` in its first 1,024
-      bytes, or text that starts with a known binary signature."""
-    spec = _format_or_422(body.mime_type)
-    limits = _limits_or_503()
-    text_cap = max_document_bytes()
-    declared = spec.mime_type
-    if spec.binary:
-        if body.content_base64 is None:
-            raise _reject(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"unsupported document mime type {body.mime_type!r} for text content: {declared} documents are"
-                " uploaded as content_base64",
-            )
-        data = _decode_base64(body.content_base64)
-        if not data:
-            raise _reject(status.HTTP_422_UNPROCESSABLE_CONTENT, "content_base64 is empty")
-        cap = limits.max_bytes_for(spec.cap_class, text_cap)
-        if len(data) > cap:
-            raise _reject(
-                status.HTTP_413_CONTENT_TOO_LARGE,
-                f"the document is too large ({len(data)} bytes; max {cap} bytes for {declared})",
-            )
-        if spec.format == "pdf" and not has_pdf_signature(data):
-            detected = detect_binary_type(data)
-            raise _unsupported_content(
-                declared,
-                detected,
-                f"It has no %PDF- signature in its first {PDF_SIGNATURE_WINDOW:,} bytes, so it is not a PDF.",
-            )
-        # Stored as sent (validated strictly above, so it decodes to exactly `data`): no second
-        # encoded copy of up to ~33 MiB.
-        digest = hashlib.sha256(data).hexdigest()
-        del data
-        return PreparedUpload(spec, body.content_base64, digest)
-
-    if body_size > text_cap:  # text keeps its cap on the request body, as before RAG P1
-        raise _reject(status.HTTP_413_CONTENT_TOO_LARGE, too_large_detail(text_cap))
-    if body.content_base64 is not None:
-        data = _decode_base64(body.content_base64)
-        detected = detect_binary_type(data[:16])
-        if detected is not None:
-            raise _unsupported_content(declared, detected)
-        raise _reject(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"{declared} documents are uploaded as content (UTF-8 text), not content_base64",
-        )
-    content = body.content or ""
-    if not content.strip():
-        raise _reject(status.HTTP_422_UNPROCESSABLE_CONTENT, "content is empty")
-    cap = limits.max_bytes_for(spec.cap_class, text_cap)
-    size = len(content.encode("utf-8"))
-    if size > cap:
-        raise _reject(
-            status.HTTP_413_CONTENT_TOO_LARGE, f"the document is too large ({size} bytes; max {cap} bytes for {declared})"
-        )
-    detected = _text_signature(content)
-    if detected is not None:
-        raise _unsupported_content(declared, detected)
-    return PreparedUpload(spec, content, None)
-
-
-def kb_extract_config(kb: dict[str, Any]) -> ExtractConfig | None:
-    """The knowledge base's `chunking.extract` (None when unset or unreadable)."""
-    raw = kb.get("chunking")
-    if not isinstance(raw, dict) or not raw.get("extract"):
-        return None
-    try:
-        return ChunkingConfig.model_validate(raw).extract
-    except ValidationError:
-        return None
-
-
-def _spec_or_none(mime_type: str | None) -> FormatSpec | None:
-    try:
-        return format_for_mime(mime_type or "")
-    except UnsupportedMimeType:
-        return None
-
-
-_EXTRACTION_CODE_BY_MESSAGE = {message: code for code, message in EXTRACTION_ERROR_MESSAGES.items()}
-
-
-def document_error_codes(error: str | None) -> tuple[str | None, str | None]:
-    """(error_code, error_reason) of a document's `error` ("<code>: <message>"): the ingest failure
-    code when it is one of INGEST_FAILURE_CODES, and the extraction code whose fixed message the
-    rest is (the worker writes "extraction_failed: <EXTRACTION_ERROR_MESSAGES[code]>")."""
-    if not error:
-        return None, None
-    code, sep, rest = error.partition(":")
-    code = code.strip()
-    if not sep or code not in INGEST_FAILURE_CODES:
-        return None, None
-    return code, _EXTRACTION_CODE_BY_MESSAGE.get(rest.strip())
-
-
-def document_view(document: dict[str, Any], extraction: dict[str, Any] | None = None) -> dict[str, Any]:
-    """A document as the API returns it (RAG P1): `content_encoding` "base64" and `content` null
-    for a binary document (the stored bytes never leave), `error_code` and `error_reason` from the
-    error, and `extraction` when given."""
-    out = dict(document)
-    spec = _spec_or_none(out.get("mime_type"))
-    binary = spec is not None and spec.binary
-    out["content_encoding"] = "base64" if binary else None
-    if binary:
-        out["content"] = None
-    out["error_code"], out["error_reason"] = document_error_codes(out.get("error"))
-    if extraction is not None:
-        out["extraction"] = {**extraction, "current_version": EXTRACTOR_VERSIONS.get(str(extraction.get("extractor")))}
-    return out
-
-
-class InvalidDocumentCursor(ValueError):
-    """An `after` cursor this API did not issue."""
-
-
-def encode_document_cursor(document_key: str) -> str:
-    """The opaque cursor positioned at `document_key` (URL-safe base64 of {"k": key}, unpadded)."""
-    raw = json.dumps({"k": document_key}, separators=(",", ":"), ensure_ascii=False)
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
-
-
-def decode_document_cursor(token: str) -> str:
-    """The document key a cursor names; InvalidDocumentCursor for anything else."""
-    try:
-        data = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8"))
-    except (binascii.Error, ValueError) as exc:
-        raise InvalidDocumentCursor("cursor is not valid") from exc
-    if not isinstance(data, dict) or set(data) != {"k"} or not isinstance(data["k"], str) or not data["k"]:
-        raise InvalidDocumentCursor("cursor is not valid")
-    return data["k"]
-
-
-def ingest_totals(store: KnowledgeStore, tenant_id: str, kb_id: str) -> dict[str, Any]:
-    """What the knowledge base's kb_ingest runs have spent: one aggregate over their model requests
-    (ix_runs_tenant_kb_created, then run_model_requests by primary key). Requests of runs still in
-    flight count too. Cost follows the run rule: NULL when any request is unpriced."""
-    with store.engine.connect() as conn:
-        row = conn.execute(
-            text(
-                "SELECT count(q.run_id) AS requests,"
-                " coalesce(sum(q.input_tokens + q.output_tokens), 0) AS tokens,"
-                " CASE WHEN count(q.run_id) = count(q.cost_usd) THEN coalesce(sum(q.cost_usd), 0) END AS cost"
-                " FROM runs r JOIN run_model_requests q ON q.run_id = r.id AND q.tenant_id = r.tenant_id"
-                " WHERE r.tenant_id = :t AND r.knowledge_base_id = CAST(:kb AS uuid) AND r.kind = 'kb_ingest'"
-            ),
-            {"t": tenant_id, "kb": kb_id},
-        ).mappings().one()
-    cost = row["cost"]
-    if cost is not None:
-        cost = format_cost(Decimal(cost).quantize(COST_QUANTUM))
-    return {"ingest_requests": int(row["requests"]), "ingest_tokens": int(row["tokens"]), "ingest_cost_usd": cost}
-
-
-T = TypeVar("T")
-
-
-def _retry_deadlock_once(operation: Callable[[], T]) -> T:
-    """Run a delete, and once more if Postgres chose it as a deadlock victim (SQLSTATE 40P01)."""
-    try:
-        return operation()
-    except DBAPIError as exc:
-        if getattr(exc.orig, "sqlstate", None) != DEADLOCK_SQLSTATE:
-            raise
-        log.warning("knowledge delete was a deadlock victim; retrying once")
-        return operation()
-
-
 def _json(status_code: int, content: Any) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=jsonable_encoder(content))
 
 
-# ------------------------------------------------------------------------ ingest run hand-off
-
-REINDEX_ENQUEUE_FAILED_DETAIL = (
-    "Reindex could not be started and was cancelled; retry the request (without run_id, or with a new one)"
-)
-
-
-class HandOffFailed(handoff.HandOffFailed):
-    """The enqueue of a recorded run failed: the route answers 503 {"detail", "run_id"}."""
-
-    def response(self) -> JSONResponse:
-        return _json(status.HTTP_503_SERVICE_UNAVAILABLE, {"detail": self.detail, "run_id": self.run_id})
-
-
-def _run_in_use(exc: handoff.RunIdInUse) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail)
-
-
-def _create_ingest_run(
-    run_store: RunStore, tenant_id: str, kb_id: str, input_json: str, run_id: uuid.UUID | str
-) -> tuple[dict[str, Any], bool]:
-    """Create (or find, for a retry with the same run_id) the kb_ingest run. 409 when `run_id` is
-    another tenant's or another request's run (callers resolve run_id before writing; this is the
-    last guard against a race)."""
-    trace_id, traceparent = current_trace_context()
-    try:
-        return handoff.create_ingest_run(
-            run_store, tenant_id, kb_id, input_json, run_id, trace_id=trace_id, traceparent=traceparent
-        )
-    except handoff.RunIdInUse as exc:
-        raise _run_in_use(exc) from None
-
-
-_is_run_of = handoff.is_run_of
-_run_input = handoff.run_input
-_is_document_run = handoff.is_document_run
-_enqueue_failed = handoff.enqueue_failed
-_run_view = handoff.run_view
-_stale_queued = handoff.stale_queued
-_renew_claim = handoff.renew_claim
-_latest_run = handoff.latest_run
-_orphaned = handoff.orphaned
-
-
-def _hand_off(
-    run_store: RunStore,
-    launcher: RunLauncher,
-    tenant_id: str,
-    run: dict[str, Any],
-    created: bool,
-    failed_detail: str = ENQUEUE_FAILED_DETAIL,
-) -> dict[str, Any]:
-    """Enqueue `eap.kb_ingest` for the stored run (eap_run_store.kb_ingest_handoff.hand_off, shared
-    with the worker's source sync); a failed enqueue raises HandOffFailed (503 with the run_id)."""
-    try:
-        return handoff.hand_off(run_store, launcher.launch_kb_ingest, tenant_id, run, created, failed_detail)
-    except handoff.HandOffFailed as exc:
-        raise HandOffFailed(exc.run_id, exc.detail) from None
-
-
-def _replay(run_store: RunStore, launcher: RunLauncher, tenant_id: str, run: dict[str, Any]) -> dict[str, Any]:
-    """A retry of the request that created `run`: hand it off again unless it has finished."""
-    try:
-        return handoff.replay(run_store, launcher.launch_kb_ingest, tenant_id, run)
-    except handoff.HandOffFailed as exc:
-        raise HandOffFailed(exc.run_id, exc.detail) from None
-
-
-def _resolve_client_run_id(
-    store: KnowledgeStore, run_store: RunStore, tenant_id: str, run_id: uuid.UUID | None
-) -> dict[str, Any] | None:
-    """Resolve a client run_id BEFORE anything is written: None when unused, the tenant's run when
-    it exists, 409 when another tenant holds it."""
-    try:
-        return handoff.resolve_client_run_id(store, run_store, tenant_id, run_id)
-    except handoff.RunIdInUse as exc:
-        raise _run_in_use(exc) from None
-
-
-# ----------------------------------------------------------------------- references (409 on delete)
-
-
-def referencing_agents(store: KnowledgeStore, tenant_id: str, kb_id: str) -> list[dict[str, Any]]:
-    """The tenant's agents whose latest published version OR current draft attaches `kb_id`
-    (spec.knowledge_bases), archived agents included, one entry per agent: `version` is the latest
-    published version when it attaches the knowledge base, else null; `draft` is true when only the
-    draft attaches it (a draft test run of such an agent would get the retrieve tool's "no longer
-    exist" error after a forced delete, like a published version). One query: the latest version per
-    agent through the unique (agent_id, version) index, then JSONB containment tests on both specs."""
-    needle = json.dumps([{"id": str(kb_id)}])
-    with store.engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT id, name, archived, version, in_published FROM ("
-                " SELECT a.id, a.name, a.archived, v.version,"
-                "  coalesce(v.spec -> 'knowledge_bases' @> CAST(:needle AS jsonb), false) AS in_published,"
-                "  coalesce(a.draft_spec -> 'knowledge_bases' @> CAST(:needle AS jsonb), false) AS in_draft"
-                " FROM agents a"
-                " LEFT JOIN LATERAL (SELECT av.version, av.spec FROM agent_versions av"
-                "   WHERE av.agent_id = a.id AND av.tenant_id = a.tenant_id ORDER BY av.version DESC LIMIT 1) v"
-                " ON true"
-                " WHERE a.tenant_id = :t) refs"
-                " WHERE in_published OR in_draft"
-                " ORDER BY name, id"
-            ),
-            {"t": tenant_id, "needle": needle},
-        ).mappings().all()
-    return [
-        {
-            "agent_id": str(r["id"]),
-            "agent_name": r["name"],
-            "version": r["version"] if r["in_published"] else None,
-            "archived": bool(r["archived"]),
-            "draft": not r["in_published"],
-        }
-        for r in rows
-    ]
-
-
-# ------------------------------------------------------------------------------- price estimate
-
-
-def estimate_embedding_cost(model_id: str, tokens: int, today: date | None = None) -> tuple[str | None, str | None, str | None]:
-    """(cost_usd as a decimal string, price_source, note) for `tokens` input tokens of `model_id`.
-
-    Reads the operator override file with the worker's own loader and lookup rules (eap_pricing: an
-    exact `provider:name` key wins over `provider:*`; the period with the latest `effective_from`
-    not after today applies; a file the worker rejects prices nothing here either). A provider the
-    worker prices through genai-prices gets no estimate here yet (eap_pricing.price_request could
-    give one; not switched in this batch)."""
-    provider = model_id.partition(":")[0]
-    overrides = load_overrides()
-    if isinstance(overrides, InvalidPriceFile):
-        if overrides.reason.startswith("file not found"):
-            return None, None, f"the price file named by {PRICES_FILE_ENV} does not exist"
-        return None, None, "the model price override file is unreadable or invalid"
-    period = override_period(overrides, model_id, today or datetime.now(timezone.utc).date())
-    if period is not None:
-        cost = override_cost(period, Usage(input_tokens=tokens)).quantize(COST_QUANTUM)
-        return format_cost(cost), SOURCE_OVERRIDE, None
-    if provider in OVERRIDE_ONLY_PROVIDERS:
-        return None, None, f"no price for '{model_id}' in the model price override file"
-    return None, None, (
-        f"'{provider}' models are priced by genai-prices in the worker and are not estimated here; "
-        "the cost is recorded on the reindex run"
-    )
-
-
-# ------------------------------------------------------------------------- embedding models
+# ------------------------------------------------------------------------------------ embedding models
 
 
 @router.get("/embedding-models", response_model=EmbeddingModelListResponse)
-def list_embedding_models(principal: PrincipalDep) -> dict[str, Any]:
+def list_embedding_models(principal: PrincipalDep, service: KnowledgeServiceDep) -> dict[str, Any]:
     """The embedding models a knowledge base may use (EAP_ALLOWED_EMBEDDING_MODELS): every concrete
     model with its dimensions, then `provider:*=<dims>` wildcards (`name` "*", `wildcard` true; any
     name of that provider at those dimensions). Platform-wide; authentication is still required."""
     del principal
-    policy = _policy()
-    items: list[dict[str, Any]] = [
-        {"id": m.id, "provider": m.provider, "name": m.name, "dimensions": m.dimensions, "wildcard": False}
-        for m in policy.listed()
-    ]
-    for provider, dims in sorted(policy.wildcards.items()):
-        if dims is not None:
-            items.append({"id": f"{provider}:*", "provider": provider, "name": "*", "dimensions": dims, "wildcard": True})
-    return {"items": items}
+    return {"items": service.embedding_models()}
 
 
 # ------------------------------------------------------------------------------ knowledge bases
 
 
 @_kb.get("", response_model=KnowledgeBaseListResponse)
-def list_knowledge_bases(principal: PrincipalDep, store: KnowledgeDep) -> dict[str, Any]:
+def list_knowledge_bases(principal: PrincipalDep, service: KnowledgeServiceDep) -> dict[str, Any]:
     """The tenant's knowledge bases by name, with `document_count` and `chunk_count`."""
-    return {"items": store.list_knowledge_bases(principal.tenant_id)}
+    return {"items": service.list_knowledge_bases(principal.tenant_id)}
 
 
 @_kb.post(
@@ -827,36 +164,31 @@ def list_knowledge_bases(principal: PrincipalDep, store: KnowledgeDep) -> dict[s
     response_model=KnowledgeBaseResponse,
     responses={409: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
-def create_knowledge_base(body: KnowledgeBaseCreate, principal: PrincipalDep, store: KnowledgeDep) -> dict[str, Any]:
+def create_knowledge_base(
+    body: KnowledgeBaseCreate, principal: PrincipalDep, service: KnowledgeServiceDep
+) -> dict[str, Any]:
     """Create a knowledge base. 422 embedding model not allowed (or its dimensions unknown), or an
     invalid `chunking`; 409 the tenant already has a knowledge base of that name. A new knowledge
     base uses chunker v2 unless `chunking.chunker_version` is 1 (RAG P1)."""
-    model = _resolve_model(body.embedding_model)
-    try:
-        kb = store.create_knowledge_base(
-            principal.tenant_id,
-            name=body.name,
-            description=body.description,
-            embedding_model=model.id,
-            dimensions=model.dimensions,
-            chunking=body.chunking_config(),  # new_knowledge_base_chunking: chunker v2 by default
-        )
-    except KnowledgeBaseNameConflict as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    return {**kb, "document_count": 0, "chunk_count": 0}
+    return service.create_knowledge_base(
+        principal.tenant_id,
+        name=body.name,
+        description=body.description,
+        embedding_model=body.embedding_model,
+        chunking=body.chunking_config(),  # new_knowledge_base_chunking: chunker v2 by default
+    )
 
 
 @_kb.get("/{kb_id}", response_model=KnowledgeBaseDetailResponse)
-def get_knowledge_base(kb_id: str, principal: PrincipalDep, store: KnowledgeDep) -> dict[str, Any]:
+def get_knowledge_base(kb_id: str, principal: PrincipalDep, service: KnowledgeServiceDep) -> dict[str, Any]:
     """The knowledge base with its counts and its ingest spend so far (`ingest_tokens`,
     `ingest_cost_usd`, `ingest_requests`: see KnowledgeBaseDetailResponse)."""
-    kb = _kb_or_404(store, principal.tenant_id, kb_id)
-    return {**kb, **ingest_totals(store, principal.tenant_id, kb["id"])}
+    return service.get_knowledge_base(principal.tenant_id, kb_id)
 
 
 @_kb.patch("/{kb_id}", response_model=KnowledgeBaseResponse, responses={409: {"model": ErrorDetail}})
 def update_knowledge_base(
-    kb_id: str, body: KnowledgeBaseUpdate, principal: PrincipalDep, store: KnowledgeDep
+    kb_id: str, body: KnowledgeBaseUpdate, principal: PrincipalDep, service: KnowledgeServiceDep
 ) -> dict[str, Any]:
     """Rename and/or set the description (null clears it). 409 name already used."""
     fields: dict[str, Any] = {}
@@ -864,13 +196,7 @@ def update_knowledge_base(
         fields["name"] = body.name
     if "description" in body.model_fields_set:
         fields["description"] = body.description
-    try:
-        store.update_knowledge_base(principal.tenant_id, kb_id, **fields)
-    except KnowledgeBaseNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-    except KnowledgeBaseNameConflict as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    return _kb_or_404(store, principal.tenant_id, kb_id)
+    return service.update_knowledge_base(principal.tenant_id, kb_id, fields)
 
 
 @_kb.delete(
@@ -881,7 +207,7 @@ def update_knowledge_base(
 def delete_knowledge_base(
     kb_id: str,
     principal: PrincipalDep,
-    store: KnowledgeDep,
+    service: KnowledgeServiceDep,
     force: Annotated[bool, Query()] = False,
 ) -> Response:
     """Delete the knowledge base; its documents and chunks cascade, its runs stay. 409
@@ -889,24 +215,7 @@ def delete_knowledge_base(
     published version or current draft attaches it (`draft` true and `version` null when only the
     draft does), unless `force=true` (runs of such versions and drafts then get a tool error). An
     in-flight ingest run ends failed (`ingest_cancelled`) when it finds the knowledge base gone."""
-    tenant_id = principal.tenant_id
-    kb = _kb_or_404(store, tenant_id, kb_id)
-    if not force:
-        agents = referencing_agents(store, tenant_id, kb["id"])
-        if agents:
-            names = ", ".join(a["agent_name"] for a in agents[:5]) + (" …" if len(agents) > 5 else "")
-            return _json(
-                status.HTTP_409_CONFLICT,
-                {
-                    "detail": (
-                        f"knowledge base is attached to {len(agents)} agent(s) ({names}); "
-                        "detach it or delete with force=true"
-                    ),
-                    "agents": agents,
-                },
-            )
-    if not _retry_deadlock_once(lambda: store.delete_knowledge_base(tenant_id, kb["id"])):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
+    service.delete_knowledge_base(principal.tenant_id, kb_id, force)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -917,7 +226,7 @@ def delete_knowledge_base(
 def list_documents(
     kb_id: str,
     principal: PrincipalDep,
-    store: KnowledgeDep,
+    service: KnowledgeServiceDep,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     after: Annotated[
         str | None,
@@ -927,19 +236,7 @@ def list_documents(
     """The knowledge base's documents (without content) by document_key, `limit` at a
     time (1–200, default 50). `next_after` is an opaque cursor when a full page came back (pass it
     back verbatim as `after`), else null. A cursor this API did not issue is a 422."""
-    kb = _kb_or_404(store, principal.tenant_id, kb_id)
-    after_key = None
-    if after is not None:
-        try:
-            after_key = decode_document_cursor(after)
-        except InvalidDocumentCursor:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="after is not a valid cursor; pass the previous page's next_after verbatim",
-            )
-    items = store.list_documents(principal.tenant_id, kb["id"], limit=limit, after=after_key)
-    next_after = encode_document_cursor(items[-1]["document_key"]) if len(items) == limit else None
-    return {"items": [document_view(d) for d in items], "next_after": next_after}
+    return service.list_documents(principal.tenant_id, kb_id, limit, after)
 
 
 @_kb.get("/{kb_id}/documents/{document_key}", response_model=KnowledgeDocumentResponse)
@@ -947,28 +244,14 @@ def get_document(
     kb_id: str,
     document_key: str,
     principal: PrincipalDep,
-    store: KnowledgeDep,
+    service: KnowledgeServiceDep,
     include_content: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
     """The document, with `extraction` (the worker extraction of its ACTIVE version: extractor, versions, pages,
     image-only pages, sections, warnings; null for API-extracted documents). `include_content=true`
     adds `content`, except for a binary document (`content_encoding` "base64"): its `content` is
     always null, and the stored bytes are never returned."""
-    tenant_id = principal.tenant_id
-    kb = _kb_or_404(store, tenant_id, kb_id)
-    document = store.get_document(tenant_id, kb["id"], document_key)
-    if document is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-    spec = _spec_or_none(document["mime_type"])
-    if include_content:
-        if spec is not None and spec.binary:
-            document["content"] = None
-        else:
-            document = store.get_document(tenant_id, kb["id"], document_key, include_content=True) or document
-    extraction = None
-    if spec is not None and extractor_for(spec.mime_type, kb_extract_config(kb)) is not None:
-        extraction = store.latest_extraction(tenant_id, kb["id"], document["id"])
-    return document_view(document, extraction)
+    return service.get_document(principal.tenant_id, kb_id, document_key, include_content)
 
 
 @_upload.put(
@@ -988,9 +271,7 @@ def put_document(
     principal: PrincipalDep,
     body: DocumentPut,
     body_size: BodySizeDep,
-    store: KnowledgeDep,
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: KnowledgeServiceDep,
 ) -> JSONResponse:
     """Upload a document: UTF-8 text as `content`, or a binary type (application/pdf) as
     `content_base64`. A sync route: FastAPI runs it (and its extraction) in the threadpool, off the
@@ -1020,98 +301,14 @@ def put_document(
     its enqueue failed). 503 {detail, run_id}: the run could not be enqueued; it is marked failed,
     and retrying the same request (same run_id, or the same upload without one) hands it off again.
     """
-    tenant_id = principal.tenant_id
-    _check_document_key(document_key)
-    if body.document_key is not None and body.document_key != document_key:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="document_key in the body must match the path"
-        )
-    with binary_upload_slot(_spec_or_none(body.mime_type)):
-        return _put_document(kb_id, document_key, tenant_id, body, body_size, store, stores, launcher)
-
-
-def _put_document(
-    kb_id: str,
-    document_key: str,
-    tenant_id: str,
-    body: DocumentPut,
-    body_size: int,
-    store: KnowledgeStore,
-    stores: Any,
-    launcher: RunLauncher,
-) -> JSONResponse:
-    """put_document's body, run while holding a binary-upload slot for binary formats."""
-    try:
-        upload = prepare_upload(body, body_size)
-    except UploadRejected as rejected:
-        return rejected.response()
-    kb = _kb_or_404(store, tenant_id, kb_id)  # before extraction: no CPU for a missing or foreign KB
-    title = (body.title or "").strip() or document_key
-    if extractor_for(upload.mime_type, kb_extract_config(kb)) is None:
-        # API-extracted (unchanged path): reject unsafe HTML or a document with no text early.
-        try:
-            extracted = extract(upload.content, upload.mime_type, title=title, source_url=body.source_url)
-        except UnsupportedMimeType as exc:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
-        except ExtractionFailed as exc:
-            # The fixed message only: the exception's detail may name parser internals.
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"{exc.user_message} ({exc.code}: {exc.reason})",
-            )
-        if not _has_text(extracted):
-            # Only dropped markup (script, style, nav, comments): nothing to chunk, so nothing is stored.
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="the document has no extractable text"
-            )
-    run_store, _ = stores
-    trace_id, traceparent = current_trace_context()
-    try:
-        outcome = handoff.ingest_document(
-            store,
-            run_store,
-            launcher.launch_kb_ingest,
-            tenant_id,
-            kb["id"],
-            document_key=document_key,
-            title=title,
-            content=upload.content,
-            mime_type=upload.mime_type,
-            content_sha256=upload.digest,
-            source_url=body.source_url,
-            metadata=body.metadata,
-            run_id=body.run_id,
-            trace_id=trace_id,
-            traceparent=traceparent,
-        )
-    except KnowledgeBaseNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-    except KnowledgeBaseLimitExceeded as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    except handoff.InvalidDocument as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
-    except handoff.RunIdInUse as exc:
-        raise _run_in_use(exc) from None
-    except handoff.HandOffFailed as exc:
-        return HandOffFailed(exc.run_id, exc.detail).response()
-    return _json(
-        status.HTTP_200_OK if outcome.unchanged else status.HTTP_202_ACCEPTED,
-        {
-            "unchanged": outcome.unchanged,
-            "created": outcome.created,
-            "document": document_view(outcome.document),
-            **outcome.run,
-        },
-    )
+    out = service.put_document(principal.tenant_id, kb_id, document_key, body, body_size)
+    return _json(status.HTTP_200_OK if out["unchanged"] else status.HTTP_202_ACCEPTED, out)
 
 
 @_kb.delete("/{kb_id}/documents/{document_key}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_document(kb_id: str, document_key: str, principal: PrincipalDep, store: KnowledgeDep) -> Response:
+def delete_document(kb_id: str, document_key: str, principal: PrincipalDep, service: KnowledgeServiceDep) -> Response:
     """Delete the document; its chunks cascade. An in-flight ingest run ends failed (`ingest_cancelled`)."""
-    tenant_id = principal.tenant_id
-    kb = _kb_or_404(store, tenant_id, kb_id)
-    if not _retry_deadlock_once(lambda: store.delete_document(tenant_id, kb["id"], document_key)):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
+    service.delete_document(principal.tenant_id, kb_id, document_key)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1129,9 +326,7 @@ def reingest_document(
     kb_id: str,
     document_key: str,
     principal: PrincipalDep,
-    store: KnowledgeDep,
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: KnowledgeServiceDep,
     body: Annotated[IngestRunCreate | None, Body()] = None,
 ) -> JSONResponse:
     """Start a new ingest run of the document's latest version (the "Retry" of a failed ingest;
@@ -1141,78 +336,11 @@ def reingest_document(
     ready, nothing to do. 409 while an ingest run of that version is queued, running or starting,
     or when a concurrent reingest won. Idempotent by the optional `run_id` (resolved before any
     write). 503 {detail, run_id}: retry with the same run_id (or none) to hand it off again."""
-    tenant_id = principal.tenant_id
-    run_store, _ = stores
-    run_id = body.run_id if body is not None else None
-    kb = _kb_or_404(store, tenant_id, kb_id)
-    document = store.get_document(tenant_id, kb["id"], document_key)
-    if document is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-    input_json = ingest_input(document["id"], document["latest_version"])
-    try:
-        existing = _resolve_client_run_id(store, run_store, tenant_id, run_id)
-        if existing is not None:
-            if not _is_run_of(existing, kb["id"], input_json):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
-                )
-            view = _replay(run_store, launcher, tenant_id, existing)
-        elif document["status"] == "ready" and document["active_version"] == document["latest_version"]:
-            return _json(
-                status.HTTP_200_OK,
-                {"run_id": None, "unchanged": True, "knowledge_base_id": kb["id"], "document": document_view(document)},
-            )
-        else:
-            latest = _latest_run(run_store, tenant_id, document)
-            if latest is not None and (_enqueue_failed(latest) or _stale_queued(latest)):
-                view = _hand_off(run_store, launcher, tenant_id, latest, created=False)
-            elif latest is not None and latest["status"] not in TERMINAL_RUN_STATUSES:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"the document is already being ingested (run {latest['id']} is {latest['status']})",
-                )
-            elif latest is None and document["last_run_id"] and not _orphaned(document) and document["status"] == "pending":
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"an ingest run of the document is being started (run {document['last_run_id']})",
-                )
-            else:
-                new_run_id = run_id or uuid.uuid4()
-                try:
-                    document = store.request_reingest(
-                        tenant_id,
-                        kb["id"],
-                        document_key,
-                        run_id=str(new_run_id),
-                        expected_last_run_id=document["last_run_id"],
-                        doc_version=document["latest_version"],
-                    )
-                except DocumentNotFound:
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-                except IngestRunConflict:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="another ingest run of the document was started concurrently",
-                    )
-                if not _renew_claim(store, tenant_id, document, new_run_id):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="another ingest run of the document was started concurrently",
-                    )
-                run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id)
-                view = _hand_off(run_store, launcher, tenant_id, run, created)
-    except HandOffFailed as exc:
-        return exc.response()
-    document = store.get_document(tenant_id, kb["id"], document_key) or document
-    return _json(status.HTTP_202_ACCEPTED, {**view, "unchanged": False, "document": document_view(document)})
+    out = service.reingest_document(principal.tenant_id, kb_id, document_key, body.run_id if body is not None else None)
+    return _json(status.HTTP_200_OK if out["unchanged"] and out["run_id"] is None else status.HTTP_202_ACCEPTED, out)
 
 
 # --------------------------------------------------------------------------- re-extract (RAG P1.A4)
-
-REEXTRACT_ENQUEUE_FAILED_DETAIL = (
-    "the ingest run was recorded but could not be started; retry it with POST "
-    "/knowledge-bases/{id}/documents/{key}/reingest"
-)
 
 
 @_kb.post(
@@ -1225,9 +353,7 @@ def reextract_document(
     kb_id: str,
     document_key: str,
     principal: PrincipalDep,
-    store: KnowledgeDep,
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: KnowledgeServiceDep,
     body: Annotated[IngestRunCreate | None, Body()] = None,
 ) -> JSONResponse:
     """Re-extract the document: a new version with the SAME content (`latest_version` + 1) and an
@@ -1245,95 +371,8 @@ def reextract_document(
     that lost answers 409 and wrote nothing. Concurrent submits with ONE `run_id` make one version
     and one run: a loser that finds the document's `last_run_id` already equal to its `run_id`
     answers that run (202), created or found idempotently by the run id."""
-    tenant_id = principal.tenant_id
-    run_store, _ = stores
-    run_id = body.run_id if body is not None else None
-    kb = _kb_or_404(store, tenant_id, kb_id)
-    document = store.get_document(tenant_id, kb["id"], document_key)
-    if document is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-    try:
-        existing = _resolve_client_run_id(store, run_store, tenant_id, run_id)
-        if existing is not None and _is_document_run(existing, kb["id"], document["id"]):
-            # The document read above can predate the version this run_id made (a concurrent
-            # duplicate of the same request): compare against the document as it is now.
-            document = store.get_document(tenant_id, kb["id"], document_key) or document
-        if existing is not None:
-            if not _is_run_of(existing, kb["id"], ingest_input(document["id"], document["latest_version"])):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
-                )
-            view = _reextract_replay(run_store, launcher, tenant_id, existing, created=False)
-        else:
-            new_run_id = run_id or uuid.uuid4()
-            try:
-                document = store.new_document_version(
-                    tenant_id, kb["id"], document_key, run_id=str(new_run_id),
-                    expected_latest_version=document["latest_version"],
-                )
-            except DocumentNotFound:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-            except IngestRunConflict:
-                current = store.get_document(tenant_id, kb["id"], document_key)
-                if current is None:
-                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=DOCUMENT_NOT_FOUND)
-                if current["last_run_id"] != str(new_run_id):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="another upload or re-extract of the document was started concurrently",
-                    )
-                # A concurrent duplicate with this run_id already made the version: answer its run.
-                document = current
-            # No _renew_claim here: the bump itself was the compare-and-set and recorded the run id,
-            # so the run of the version this request made is always created (a later version
-            # supersedes it in the worker); a crash before that is the 60 s orphan rule's case.
-            input_json = ingest_input(document["id"], document["latest_version"])
-            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, new_run_id)
-            view = _reextract_replay(run_store, launcher, tenant_id, run, created=created)
-    except HandOffFailed as exc:
-        return exc.response()
-    document = store.get_document(tenant_id, kb["id"], document_key) or document
-    return _json(status.HTTP_202_ACCEPTED, {**view, "unchanged": False, "document": document_view(document)})
-
-
-def _reextract_replay(
-    run_store: RunStore, launcher: RunLauncher, tenant_id: str, run: dict[str, Any], *, created: bool
-) -> dict[str, Any]:
-    """Hand off a re-extract run this request created. A run it found (a retry or a concurrent
-    duplicate with the same run_id) is answered as recorded, with no second dispatch, unless its
-    enqueue failed or it is still `queued` past ORPHAN_AFTER_SECONDS (its request may have died
-    before enqueuing): then it is handed off again (idempotent in DBOS)."""
-    if created or _enqueue_failed(run) or _stale_queued(run):
-        return _hand_off(run_store, launcher, tenant_id, run, created)
-    return _run_view(run)
-
-
-def outdated_extractor_map(
-    kb: dict[str, Any], formats: set[str] | None = None
-) -> dict[str, tuple[str | None, int]]:
-    """Base MIME type (every alias too) -> (the worker extractor that handles it in this knowledge
-    base, its current version), for KnowledgeStore.outdated_extraction_documents. An API-extracted
-    type maps to (None, 0): its document is outdated only when its active chunks still carry a
-    worker extractor's record (a flavour or extractor change, e.g. Markdown back from Doxygen)."""
-    extract_config = kb_extract_config(kb)
-    out: dict[str, tuple[str | None, int]] = {}
-    for spec in FORMAT_SPECS:
-        if formats is not None and spec.format not in formats:
-            continue
-        extractor = extractor_for(spec.mime_type, extract_config)
-        for mime in spec.mime_types:
-            out[mime.lower()] = (extractor, EXTRACTOR_VERSIONS[extractor]) if extractor is not None else (None, 0)
-    return out
-
-
-def _document_ref(document: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    return {
-        "document_id": document["id"],
-        "document_key": document["document_key"],
-        "mime_type": document["mime_type"],
-        "doc_version": document["latest_version"],
-        **extra,
-    }
+    out = service.reextract_document(principal.tenant_id, kb_id, document_key, body.run_id if body is not None else None)
+    return _json(status.HTTP_202_ACCEPTED, out)
 
 
 @_kb.post(
@@ -1349,9 +388,7 @@ def reextract_knowledge_base(
     kb_id: str,
     body: ReextractCreate,
     principal: PrincipalDep,
-    store: KnowledgeDep,
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: KnowledgeServiceDep,
 ) -> JSONResponse:
     """Re-extract many documents (see ReextractCreate): each selected document gets a new version
     with the same content and its own ingest run on the `eap-kb-ingest-fair` queue (this knowledge base's partition), which runs at most
@@ -1365,105 +402,11 @@ def reextract_knowledge_base(
     listed with `status` "failed" and a `detail` (its document stays `pending`; POST …/reingest
     starts it again), and the call goes on with the others. 422 unknown format names. 404 unknown
     knowledge base (another tenant's included)."""
-    tenant_id = principal.tenant_id
-    run_store, _ = stores
-    kb = _kb_or_404(store, tenant_id, kb_id)
-    formats: set[str] | None = None
-    if body.formats is not None:
-        formats = set()
-        for name in body.formats:
-            try:
-                formats.add(format_by_name(name).format)
-            except KeyError:
-                expected = ", ".join(spec.format for spec in FORMAT_SPECS)
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=f"unknown format {name!r}: expected one of {expected}",
-                )
-    current_chunker = int((kb.get("chunking") or {}).get("chunker_version", 1))
-    change_chunker = body.chunker_version is not None and body.chunker_version != current_chunker
-
-    if change_chunker:
-        selected = store.list_documents(tenant_id, kb["id"])
-    elif body.only_outdated:
-        selected = store.outdated_extraction_documents(
-            tenant_id, kb["id"], outdated_extractor_map(kb, formats), orphan_after_seconds=ORPHAN_AFTER_SECONDS
-        )
-    else:
-        selected = [
-            d for d in store.list_documents(tenant_id, kb["id"])
-            if formats is None or ((spec := _spec_or_none(d["mime_type"])) is not None and spec.format in formats)
-        ]
-
-    def answer(code: int, refs: list[dict[str, Any]], *, chunker: int, changed: bool, started: int, failed: int,
-               dry_run: bool = False) -> JSONResponse:
-        return _json(
-            code,
-            {
-                "knowledge_base_id": kb["id"],
-                "dry_run": dry_run,
-                "chunker_version": chunker,
-                "chunker_version_changed": changed,
-                "selected": len(refs),
-                "started": started,
-                "failed": failed,
-                "documents": refs,
-                "knowledge_base": _kb_or_404(store, tenant_id, kb["id"]),
-            },
-        )
-
-    if body.dry_run or (not selected and not change_chunker):
-        return answer(
-            status.HTTP_200_OK, [_document_ref(d) for d in selected],
-            chunker=body.chunker_version or current_chunker if body.dry_run else current_chunker,
-            changed=False, started=0, failed=0, dry_run=body.dry_run,
-        )
-
-    try:
-        updated_kb, bumped, changed = store.start_reextract(
-            tenant_id,
-            kb["id"],
-            document_ids=None if change_chunker else [d["id"] for d in selected],
-            chunker_version=body.chunker_version if change_chunker else None,
-        )
-    except KnowledgeBaseNotFound:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-    except ValidationError as exc:  # the stored config cannot take chunker v2 (it always can today)
-        msg = exc.errors()[0]["msg"] if exc.errors() else "invalid"
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"the knowledge base cannot move to chunker v{body.chunker_version}: {msg}",
-        )
-
-    refs: list[dict[str, Any]] = []
-    started = failed = 0
-    for document in bumped:
-        run_id = document["last_run_id"]
-        input_json = ingest_input(document["id"], document["latest_version"])
-        try:
-            run, created = _create_ingest_run(run_store, tenant_id, kb["id"], input_json, run_id)
-            view = _hand_off(run_store, launcher, tenant_id, run, created)
-        except Exception as exc:  # noqa: BLE001 - one document's failure must not strand the others
-            # Its new version is stored with last_run_id = run_id: a reingest of the document starts
-            # (or re-queues) that run, also when the run row was never written (the orphan rule).
-            if not isinstance(exc, (HandOffFailed, HTTPException)):
-                log_failure(
-                    log, "re-extract run start failed", exc, code="reextract_start_failed", level=logging.ERROR,
-                    tenant_id=tenant_id, run_id=str(run_id),
-                )
-            failed += 1
-            refs.append(_document_ref(
-                document, run_id=str(run_id), status="failed",
-                detail=str(exc.detail) if isinstance(exc, HTTPException) else REEXTRACT_ENQUEUE_FAILED_DETAIL,
-            ))
-            continue
-        started += 1
-        refs.append(_document_ref(document, run_id=view["run_id"], status=view["status"]))
-    chunker = int((updated_kb.get("chunking") or {}).get("chunker_version", 1))
-    return answer(
-        status.HTTP_202_ACCEPTED if started else status.HTTP_200_OK, refs,
-        chunker=chunker, changed=changed, started=started, failed=failed,
+    out = service.reextract_knowledge_base(
+        principal.tenant_id, kb_id, formats=body.formats, only_outdated=body.only_outdated,
+        chunker_version=body.chunker_version, dry_run=body.dry_run,
     )
+    return _json(status.HTTP_202_ACCEPTED if out["started"] else status.HTTP_200_OK, out)
 
 
 # -------------------------------------------------------------------------------------- reindex
@@ -1484,9 +427,7 @@ def reindex_knowledge_base(
     kb_id: str,
     body: ReindexCreate,
     principal: PrincipalDep,
-    store: KnowledgeDep,
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: KnowledgeServiceDep,
 ) -> JSONResponse:
     """Re-embed the knowledge base with `embedding_model` into a new generation; retrieval keeps the
     current one until the run switches atomically.
@@ -1503,131 +444,17 @@ def reindex_knowledge_base(
     failed run stays as the record. A failed hand-off of a retry of a `reindex_failed` reindex
     leaves that state, and the same retry works again.
     """
-    tenant_id = principal.tenant_id
-    run_store, _ = stores
-    model = _resolve_model(body.embedding_model)
-    kb = _kb_or_404(store, tenant_id, kb_id)
-
-    if body.dry_run:
-        try:
-            estimate = store.estimate_reindex(tenant_id, kb["id"])
-        except KnowledgeBaseNotFound:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-        cost, source, note = estimate_embedding_cost(model.id, estimate.approx_tokens)
-        budget = max_ingest_tokens()
-        return _json(
-            status.HTTP_200_OK,
-            {
-                "dry_run": True,
-                "knowledge_base_id": kb["id"],
-                "embedding_model": model.id,
-                "dimensions": model.dimensions,
-                "chunks": estimate.chunks,
-                "approx_tokens": estimate.approx_tokens,
-                "max_ingest_tokens": budget,
-                "exceeds_budget": estimate.approx_tokens > budget,
-                "estimated_cost_usd": cost,
-                "price_source": source,
-                "cost_note": note,
-                "reindex_pending": kb["pending_generation"] is not None,
-            },
-        )
-
-    def accepted(view: dict[str, Any]) -> JSONResponse:
-        return _json(status.HTTP_202_ACCEPTED, {**view, "knowledge_base": _kb_or_404(store, tenant_id, kb["id"])})
-
-    pending = kb["pending_generation"]
-    try:
-        existing = _resolve_client_run_id(store, run_store, tenant_id, body.run_id)
-        if existing is not None:
-            if not (
-                pending is not None
-                and kb["pending_embedding_model"] == model.id
-                and _is_run_of(existing, kb["id"], reindex_input(pending))
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="run_id is not the run of this knowledge base's pending reindex with this model",
-                )
-            if kb["status"] == "reindex_failed" and (
-                _enqueue_failed(existing) or existing["status"] not in TERMINAL_RUN_STATUSES
-            ):
-                # The replay would hand the run off again: claim the failed generation first, so it
-                # cannot race a plain retry (or another replay) into a second running reindex.
-                if not store.claim_reindex_retry(tenant_id, kb["id"], pending):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="a retry of this reindex was started concurrently, or it was cancelled",
-                    )
-                try:
-                    return accepted(_replay(run_store, launcher, tenant_id, existing))
-                except HandOffFailed:
-                    store.mark_reindex_failed(tenant_id, kb["id"], pending, "the reindex retry could not be started")
-                    raise
-            if _enqueue_failed(existing):
-                # Its failed hand-off put the generation back to 'reindex_failed'; it is 'reindexing'
-                # now, so another retry claimed it and runs it: never start a second run.
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="a retry of this reindex was started concurrently, or it was cancelled",
-                )
-            return accepted(_replay(run_store, launcher, tenant_id, existing))
-        if pending is not None and kb["status"] == "reindex_failed" and kb["pending_embedding_model"] == model.id:
-            # Retry the failed reindex: a new run of the same pending generation reuses its
-            # embeddings. The compare-and-set 'reindex_failed' -> 'reindexing' admits one retry.
-            if not store.claim_reindex_retry(tenant_id, kb["id"], pending):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="a retry of this reindex was started concurrently, or it was cancelled",
-                )
-            try:
-                run, created = _create_ingest_run(
-                    run_store, tenant_id, kb["id"], reindex_input(pending), body.run_id or uuid.uuid4()
-                )
-                return accepted(_hand_off(run_store, launcher, tenant_id, run, created))
-            except (HTTPException, HandOffFailed):
-                # Back to 'reindex_failed', so the same retry can be sent again.
-                store.mark_reindex_failed(tenant_id, kb["id"], pending, "the reindex retry could not be started")
-                raise
-
-        try:
-            opened = store.start_reindex(tenant_id, kb["id"], embedding_model=model.id, dimensions=model.dimensions)
-        except KnowledgeBaseNotFound:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=KB_NOT_FOUND)
-        except ReindexInProgress as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"{exc}; wait for it, or cancel it with DELETE /knowledge-bases/{{id}}/reindex",
-            )
-        generation = opened["pending_generation"]
-        try:
-            run, created = _create_ingest_run(
-                run_store, tenant_id, kb["id"], reindex_input(generation), body.run_id or uuid.uuid4()
-            )
-            return accepted(
-                _hand_off(run_store, launcher, tenant_id, run, created, failed_detail=REINDEX_ENQUEUE_FAILED_DETAIL)
-            )
-        except (HTTPException, HandOffFailed):
-            # No run will embed the generation just opened: drop it, so a plain retry can start over.
-            _cancel_generation(store, tenant_id, kb["id"], generation)
-            raise
-    except HandOffFailed as exc:
-        return exc.response()
-
-
-def _cancel_generation(store: KnowledgeStore, tenant_id: str, kb_id: str, generation: int) -> None:
-    current = store.get_knowledge_base(tenant_id, kb_id)
-    if current is not None and current["pending_generation"] == generation:
-        _retry_deadlock_once(lambda: store.cancel_reindex(tenant_id, kb_id))
-
+    out = service.reindex_knowledge_base(
+        principal.tenant_id, kb_id, embedding_model=body.embedding_model, dry_run=body.dry_run, run_id=body.run_id
+    )
+    return _json(status.HTTP_200_OK if body.dry_run else status.HTTP_202_ACCEPTED, out)
 
 
 @_kb.delete("/{kb_id}/reindex", status_code=status.HTTP_204_NO_CONTENT)
-def cancel_reindex(kb_id: str, principal: PrincipalDep, store: KnowledgeDep) -> Response:
+def cancel_reindex(kb_id: str, principal: PrincipalDep, service: KnowledgeServiceDep) -> Response:
     """Drop the pending generation and its chunks (status back to `ready`); a running reindex run
     then ends failed (`ingest_cancelled`). 204 also when nothing is pending."""
-    kb = _kb_or_404(store, principal.tenant_id, kb_id)
-    _retry_deadlock_once(lambda: store.cancel_reindex(principal.tenant_id, kb["id"]))
+    service.cancel_reindex(principal.tenant_id, kb_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1651,43 +478,11 @@ class KnowledgeSearchRequest(BaseModel):
     run_id: uuid.UUID | None = None
 
 
-def _safe_errors(exc: ValidationError, prefix: list[Any]) -> list[dict[str, Any]]:
-    """loc/msg/type only: never the rejected values (a query can hold anything a user typed)."""
-    return [
-        {"loc": [*prefix, *err["loc"]], "msg": err["msg"], "type": err["type"]}
-        for err in exc.errors(include_url=False, include_context=False, include_input=False)
-    ]
-
-
 async def _search_body(request: Request) -> KnowledgeSearchRequest:
     try:
         return KnowledgeSearchRequest.model_validate_json(await request.body())
     except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_safe_errors(exc, ["body"]))
-
-
-def _search_view(run: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-    """(status code, body): 200 with the result (or the failure) once the tool run ended, else 202
-    with the run id to follow through GET /runs/{id}."""
-    view: dict[str, Any] = {
-        "run_id": str(run["id"]),
-        "kind": "tool",
-        "tool_id": KNOWLEDGE_SEARCH_TOOL_ID,
-        "knowledge_base_id": str(run["knowledge_base_id"]) if run.get("knowledge_base_id") else None,
-        "status": run["status"],
-        "display_status": run["display_status"],
-        "trace_id": run.get("trace_id"),
-    }
-    if run["status"] == "completed":
-        try:
-            view["result"] = json.loads(run["output"] or "null")
-        except ValueError:  # pragma: no cover - the worker stores canonical JSON
-            view["result"] = None
-        return status.HTTP_200_OK, view
-    if run["status"] in TERMINAL_RUN_STATUSES:
-        view["error"] = run.get("error")
-        return status.HTTP_200_OK, view
-    return status.HTTP_202_ACCEPTED, view
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=safe_errors(exc, ["body"]))
 
 
 @_kb.post(
@@ -1710,9 +505,7 @@ async def search_knowledge_base(
     request: Request,
     principal: PrincipalDep,  # before the body: 401 wins over 422
     body: Annotated[KnowledgeSearchRequest, Depends(_search_body)],
-    store: KnowledgeDep,
-    stores: StoresDep,
-    launcher: LauncherDep,
+    service: KnowledgeServiceDep,
     wait: Annotated[float, Query(ge=0.0, le=SEARCH_WAIT_SECONDS)] = SEARCH_WAIT_SECONDS,
 ) -> JSONResponse:
     """Search one knowledge base the way an agent's `retrieve` tool does (the search tester).
@@ -1729,85 +522,18 @@ async def search_knowledge_base(
     is marked failed; retry with the same run_id). The wait polls the run from every 0.2 s backing
     off to 1 s, and stops early when the client disconnects (the run itself goes on)."""
     tenant_id = principal.tenant_id
-    kb = await asyncio.to_thread(_kb_or_404, store, tenant_id, kb_id)
-    try:
-        validated = KnowledgeSearchInput.model_validate(
-            {
-                "knowledge_base_id": kb["id"],
-                "query": body.query,
-                "top_k": body.top_k,
-                "min_score": body.min_score,
-                "filter": body.filter,
-            }
-        )
-    except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=_safe_errors(exc, ["body"]))
-    input_json = _canonical_json(validated.model_dump(mode="json"))
-    run_store, _ = stores
-    run_id = body.run_id or uuid.uuid4()
-    trace_id, traceparent = current_trace_context()
-
-    def create() -> tuple[dict[str, Any], bool]:
-        try:
-            _, created = run_store.create_tool_run(
-                tenant_id, KNOWLEDGE_SEARCH_TOOL_ID, input_json, run_id,
-                trace_id=trace_id, traceparent=traceparent, knowledge_base_id=kb["id"],
-            )
-        except RunIdConflict:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="run_id is already in use")
-        run = run_store.get_run(tenant_id, run_id)
-        if run is None:  # pragma: no cover - deleted between insert and read
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-        if not created and (
-            run["kind"] != "tool" or run["tool_id"] != KNOWLEDGE_SEARCH_TOOL_ID or run["input"] != input_json
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT, detail="run_id is already used by a different run request"
-            )
-        return run, created
-
-    run, created = await asyncio.to_thread(create)
-
-    def hand_off() -> None:
-        owns_handoff = created or run_store.requeue_after_enqueue_failure(tenant_id, run_id)
-        if not owns_handoff and run["status"] in TERMINAL_RUN_STATUSES:
-            return  # a retry of a finished search: answer what was recorded
-        try:
-            launcher.launch_tool(
-                run_id=run_id, tenant_id=tenant_id, tool_id=KNOWLEDGE_SEARCH_TOOL_ID,
-                input_json=run["input"], traceparent=run.get("traceparent"),
-            )
-        except Exception as exc:
-            log_failure(
-                log, "enqueue failed", exc, code="enqueue_failed", level=logging.ERROR,
-                run_id=str(run_id), tenant_id=tenant_id,
-            )
-            if owns_handoff:
-                try:
-                    run_store.mark_enqueue_failed(tenant_id, run_id)
-                except Exception as mark_exc:  # noqa: BLE001 - the 503 below is the answer either way
-                    log_failure(
-                        log, "marking enqueue failure failed", mark_exc, code="enqueue_failed_mark",
-                        level=logging.ERROR, run_id=str(run_id), tenant_id=tenant_id,
-                    )
-            raise HandOffFailed(str(run_id)) from None
-
-    try:
-        await asyncio.to_thread(hand_off)
-    except HandOffFailed as failed:
-        return failed.response()
-    log.info("knowledge search run %s queued: tenant=%s kb=%s", run_id, tenant_id, kb["id"])
+    run, created, run_id = await asyncio.to_thread(
+        service.start_search, tenant_id, kb_id,
+        query=body.query, top_k=body.top_k, min_score=body.min_score, filter=body.filter, run_id=body.run_id,
+    )
+    await asyncio.to_thread(service.hand_off_search, tenant_id, run, created, run_id)
 
     deadline = time.monotonic() + wait
     interval = SEARCH_POLL_SECONDS
     while True:
-        current = await asyncio.to_thread(run_store.get_run, tenant_id, run_id) or run
-        if current["error"] == ENQUEUE_FAILED_ERROR and current["status"] == "failed":
-            # A concurrent owner's enqueue failed, but this one succeeded: the workflow exists.
-            current = {**current, "status": "queued", "display_status": "queued"}
-        code, view = _search_view(current)
-        if code == status.HTTP_200_OK or time.monotonic() >= deadline or await request.is_disconnected():
-            return _json(code, view)
+        finished, view = await asyncio.to_thread(service.search_progress, tenant_id, run_id, run)
+        if finished or time.monotonic() >= deadline or await request.is_disconnected():
+            return _json(status.HTTP_200_OK if finished else status.HTTP_202_ACCEPTED, view)
         await asyncio.sleep(min(interval, max(0.0, deadline - time.monotonic())))
         interval = min(SEARCH_POLL_MAX_SECONDS, interval * 1.5)
 

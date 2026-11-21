@@ -14,15 +14,15 @@ import os
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID, uuid4
 
 from eap_observability import dbos_trace_attributes
 # The DBOS topic an agent run's gated tool calls wait on, `tool_approval:{run_id}`: defined in
 # eap_run_store.approvals so the API's wake-up and the worker's wait (AC.6) share one builder.
+from eap_api.ports import RunLauncher  # noqa: F401 - re-exported: the Protocol lives in eap_api.ports
 from eap_run_store.approvals import tool_approval_topic
 from eap_schemas.knowledge import kb_ingest_partition_key
-from fastapi import Request
 
 QUEUE_NAME = "eap-agent-runs"
 WORKFLOW_NAME = "eap.agent_run"
@@ -100,85 +100,6 @@ class LauncherSettings:
             system_schema=os.environ.get("EAP_DBOS_SYSTEM_SCHEMA", "dbos"),
             app_version=os.environ.get("EAP_APP_VERSION", "m1"),
         )
-
-
-class RunLauncher(Protocol):
-    def launch(
-        self,
-        *,
-        run_id: UUID,
-        tenant_id: str,
-        agent_id: UUID,
-        version: int,
-        spec_json: str,
-        input_text: str,
-        traceparent: str | None = None,
-    ) -> None: ...
-
-    def launch_tool(
-        self,
-        *,
-        run_id: UUID,
-        tenant_id: str,
-        tool_id: str,
-        input_json: str,
-        traceparent: str | None = None,
-    ) -> None: ...
-
-    def launch_workflow(
-        self,
-        *,
-        run_id: UUID,
-        tenant_id: str,
-        workflow_version_id: str,
-        input_json: str,
-        traceparent: str | None = None,
-    ) -> None: ...
-
-    def launch_kb_ingest(
-        self,
-        *,
-        run_id: UUID,
-        tenant_id: str,
-        knowledge_base_id: str,
-        input_json: str,
-        traceparent: str | None = None,
-    ) -> None: ...
-
-    def launch_eval(
-        self,
-        *,
-        run_id: UUID,
-        tenant_id: str,
-        input_json: str,
-        traceparent: str | None = None,
-    ) -> None: ...
-
-    def launch_kb_source_sync(
-        self,
-        *,
-        run_id: UUID,
-        tenant_id: str,
-        source_id: str,
-        request_json: str,
-        traceparent: str | None = None,
-    ) -> None: ...
-
-    def launch_score(self, *, run_id: UUID, tenant_id: str, scorer_ids: list[str]) -> None: ...
-
-    def notify_approval(self, *, workflow_id: str, step_id: str, decision: str) -> None: ...
-
-    def notify_tool_approval(
-        self, *, run_id: str, tool_call_id: str, decision: str, workflow_id: str | None = None
-    ) -> None: ...
-
-    def cancel_workflow_tree(self, *, workflow_id: str) -> None: ...
-
-    def recovery_attempts(self, run_ids: list[str]) -> dict[str, int]: ...
-
-    def recovered_run_ids(self, *, since: datetime, until: datetime) -> list[str]: ...
-
-    def close(self) -> None: ...
 
 
 class DBOSRunLauncher:
@@ -384,5 +305,11 @@ class DBOSRunLauncher:
             client.destroy()
 
 
-def get_run_launcher(request: Request) -> RunLauncher:
-    return request.app.state.run_launcher
+def __getattr__(name: str):
+    # `get_run_launcher` lives in eap_api.deps (the one module that reads app.state); importing it here
+    # eagerly would be a cycle, since deps imports RunLauncher from this module.
+    if name == "get_run_launcher":
+        from eap_api.deps import get_run_launcher
+
+        return get_run_launcher
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
