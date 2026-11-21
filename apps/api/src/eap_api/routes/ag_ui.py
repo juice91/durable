@@ -45,7 +45,7 @@ The POST, in order, everything before the stream opens:
 5b. (AGUI.8, Q5) a new runId without `resume[]` while the latest turn has an open interrupt
    records nothing: the stream sends `RUN_STARTED`, `CUSTOM pydanticos.run`, `MESSAGES_SNAPSHOT`
    (with the gated calls) and the open interrupts again as `RUN_FINISHED{outcome: interrupt}`;
-6. the previous turn still running (TurnInProgress): the stream opens with `RUN_STARTED` and
+6. the previous turn still running (TurnBusy): the stream opens with `RUN_STARTED` and
    `CUSTOM pydanticos.waiting`, waits up to EAP_AGUI_PREVIOUS_TURN_WAIT_S (120 s) for it, then
    records the turn and sends `CUSTOM pydanticos.run` and `MESSAGES_SNAPSHOT` (with the answer the
    client missed) before its own events; a timeout ends with `RUN_ERROR previous_turn_running`.
@@ -64,7 +64,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -118,6 +117,8 @@ from eap_api.ag_ui.resume_entries import (
     thread_interrupts,
     waiting_seq,
 )
+from eap_api.ag_ui.snapshot import user_message
+from eap_api.ag_ui.thread import ThreadView, attachment_parts, build_thread_view
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext
 from eap_api.agent_archive import AGENT_ARCHIVED
 from eap_api.attachments_shared import (
@@ -133,11 +134,10 @@ from eap_api.schemas import ErrorDetail
 from eap_api.service_deps.agui import AgUiServiceDep
 from eap_api.service_errors import to_http_exception
 from eap_api.services.ag_ui import (
-    FINGERPRINT_CONFLICT_DETAIL,
     UNKNOWN_RUN_DETAIL,
     AgUiRunRecord,
     AgUiService,
-    ThreadView,
+    TurnBusy,
     TurnRun,
 )
 from eap_api.services.attachments import max_attachment_bytes
@@ -156,15 +156,6 @@ from eap_api.streams.native import run_items
 from eap_api.streams.resume import LastEventIdError, StreamPlan, parse_last_event_id, plan_stream
 from eap_schemas import RunEvent
 
-# TODO(layering): the turn recording below waits for the agents group's ConversationService
-# (record_and_launch_turn / new_turn_options without HTTPException); then these imports go.
-from sqlalchemy.orm import Session
-from eap_api.routes.conversations import new_turn_options, record_and_launch_turn
-from eap_api.routes.runs import lock_agent
-from eap_api.run_options import RunOptions
-from eap_run_store import AgUiRunWrite, AgUiScopeMismatch, TurnInProgress
-from eap_run_store.chat_attachments import ATTACHMENT_CAPABILITIES_KEY
-import dataclasses
 
 log = logging.getLogger("eap_api")
 
@@ -314,9 +305,29 @@ def _plan_or_raise(plan: StreamPlan) -> StreamPlan:
 # --------------------------------------------------------------------------- reads
 
 
+def _files_of(c: _Ctx) -> Any:
+    return lambda ids: c.svc.attachment_files(c.tenant_id, ids)
+
+
+def _thread_view(
+    c: _Ctx, conversation_id: str, before_turn: int | None = None, later_ids: tuple[str, ...] = ()
+) -> ThreadView:
+    """The thread's turns below `before_turn` (all when None) as AG-UI messages (D13)."""
+    data = c.svc.thread_data(c.tenant_id, c.agent_id, conversation_id, before_turn)
+    return build_thread_view(data, _files_of(c), via_api_key=c.via_api_key, later_ids=later_ids)
+
+
 def _history(c: _Ctx, run: dict[str, Any], record: AgUiRunRecord) -> list[dict[str, Any]]:
-    """`AgUiStreamContext.history`: the thread's earlier turns, then this run's user message."""
-    return c.svc.history(c.tenant_id, c.agent_id, run, record, via_api_key=c.via_api_key)
+    """`AgUiStreamContext.history`: the thread's earlier turns (those this run regenerates left
+    out, see build_thread_view), then this run's user message."""
+    starter = _starter(c, record)
+    out = _thread_view(
+        c, str(run["conversation_id"]), before_turn=run["turn"], later_ids=starter.input_message_ids
+    ).messages
+    if run.get("input"):
+        client_id = starter.input_message_ids[0] if starter.input_message_ids else None
+        out.append(user_message(starter.external_run_id, run["input"], client_id))
+    return attachment_parts(out, _files_of(c), via_api_key=c.via_api_key)
 
 
 def _starter(c: _Ctx, record: AgUiRunRecord) -> TurnRun:
@@ -553,14 +564,6 @@ def _check_attachments(c: _Ctx, mapped: AgUiInput, model_id: str) -> dict[str, A
     return c.svc.check_attachments(c.tenant_id, created_by_for(c.principal), mapped.attachments, model_id)
 
 
-def _with_attachment_capabilities(options: RunOptions, capabilities: dict[str, Any] | None) -> RunOptions:
-    """The run's options with the attachment decision recorded among its model settings (the JSON
-    the worker reads; absent for a turn without files)."""
-    if capabilities is None:
-        return options
-    return dataclasses.replace(options, model_settings={**(options.model_settings or {}), ATTACHMENT_CAPABILITIES_KEY: capabilities})
-
-
 def _link_attachments(c: _Ctx, mapped: AgUiInput, run_id: str) -> None:
     """Link each message's uploads to run `run_id` (only the caller's own)."""
     c.svc.link_attachments(c.tenant_id, created_by_for(c.principal), mapped.attachments, run_id)
@@ -573,52 +576,21 @@ def _tool_dicts(mapped: AgUiInput) -> tuple[list[dict[str, Any]] | None, list[di
 
 
 def _record(c: _Ctx, new: _NewTurn) -> _Prepared:
-    """Record and hand off the turn (raises TurnInProgress while the previous turn runs). Validated
+    """Record and hand off the turn (raises TurnBusy while the previous turn runs). Validated
     again under the agent lock, so an archive or a version change during a wait is seen."""
-    svc = c.svc
     mapped, effective = new.mapped, new.effective
     key = c.key(mapped.thread_id, mapped.run_id)
-
-    def same_fingerprint(run: dict[str, Any]) -> bool:
-        # A concurrent POST of this runId created the turn (created False): compare its AG-UI row.
-        record = svc.record_concurrent(
-            c.tenant_id, key, run_id=str(run["id"]), fingerprint=new.fingerprint,
-            input_message_ids=effective.input_message_ids,
-        )
-        return record.fingerprint == new.fingerprint
-
     tools, results = _tool_dicts(effective)
     _link_attachments(c, effective, new.native_run_id)  # before the launch: the worker reads them through the turn's message ids
-    with Session(svc.engine) as db:
-        agent = lock_agent(db, c.tenant_id, c.agent_id)
-        try:
-            run, created = record_and_launch_turn(
-                db, svc.launcher, svc.run_store, c.tenant_id, new.conversation_id,
-                run_id=new.native_run_id,
-                new_options=lambda: _with_attachment_capabilities(
-                    new_turn_options(
-                        db, c.tenant_id, agent,
-                        version=effective.options.version,
-                        request_context=effective.options.request_context,
-                        model=effective.options.model,
-                        model_settings=effective.options.model_settings,
-                        input_text=effective.input_text,
-                    ),
-                    new.attachment_capabilities,
-                ),
-                input_text=effective.input_text,
-                same_request=same_fingerprint,
-                conflict_detail=FINGERPRINT_CONFLICT_DETAIL,
-                client_tools=tools,
-                client_tool_results=results,
-                ag_ui_run=AgUiRunWrite(
-                    **key, fingerprint=new.fingerprint, input_message_ids=effective.input_message_ids
-                ),
-            )
-        except AgUiScopeMismatch:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="threadId belongs to another agent")
-        db.commit()
-    record = svc.get_ag_ui_run(c.tenant_id, **key)
+    run, created = c.svc.record_turn(
+        c.tenant_id, c.agent_id, conversation_id=new.conversation_id, run_id=new.native_run_id, key=key,
+        fingerprint=new.fingerprint, input_message_ids=effective.input_message_ids,
+        input_text=effective.input_text, version=effective.options.version,
+        request_context=effective.options.request_context, model=effective.options.model,
+        model_settings=effective.options.model_settings, attachment_capabilities=new.attachment_capabilities,
+        client_tools=tools, client_tool_results=results,
+    )
+    record = c.svc.get_ag_ui_run(c.tenant_id, **key)
     assert record is not None  # written with the turn, or by same_fingerprint
     if created:
         log.info("ag-ui run %s recorded: tenant=%s agent=%s", run["id"], c.tenant_id, c.agent_id)
@@ -659,13 +631,11 @@ def _prepare_post(
         if not continuation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=UNKNOWN_RUN_DETAIL)
 
-    with Session(c.svc.engine) as db:
-        agent = lock_agent(db, c.tenant_id, c.agent_id)
+    with c.svc.locked_agent(c.tenant_id, c.agent_id) as locked:
         # A new runId: validate everything before anything is written.
         thread = resolve_agent_thread(c.svc, c.tenant_id, c.agent_id, mapped.thread_id)
         effective = _deduped(body, mapped, c.svc.thread_message_ids(c.tenant_id, c.agent_id, mapped.thread_id))
-        options = new_turn_options(
-            db, c.tenant_id, agent,
+        options = locked.new_turn_options(
             version=effective.options.version,
             request_context=effective.options.request_context,
             model=effective.options.model,
@@ -692,7 +662,7 @@ def _prepare_post(
         if not effective.resume and not interrupts.open:
             # Under the agent lock, so an archive cannot slip in between the check and the thread.
             _ensure_conversation(c, thread, effective)
-        db.commit()  # release the agent lock; _record takes it again
+        # the block ends here: the agent lock is released; _record takes it again
 
     if effective.resume:
         assert latest is not None  # check_resume_covers accepted ids of the latest turn
@@ -707,7 +677,7 @@ def _prepare_post(
     )
     try:
         prepared = _record(c, new)
-    except TurnInProgress as busy:
+    except TurnBusy as busy:
         return _Wait(busy_run_id=busy.run_id, new_turn=new, continuation=continuation)
     prepared.opens_as_continuation = continuation
     return prepared
@@ -797,7 +767,7 @@ async def _wait_then_stream(d: _StreamDeps, wait: _Wait) -> AsyncIterator[str]:
         if previous is None or previous["status"] in TERMINAL_STATUSES:
             try:
                 prepared = await run_in_threadpool(_record, c, new)
-            except TurnInProgress as again:  # yet another turn started meanwhile: wait for it too
+            except TurnBusy as again:  # yet another turn started meanwhile: wait for it too
                 busy = again.run_id
                 continue
             except (HTTPException, ServiceError) as exc:
@@ -915,10 +885,7 @@ def _thread_feedback(c: _Ctx, conversation_id: str) -> dict[str, Any]:
 def _thread_json(c: _Ctx, thread_id: str) -> dict[str, Any]:
     c.svc.require_agent(c.tenant_id, c.agent_id)
     thread = resolve_agent_thread(c.svc, c.tenant_id, c.agent_id, thread_key(thread_id))
-    view = (
-        c.svc.thread_view(c.tenant_id, c.agent_id, thread.conversation_id, via_api_key=c.via_api_key)
-        if thread.exists else ThreadView()
-    )
+    view = _thread_view(c, thread.conversation_id) if thread.exists else ThreadView()
     return {
         "threadId": thread_id,
         "conversationId": thread.conversation_id if thread.exists else None,

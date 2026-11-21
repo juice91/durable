@@ -10,26 +10,31 @@ principal; a refusal is a `ServiceError` whose body is what the API has always a
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from eap_api import model_discovery
-from eap_api.ag_ui.snapshot import assistant_message_id, turn_messages, user_message
 from eap_api.approvals import DecisionResult, decide
 from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher
-from eap_api.services.errors import Conflict, InvalidInput, NotFound
+from eap_api.services.conversations import ConversationService
+from eap_api.services.errors import Conflict, InvalidInput, NotFound, ServiceError
 from eap_api.services.run_filters import plain_refusals
-from eap_api.services.runs import launch_recorded_run
+from eap_api.services.run_options import RunOptions
+from eap_api.services.runs import launch_recorded_run, lock_agent
 from eap_run_store import (
     AgUiRunModel,
     AgUiRunRecord,
+    AgUiRunWrite,
     AgUiScopeMismatch,
     AgUiStore,
     ApprovalStore,
@@ -38,6 +43,7 @@ from eap_run_store import (
     EventLog,
     RunNotFound,
     RunStore,
+    TurnInProgress,
 )
 from eap_run_store.chat_attachments import (
     ATTACHMENT_CAPABILITIES_KEY,
@@ -45,7 +51,6 @@ from eap_run_store.chat_attachments import (
     MessageFeedbackStore,
     accepts_by_capabilities,
 )
-from eap_run_store.store import TERMINAL_RUN_STATUSES
 from eap_schemas import RunEvent
 
 log = logging.getLogger("eap_api")
@@ -60,8 +65,10 @@ __all__ = [
     "ATTACHMENT_CAPABILITIES_KEY",
     "AgUiRunRecord",
     "AgUiService",
+    "LockedAgent",
+    "TurnBusy",
     "FINGERPRINT_CONFLICT_DETAIL",
-    "ThreadView",
+    "ThreadData",
     "TurnRun",
     "UNKNOWN_RUN_DETAIL",
     "compact_error",
@@ -73,6 +80,34 @@ def compact_error(code: str, loc: Sequence[str | int], msg: str, **extra: Any) -
     return [{"loc": ["body", *loc], "msg": msg[:MAX_MSG_CHARS], "type": code, **extra}]
 
 
+class TurnBusy(Exception):
+    """The thread's previous turn is still running (`run_id`): the route waits for it (D7)."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(run_id)
+        self.run_id = run_id
+
+
+class LockedAgent:
+    """The tenant's agent, locked FOR SHARE until the block of `AgUiService.locked_agent` ends, with the
+    validation of a new turn's options under that lock."""
+
+    def __init__(self, conversations: ConversationService, tenant_id: str, agent: AgentModel) -> None:
+        self.conversations = conversations
+        self._tenant_id = tenant_id
+        self.agent = agent
+
+    def new_turn_options(
+        self, *, version: Any, request_context: dict[str, Any] | None, model: Any, model_settings: Any,
+        input_text: str,
+    ) -> RunOptions:
+        """409 AGENT_ARCHIVED for an archived agent, then 404/409/422/413 (ConversationService.new_turn_options)."""
+        return self.conversations.new_turn_options(
+            self._tenant_id, self.agent, version=version, request_context=request_context, model=model,
+            model_settings=model_settings, input_text=input_text,
+        )
+
+
 @dataclass(frozen=True)
 class TurnRun:
     """The AG-UI run that started a turn: its external id and the user-message ids it recorded."""
@@ -82,24 +117,13 @@ class TurnRun:
 
 
 @dataclass
-class ThreadView:
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    runs: list[dict[str, Any]] = field(default_factory=list)
-    active_run_id: str | None = None
+class ThreadData:
+    """What a thread's history is built from: its turns, the completed ones' stored messages, and the AG-UI
+    run that started each turn."""
 
-
-def _turn_entry(prefix: str, client_id: str | None, run: dict[str, Any], done: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """One earlier turn's AG-UI messages: from its stored messages when it completed with them,
-    else its user input (and a completed run's output as the assistant answer)."""
-    if done is not None and done.get("messages"):
-        structured = done.get("output") if run.get("output_format") == "json" else None
-        return turn_messages(prefix, done["messages"], user_message_client_id=client_id, structured_output=structured)
-    out: list[dict[str, Any]] = []
-    if run.get("input"):
-        out.append(user_message(prefix, run["input"], client_id))
-    if done is not None and done.get("output"):
-        out.append({"id": assistant_message_id(prefix, 0), "role": "assistant", "content": done["output"]})
-    return out
+    turns: list[dict[str, Any]]
+    completed: dict[str, dict[str, Any]]
+    records: dict[str, TurnRun]
 
 
 def _unsupported_message(model_id: str, media_type: str, source: str) -> str:
@@ -264,116 +288,28 @@ class AgUiService:
             return []
         return [r for r in self.approvals.list_for_run(tenant_id, latest) if r["run_id"] == latest]
 
-    # -- agent threads: history as AG-UI messages (D13) ------------------------------------------
+    # -- agent threads: what the history of a thread is built from (eap_api.ag_ui.thread) ----------
 
-    def attachment_parts(
-        self, tenant_id: str, messages: list[dict[str, Any]], *, via_api_key: bool
-    ) -> list[dict[str, Any]]:
-        """User messages that sent attachments carry AG-UI 1.0 media parts (text first)."""
-        ids = [m["id"] for m in messages if m.get("role") == "user" and isinstance(m.get("content"), str)]
-        by_message = self.attachments.for_messages(tenant_id, ids)
-        if not by_message:
-            return messages
-        # An API key fetches through the AG-UI twin; the dev bearer through the dev route.
-        base = "/api/v1/ag-ui/attachments" if via_api_key else "/api/v1/attachments"
-        out: list[dict[str, Any]] = []
-        for m in messages:
-            files = by_message.get(m.get("id")) if m.get("role") == "user" else None
-            if not files:
-                out.append(m)
-                continue
-            parts: list[dict[str, Any]] = [{"type": "text", "text": m["content"]}] if m["content"] else []
-            for f in files:
-                kind = "image" if f.media_type.startswith("image/") else "document"
-                parts.append({
-                    "type": kind,
-                    "source": {"type": "url", "value": f"{base}/{f.id}", "mimeType": f.media_type},
-                    "metadata": {"attachmentId": f.id, "filename": f.name, "size": f.size},
-                })
-            out.append({**m, "content": parts})
-        return out
+    def attachment_files(self, tenant_id: str, message_ids: list[str]) -> dict[str, Any]:
+        """The attachments sent with these user messages, by message id."""
+        return self.attachments.for_messages(tenant_id, message_ids)
 
-    def thread_view(
-        self,
-        tenant_id: str,
-        agent_id: str,
-        conversation_id: str,
-        *,
-        via_api_key: bool,
-        before_turn: int | None = None,
-        later_ids: tuple[str, ...] = (),
-    ) -> ThreadView:
-        """The thread's turns below `before_turn` (all when None) as AG-UI messages, oldest first.
-        Ids follow D13 with the AG-UI runId that started each turn as the prefix (the native run id
-        for a turn started elsewhere, e.g. Studio's REST chat).
-
-        Regenerates (D5, D7): a turn whose user message a later turn sends again (a regenerate
-        re-POSTs the same user message under a new runId) is superseded: the later turn shows the
-        same first client id, or re-sends all of the earlier turn's ids. Its messages are
-        left out, so the thread shows the user message once, followed by the latest branch's answer,
-        and AG-UI message ids stay unique in the thread. The superseded turn stays in `runs` with
-        `superseded: true` (it is still a run, with its own usage and trace). `later_ids` are the
-        user-message ids of a turn after `before_turn` (the run being streamed), which supersede too."""
+    def thread_data(
+        self, tenant_id: str, agent_id: str, conversation_id: str, before_turn: int | None = None
+    ) -> ThreadData:
+        """The thread's turns below `before_turn` (all when None), oldest first, with the stored messages of
+        the completed ones and the AG-UI run that started each."""
         turns = self.run_store.list_turns(tenant_id, conversation_id)
         if before_turn is not None:
             turns = [t for t in turns if t["turn"] < before_turn]
         if not turns:
-            return ThreadView()
+            return ThreadData([], {}, {})
         last = turns[-1]["turn"] + 1
         completed = {
             str(t["run_id"]): t for t in self.run_store.completed_turns_before(tenant_id, conversation_id, last)
         }
         records = self.turn_runs(tenant_id, agent_id, [str(t["id"]) for t in turns])
-        # Walk newest first. A turn shows its user message under its first client id, so an earlier
-        # turn is superseded when a later turn (or `later_ids`) shows the same first id, or re-sends
-        # all of its ids: ids stay unique, and a turn re-running only part of an earlier turn's
-        # messages (a regenerate of u1 after [u0, u1]) leaves that earlier turn's text in place.
-        later: list[tuple[str, ...]] = [later_ids] if later_ids else []
-        superseded: set[str] = set()
-        for t in reversed(turns):
-            rec = records.get(str(t["id"]))
-            ids = rec.input_message_ids if rec is not None else ()
-            if ids and any(l[0] == ids[0] or set(ids) <= set(l) for l in later):
-                superseded.add(str(t["id"]))
-            if ids:
-                later.append(ids)
-        view = ThreadView()
-        for t in turns:
-            run_id = str(t["id"])
-            rec = records.get(run_id)
-            prefix = rec.external_run_id if rec is not None else run_id
-            client_id = rec.input_message_ids[0] if rec is not None and rec.input_message_ids else None
-            if run_id not in superseded:
-                view.messages += _turn_entry(prefix, client_id, t, completed.get(run_id))
-            view.runs.append(
-                {
-                    "runId": rec.external_run_id if rec is not None else None,
-                    "run_id": run_id,
-                    "turn": t["turn"],
-                    "status": t["status"],
-                    "display_status": t["display_status"],
-                    "superseded": run_id in superseded,
-                }
-            )
-            if t["status"] not in TERMINAL_RUN_STATUSES and rec is not None:
-                view.active_run_id = rec.external_run_id
-        view.messages = self.attachment_parts(tenant_id, view.messages, via_api_key=via_api_key)
-        return view
-
-    def history(
-        self, tenant_id: str, agent_id: str, run: dict[str, Any], record: AgUiRunRecord, *, via_api_key: bool
-    ) -> list[dict[str, Any]]:
-        """`AgUiStreamContext.history`: the thread's earlier turns (those this run regenerates left
-        out, see thread_view), then this run's user message."""
-        starter = self.starter(tenant_id, agent_id, record)
-        out = self.thread_view(
-            tenant_id, agent_id, str(run["conversation_id"]), via_api_key=via_api_key,
-            before_turn=run["turn"], later_ids=starter.input_message_ids,
-        ).messages
-        if run.get("input"):
-            client_id = starter.input_message_ids[0] if starter.input_message_ids else None
-            out.append(user_message(starter.external_run_id, run["input"], client_id))
-        return self.attachment_parts(tenant_id, out, via_api_key=via_api_key)
+        return ThreadData(turns, completed, records)
 
     # -- feedback --------------------------------------------------------------------------------
 
@@ -547,3 +483,75 @@ class AgUiService:
         `Conflict` once a later turn has started."""
         with Session(self.engine) as db:
             return launch_recorded_run(db, self.launcher, self.run_store, tenant_id, run, False)
+
+    # -- recording a new turn ------------------------------------------------------------------------
+
+    @contextmanager
+    def locked_agent(self, tenant_id: str, agent_id: str) -> Iterator[LockedAgent]:
+        """The agent locked FOR SHARE (an archive waits for the block, or the block sees `archived`); the
+        transaction commits when the block ends normally, which releases the lock."""
+        with Session(self.engine) as db:
+            try:
+                agent = lock_agent(db, tenant_id, agent_id)
+            except ServiceError as exc:
+                exc.detail_object = exc.message  # the body this route always answered: no `code`
+                raise
+            yield LockedAgent(ConversationService(db, self.run_store, self.launcher), tenant_id, agent)
+            db.commit()
+
+    def record_turn(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        *,
+        conversation_id: str,
+        run_id: str,
+        key: Mapping[str, str],
+        fingerprint: str,
+        input_message_ids: Sequence[str],
+        input_text: str,
+        version: Any,
+        request_context: dict[str, Any] | None,
+        model: Any,
+        model_settings: Any,
+        attachment_capabilities: dict[str, Any] | None,
+        client_tools: list[dict[str, Any]] | None,
+        client_tool_results: list[dict[str, Any]] | None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Record the turn idempotently on `run_id` (with its AG-UI row) and hand it to the worker; validated
+        again under the agent lock, so an archive or a version change during a wait is seen.
+        Returns (the run after the hand-off, created). `TurnBusy` while the previous turn runs."""
+
+        def same_fingerprint(run: dict[str, Any]) -> bool:
+            # A concurrent POST of this runId created the turn (created False): compare its AG-UI row.
+            record = self.record_concurrent(
+                tenant_id, key, run_id=str(run["id"]), fingerprint=fingerprint, input_message_ids=input_message_ids
+            )
+            return record.fingerprint == fingerprint
+
+        with self.locked_agent(tenant_id, agent_id) as locked:
+            conversations = locked.conversations
+
+            def options() -> RunOptions:
+                built = locked.new_turn_options(
+                    version=version, request_context=request_context, model=model,
+                    model_settings=model_settings, input_text=input_text,
+                )
+                if attachment_capabilities is None:
+                    return built
+                return dataclasses.replace(
+                    built,
+                    model_settings={**(built.model_settings or {}), ATTACHMENT_CAPABILITIES_KEY: attachment_capabilities},
+                )
+
+            try:
+                return conversations.record_and_launch_turn(
+                    tenant_id, conversation_id, run_id=run_id, new_options=options, input_text=input_text,
+                    same_request=same_fingerprint, conflict_detail=FINGERPRINT_CONFLICT_DETAIL,
+                    client_tools=client_tools, client_tool_results=client_tool_results,
+                    ag_ui_run=AgUiRunWrite(**key, fingerprint=fingerprint, input_message_ids=tuple(input_message_ids)),
+                )
+            except AgUiScopeMismatch:
+                raise Conflict("threadId belongs to another agent", detail_object="threadId belongs to another agent") from None
+            except TurnInProgress as busy:
+                raise TurnBusy(busy.run_id) from None
