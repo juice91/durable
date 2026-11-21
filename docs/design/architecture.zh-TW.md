@@ -199,6 +199,22 @@ DBOS 本身就是「程式碼即工作流」，在它之上再做一層資料驅
 
 九条契約的理由從四個問題来：哪些程式碼必須在不裝重依賴時也能跑（純套件）；哪些程式碼是不同行程（API / Worker 互不 import）；哪個資源只能有一個主人（schema → `eap_db`，OTel → `eap_observability`）；哪些常被代理寫錯（在 API 裡直接跑 Agent）。新套件在里程碑計畫裡同時新增它的契約。
 
+### API 內部分層
+
+只管套件之間的規則並不夠：API 是最大的套件，內部結構若沒有同樣被鎖住就會漂移。它的四層以同樣方式強制（細節與審查清單見 [API 分層](../api-layering.md)，該文件為英文）。
+
+| 層 | 位置 | 規則 |
+| --- | --- | --- |
+| Controller | `eap_api.routes`、`eap_api.mcp_control`、`eap_api.ag_ui` | 只處理 HTTP 或協定：解析請求、呈現回應。不呼叫 store，不 import `sqlalchemy` |
+| Service | `eap_api.services` | 與傳輸無關的業務邏輯。協作者由建構子注入。拋 `ServiceError` 子類，不拋 `HTTPException`。不 import web 框架 |
+| 資料存取 | `eap_run_store` | 所有 SQL。每個查詢都以租戶過濾 |
+
+輔助模組：`eap_api.deps` 建立並提供長生命週期物件，除 `app.py`（組合根）外是唯一讀取 `app.state` 的模組。`eap_api.service_deps` 以這些提供者建立 service。`eap_api.ports` 放 service 與提供者共用的介面，不 import web 或進入點程式碼。
+
+強制這些規則的 import-linter 契約為：「API services have no web framework imports」、「API dependency providers do not import entry points」、「API ports have no web or platform-entry imports」、「Service providers do not import entry points」、「API entry points do not query the database」、「API entry points reach data only through services」。另有架構測試，凡在 `app.py` 與 `deps.py` 之外存取 `app.state` 即失敗。
+
+規則出現之前的舊程式碼以**只減不增的棘輪**遷移：契約落地時已違規的模組列在該契約的 `ignore_imports`；模組乾淨後移除該行，絕不新增。於是新模組違規會使建置失敗，舊債則逐步縮小，不需要一次大搬家。
+
 Studio（`apps/studio`）是獨立的 pnpm 工作區，只透過 HTTP 與 SSE 與 API 溝通；共用的是 `eap_schemas` 的 JSON 形狀，不共用程式碼。
 
 ## 部署、運維與版本相容

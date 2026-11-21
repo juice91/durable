@@ -203,6 +203,12 @@ Every item comes from something that actually happened, written as "symptom → 
 | Early plans of 58–133 lines made agents guess the design. Later plans of 480–875 lines caused little rework | Plan length is not the problem. Be concrete down to tables, columns, function names, crash points and acceptance results |
 | A shared file edited by two tasks at the same time | The plan lists shared files and their order. The migration lock allows one at a time |
 | An architecture rule the agent "remembers" loosens late in a long task | Put rules into tools: import-linter, the Alembic head check, the rule that the test count must not fall |
+| Rules enforced only between packages let the structure inside the largest package drift | Add intra-package contracts (controller / service / data access) and migrate legacy violations with a shrink-only ratchet: entries may be removed, never added |
+| Agents waiting for a background notification stalled and the task stopped moving | Run long commands in the foreground so the agent sees the result; do not rely on a wake-up that may never arrive |
+| Two parallel agents each built an interface after their messages crossed, and the result was two competing interfaces | One owner per shared interface. The owner's decisions are marked FINAL, and other agents consume them rather than redesign them |
+| Test schemas leaked by killed runs made crash recovery on the shared test database take minutes | Sweep stale schemas by TTL and cap the parallelism on shared test databases |
+| Unit tests in jsdom passed while a real-browser interaction was broken | Verify every UI change in a real browser as well; jsdom covers logic, not layout, focus or events |
+| A pull request that became conflicting got no CI, and automation kept waiting for checks that never started | Use a merge queue so conflicts surface before merge, and make automation fail fast when checks do not start |
 
 **Anti-patterns** (replaced by the rules in the table above, listed so they can be recognized): letting the implementer review their own work; one big task with one big commit; using a prompt to remind agents to respect layering; cross-model hand-offs for the sake of "diversity"; a person reading agent code line by line instead of the review conclusion; a plan that says "build a knowledge base feature" without tables and columns.
 

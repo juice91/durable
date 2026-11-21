@@ -198,6 +198,22 @@ The import-linter contracts in the root `pyproject.toml` lock the following boun
 
 The reasons for the nine contracts come from four questions: which code must run without heavy dependencies installed (pure packages); which code lives in different processes (the API and Worker never import each other); which resource may have only one owner (schema → `eap_db`, OTel → `eap_observability`); and which mistakes agents often make (running an agent directly inside the API). A new package adds its contract in the same milestone plan.
 
+### Layers inside the API
+
+Rules between packages are not enough: the API is the largest package, and structure inside it drifts unless it is also locked. Its four layers are enforced the same way (details and reviewer checklist in [API layering](../api-layering.md)).
+
+| Layer | Where | Rule |
+| --- | --- | --- |
+| Controller | `eap_api.routes`, `eap_api.mcp_control`, `eap_api.ag_ui` | HTTP or protocol only: parse the request, render the answer. Never calls a store and never imports `sqlalchemy` |
+| Service | `eap_api.services` | Business logic, independent of the transport. Collaborators are injected through the constructor. Raises `ServiceError` subclasses, never `HTTPException`. No web framework imports |
+| Data access | `eap_run_store` | All SQL. Every query filters by tenant |
+
+Supporting modules: `eap_api.deps` builds and exposes the long-lived objects and is the only reader of `app.state` besides `app.py` (the composition root). `eap_api.service_deps` builds services from those providers. `eap_api.ports` holds the interfaces shared by services and providers, and imports no web or entry-point code.
+
+The import-linter contracts that enforce this are "API services have no web framework imports", "API dependency providers do not import entry points", "API ports have no web or platform-entry imports", "Service providers do not import entry points", "API entry points do not query the database" and "API entry points reach data only through services". An architecture test additionally fails on any `app.state` access outside `app.py` and `deps.py`.
+
+Code that predates the rules is migrated with a **shrink-only ratchet**: the modules that violated a contract when it landed are listed in that contract's `ignore_imports`. A line is removed when its module is clean and is never added, so a new module that breaks the rule fails the build while old debt shrinks over time without a big-bang move.
+
 Studio (`apps/studio`) is a separate pnpm workspace. It talks to the API only through HTTP and SSE. What is shared is the JSON shape of `eap_schemas`, not code.
 
 ## Deployment, operations and version compatibility
