@@ -14,7 +14,7 @@ from eap_api.mcp_control.helpers import (
     DEFAULT_PAGE, MAX_REPORT_BYTES, MAX_WAIT_SECONDS, clip, not_found, page, require_agent, require_workflow,
     tenant_run, uid, wait_for_run,
 )
-from eap_api.mcp_control.routing import DB, call, call_bound
+from eap_api.mcp_control.routing import DB, call, call_service
 from eap_api.mcp_control.server import current_ctx
 
 # Fields of a run kept in a bounded report (never the request context or model settings).
@@ -146,7 +146,8 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
-        items = await call_bound(knowledge_service_of(ctx.request).list_knowledge_bases, ctx.tenant_id)
+        items = await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request), lambda s: s.list_knowledge_bases(ctx.tenant_id))
         return page(items, limit, offset)
 
     @tool("kb.get")
@@ -155,8 +156,9 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
-        return await call_bound(knowledge_service_of(ctx.request).get_knowledge_base, ctx.tenant_id,
-                                  str(uid(kb_id, "kb_id")))
+        return await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request),
+            lambda s: s.get_knowledge_base(ctx.tenant_id, str(uid(kb_id, "kb_id"))))
 
     @tool("kb.source.list")
     async def kb_source_list(kb_id: str) -> dict[str, Any]:
@@ -164,8 +166,9 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.knowledge import kb_source_service_of
 
         ctx = current_ctx()
-        return await call_bound(kb_source_service_of(ctx.request).list_sources, ctx.tenant_id,
-                                  str(uid(kb_id, "kb_id")))
+        return await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request),
+            lambda s: s.list_sources(ctx.tenant_id, str(uid(kb_id, "kb_id"))))
 
     @tool("kb.source.get")
     async def kb_source_get(kb_id: str, source_id: str) -> dict[str, Any]:
@@ -173,8 +176,9 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.knowledge import kb_source_service_of
 
         ctx = current_ctx()
-        view, _revision = await call_bound(kb_source_service_of(ctx.request).get_source, ctx.tenant_id,
-                                             str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")))
+        view, _revision = await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request),
+            lambda s: s.get_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id"))))
         return view
 
     @tool("kb.source.syncs")
@@ -183,9 +187,10 @@ def register_tools(tool: Any) -> None:
         from eap_api.service_deps.knowledge import kb_source_service_of
 
         ctx = current_ctx()
-        return await call_bound(kb_source_service_of(ctx.request).list_syncs, ctx.tenant_id,
-                                  str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
-                                  max(1, min(limit, 100)))
+        return await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request),
+            lambda s: s.list_syncs(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
+                                   max(1, min(limit, 100))))
 
     @tool("settings.connection.list")
     async def connection_list() -> dict[str, Any]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from eap_api.mcp_control.helpers import require_agent, require_workflow, uid
-from eap_api.mcp_control.routing import DB, call, call_bound
+from eap_api.mcp_control.routing import DB, call, call_service
 from eap_api.mcp_control.server import current_ctx
 
 
@@ -42,5 +42,6 @@ def register_resources(resource: Any) -> None:
         from eap_api.service_deps.knowledge import knowledge_service_of
 
         ctx = current_ctx()
-        return await call_bound(knowledge_service_of(ctx.request).get_knowledge_base, ctx.tenant_id,
-                                  str(uid(kb_id, "kb_id")))
+        return await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request),
+            lambda s: s.get_knowledge_base(ctx.tenant_id, str(uid(kb_id, "kb_id"))))

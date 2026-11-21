@@ -223,16 +223,6 @@ async def call_service(ctx: Ctx, build: Callable[[Session], Any], fn: Callable[[
         raise translate(exc) from None
 
 
-async def call_bound(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Run the bound service method `fn` (sync) in a worker thread; return its data or raise McpToolError."""
-    try:
-        return await run_in_threadpool(lambda: fn(*args, **kwargs))
-    except McpToolError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal
-        raise translate(exc) from None
-
-
 REVISION_MISMATCH = "revision_mismatch"
 
 

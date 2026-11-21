@@ -19,7 +19,7 @@ from eap_api.mcp_control.helpers import (
     wait_for_run,
 )
 from eap_api.mcp_control.routing import (
-    DB, McpToolError, call, call_bound, call_with_revision, revision_reader, translate,
+    DB, McpToolError, call, call_service, call_with_revision, revision_reader, translate,
 )
 from eap_api.mcp_control.server import current_ctx
 from eap_run_store.store import TERMINAL_RUN_STATUSES
@@ -270,9 +270,11 @@ def register_tools(tool: Any) -> None:
         ctx = current_ctx()
         body = _model(KnowledgeBaseCreate, name=name, embedding_model=embedding_model, description=description,
                       chunking=chunking)
-        return await call_bound(
-            knowledge_service_of(ctx.request, ctx.launcher).create_knowledge_base, ctx.tenant_id, name=body.name,
-            description=body.description, embedding_model=body.embedding_model, chunking=body.chunking_config())
+        return await call_service(
+            ctx, lambda _db: knowledge_service_of(ctx.request, ctx.launcher),
+            lambda s: s.create_knowledge_base(
+                ctx.tenant_id, name=body.name, description=body.description,
+                embedding_model=body.embedding_model, chunking=body.chunking_config()))
 
     @tool("kb.source.create", manage=True)
     async def kb_source_create(kb_id: str, connection_id: str, name: str, provider: str,
@@ -289,9 +291,9 @@ def register_tools(tool: Any) -> None:
                                    "config": config or {}, "enabled": enabled}
         if kind is not None:
             payload["kind"] = kind
-        service = kb_source_service_of(ctx.request, ctx.launcher)
-        view, _revision = await call_bound(
-            lambda: service.create_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), parse_payload(payload, SourceCreate)))
+        view, _revision = await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request, ctx.launcher),
+            lambda s: s.create_source(ctx.tenant_id, str(uid(kb_id, "kb_id")), parse_payload(payload, SourceCreate)))
         return view
 
     @tool("kb.source.sync", manage=True)
@@ -307,10 +309,10 @@ def register_tools(tool: Any) -> None:
         payload: dict[str, Any] = {"mode": mode, "part_numbers": part_numbers or [], "restart": restart}
         if run_id:
             payload["run_id"] = run_id
-        service = kb_source_service_of(ctx.request, ctx.launcher)
-        return await call_bound(
-            lambda: service.start_sync(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
-                                       parse_payload(payload, SyncCreate), ctx.actor.user_id))
+        return await call_service(
+            ctx, lambda _db: kb_source_service_of(ctx.request, ctx.launcher),
+            lambda s: s.start_sync(ctx.tenant_id, str(uid(kb_id, "kb_id")), str(uid(source_id, "source_id")),
+                                   parse_payload(payload, SyncCreate), ctx.actor.user_id))
 
     # ------------------------------------------------------------------------------- settings and MCP servers
 
