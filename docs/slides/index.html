@@ -23,10 +23,10 @@
 <section data-n="2" id="why">
 <div class="head">
 <p class="eyebrow">Durable · 要解決的問題</p>
-<h2>AI Agent 上線遇到的問題，以及Durable的做法</h2>
+<h2>AI Agent 上線遇到的問題，以及 Durable 的做法</h2>
 </div>
 <table class="tbl rise" style="--i:0">
-<tr><th style="width:42%">問題</th><th style="width:58%">Durable的做法</th></tr>
+<tr><th style="width:42%">問題</th><th style="width:58%">Durable 的做法</th></tr>
 <tr><td>Agent 執行到一半中斷，重跑會重複寄信、重複下單</td><td>每完成一步就存進資料庫；中斷後從斷點接續，對外動作只做一次</td></tr>
 <tr><td>流程要等主管審批幾小時到幾天，服務一重啟就斷</td><td>等待狀態存在資料庫，不占用服務；重啟後自動接回</td></tr>
 <tr><td>多個客戶或部門共用平台，資料不能混在一起</td><td>每筆資料都屬於一個 tenant；跨 tenant 一律看不到</td></tr>
@@ -36,7 +36,7 @@
 </table>
 <p class="note">設計目的：讓 AI Agent 與 Workflow 在企業環境中可靠地長時間運作，中斷不遺失、動作不重複、資料不外流，而且部署與維運保持精簡。</p>
 <div class="footer"><p class="ft">Durable · 總覽</p><p class="ft pg"></p></div>
-<aside>開場先講問題。左欄是 AI Agent 上線時最常卡住的六件事，右欄是Durable對應的做法；後面的規格與架構都在展開右欄。</aside>
+<aside>開場先講問題。左欄是 AI Agent 上線時最常卡住的六件事，右欄是 Durable 對應的做法；後面的規格與架構都在展開右欄。</aside>
 </section>
 <section data-n="3" id="docs">
 <div class="head">
@@ -295,7 +295,7 @@
 </div>
 <p class="note">邊界由人決定，Orchestrator 寫進 plan（Owns 欄位、分層規則）。邊界會在 agent 的 context 中逐漸流失，因此過程中需要人介入調整：任務碰到邊界時，Implementer 停下回報，人確認後才調整規則與 plan。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/ai-assisted-development.zh-TW.md">開發方法</a></p>
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
-<aside>Harness 是包在模型外、讓它能實際執行工作的框架；它的任務之一是把邊界說清楚，讓 agent 不必猜。左邊給 Orchestrator 撰寫 plan 時使用，右邊給 Reviewer 使用；前八項反模式在Durable一律視為 Critical。</aside>
+<aside>Harness 是包在模型外、讓它能實際執行工作的框架；它的任務之一是把邊界說清楚，讓 agent 不必猜。左邊給 Orchestrator 撰寫 plan 時使用，右邊給 Reviewer 使用；前八項反模式在 Durable 一律視為 Critical。</aside>
 </section>
 <section data-n="16" id="next">
 <div class="head">
@@ -317,7 +317,7 @@
 <p class="eyebrow">下一階段 · 規劃中 · 尚未實作</p>
 <h2>企業身分整合規劃（ZITADEL）</h2>
 </div>
-<div class="hdr rise" style="--i:0"><p class="h1">用戶需求</p><p class="h2">ZITADEL 提供</p><p class="h3">Durable需要的修改</p></div>
+<div class="hdr rise" style="--i:0"><p class="h1">用戶需求</p><p class="h2">ZITADEL 提供</p><p class="h3">Durable 需要的修改</p></div>
 <table class="tbl rise" style="--i:1">
 <tr><th style="width:34%">需求</th><th style="width:36%">ZITADEL 提供</th><th style="width:30%">平台端</th></tr>
 <tr><td>企業帳號登入、SSO、MFA、密碼重設</td><td>現成登入頁（OIDC PKCE）；企業 IdP 可透過 SAML 或 OIDC 串接</td><td>Studio 改用 OIDC 登入，不自建登入</td></tr>

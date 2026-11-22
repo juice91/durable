@@ -133,8 +133,8 @@ section.cover { padding: 128px; gap: 40px; }
 
 /* heads-up display */
 .hud { position: fixed; right: 16px; bottom: 16px; display: flex; align-items: center; gap: 6px;
-  font: 500 14px/1 'Noto Sans TC', system-ui, sans-serif; color: #ffffff; background: rgba(31, 35, 40, .72);
-  border-radius: 999px; padding: 4px 6px; z-index: 10; opacity: .55; transition: opacity .2s; }
+  font: 500 14px/1 'Noto Sans TC', system-ui, sans-serif; color: #ffffff; background: rgba(31, 35, 40, .92); border: 1px solid rgba(255, 255, 255, .35);
+  border-radius: 999px; padding: 4px 6px; z-index: 10; opacity: .8; transition: opacity .2s; }
 .hud:hover, .hud:focus-within { opacity: 1; }
 .hud button { font: inherit; color: inherit; background: none; border: 0; min-width: 32px; height: 32px;
   border-radius: 999px; cursor: pointer; }
@@ -164,3 +164,6 @@ section.cover { padding: 128px; gap: 40px; }
   .deck > section:last-child { break-after: auto; page-break-after: auto; }
   .rise { animation: none !important; }
 }
+
+/* the HUD already shows n / total; hide the in-slide page number on screen so they don't stack */
+@media screen { .footer .pg { display: none; } }
