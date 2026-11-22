@@ -294,10 +294,10 @@
 <p class="sub">什麼時候該拆分</p>
 <h3>符合以下任一項才拆</h3>
 <ul class="lst">
-<li>信任程度不同：系統功能由平台開發並測試，在平台內執行；使用者自己的程式（例如外部 agent、MCP server）在平台外執行，Workflow 只透過呼叫來使用</li>
+<li>信任程度不同：系統功能在平台內執行；使用者的程式（外部 agent、MCP server）在平台外執行，僅供呼叫</li>
 <li>存活時間不同：run 比 process 活得久，狀態放在 database</li>
 <li>故障範圍不同：API 與 Worker 不直接溝通</li>
-<li>依賴輕重不同：API 不載入 Agent framework；純 package 不做 I/O</li>
+<li>架構分層不同：API 層不載入 Agent framework；底層 package 不做 I/O</li>
 <li>資源只能有一個管理者：schema 只由 Alembic 修改</li>
 </ul>
 </div>
