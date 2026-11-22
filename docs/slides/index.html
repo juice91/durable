@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Durable 總覽：Spec、Architecture、開發方法</title>
+<title>Durable 總覽：規格、架構、開發方法</title>
 <meta name="description" content="Durable 的系統規格、架構與 AI 輔助開發方法總覽簡報。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,393 +16,411 @@
 <div class="deck" id="deck">
 <section data-n="1" id="cover" class="dark cover">
 <p class="eyebrow">Durable · 總覽</p>
-<h1>Spec、Architecture、開發方法</h1>
-<p class="lead">可自架的 AI Agent 與 Workflow 平台：系統承諾什麼、為什麼這樣設計、<br>以及一人加 AI agent 如何在七天內建成。</p>
+<h1>系統規格、架構設計與開發方法</h1>
+<p class="lead">輕量部署的 AI Agent 與 Workflow 平台：系統承諾什麼、為什麼這樣設計、<br>以及一人加 AI agent 如何在七天內實現。</p>
 <aside>三份文件的濃縮版。Spec 說「什麼」，Architecture 說「為什麼」，開發方法說「怎麼做出來」。每節最後一張附完整文件連結。</aside>
 </section>
-<section data-n="2" id="docs">
+<section data-n="2" id="why">
+<div class="head">
+<p class="eyebrow">Durable · 要解決的問題</p>
+<h2>AI Agent 上線遇到的問題，以及 Durable 的做法</h2>
+</div>
+<table class="tbl rise" style="--i:0">
+<tr><th style="width:42%">問題</th><th style="width:58%">Durable 的做法</th></tr>
+<tr><td>Agent 執行到一半中斷，重跑會重複寄信、重複下單</td><td>每完成一步就存進資料庫；中斷後從斷點接續，對外動作只做一次</td></tr>
+<tr><td>流程要等主管審批幾小時到幾天，服務一重啟就斷</td><td>等待狀態存在資料庫，不占用服務；重啟後自動接回</td></tr>
+<tr><td>多個客戶或部門共用平台，資料不能混在一起</td><td>每筆資料都屬於一個 tenant；跨 tenant 一律看不到</td></tr>
+<tr><td>不知道 agent 做了什麼、花了多少錢、為什麼出錯</td><td>每次執行都有完整 trace、token 用量與費用紀錄</td></tr>
+<tr><td>業務人員要自己組流程與 Agent，不寫程式</td><td>在 Studio 以設定組出 Workflow、RAG、Memory，版本化並可回復</td></tr>
+<tr><td>多套系統拼湊，部署與維運負擔重</td><td>一個 Postgres、兩個服務即可運作；輕量部署，可自架</td></tr>
+</table>
+<p class="note">設計目的：讓 AI Agent 與 Workflow 在企業環境中可靠地長時間運作，中斷不遺失、動作不重複、資料不外流，而且部署與維運保持精簡。</p>
+<div class="footer"><p class="ft">Durable · 總覽</p><p class="ft pg"></p></div>
+<aside>開場先講問題。左欄是 AI Agent 上線時最常卡住的六件事，右欄是 Durable 對應的做法；後面的規格與架構都在展開右欄。</aside>
+</section>
+<section data-n="3" id="docs">
 <div class="head">
 <p class="eyebrow">Durable · 文件地圖</p>
-<h2>三份文件：做什麼、為什麼、怎麼開發</h2>
+<h2>文件導覽</h2>
 </div>
-<p class="lead">Spec 定義系統承諾的能力；Architecture 說明設計理由；開發方法記錄一人加 AI agent 如何在七天內建成這套系統。</p>
+<p class="lead">Spec 說明平台能做什麼；Architecture 說明為什麼這樣設計；開發方法記錄一人加 AI agent 如何在七天內實現這套系統。</p>
 <div class="cards">
 <div class="card rise" style="--i:0">
 <p class="tag">Spec</p>
-<h3>系統能做什麼</h3>
+<h3>平台能做什麼</h3>
 <ul class="lst">
-<li>11 組功能需求：Workflow、Knowledge Base、Memory、Identity</li>
-<li>15 條非功能需求：durable、exactly-once、tenant isolation</li>
-<li>API 與 data model 摘要</li>
-<li>8 項驗收標準、範圍外清單</li>
+<li>功能：Agent、Workflow、RAG、Memory、Tool 與 MCP、多租戶</li>
+<li>品質要求：中斷後可接續、外部動作只做一次、租戶隔離、資料保護</li>
+<li>對外介面與資料結構摘要</li>
+<li>驗收標準與不在範圍內的項目</li>
 </ul>
-<p class="lnk"><a href="https://github.com/juice91/durable/blob/main/docs/design/system-spec.zh-TW.md" target="_blank" rel="noopener">開啟 Spec</a></p>
+<p class="lnk"><a href="https://github.com/juice91/durable/blob/main/docs/design/system-spec.zh-TW.md">開啟 Spec</a></p>
 </div>
 <div class="card rise" style="--i:1">
 <p class="tag">Architecture</p>
 <h3>為什麼這樣設計</h3>
 <ul class="lst">
-<li>Run 的壽命由 database 決定，不由 process 決定</li>
-<li>兩個 process、一個 Postgres；durable execution 五條契約</li>
-<li>Workflow interpreter 與 Agent 的關係；Identity 整合</li>
-<li>九條 import-linter 契約、取捨表、風險</li>
+<li>Run 的狀態存在 database，process 重啟不會遺失</li>
+<li>兩個 process、一個 Postgres；durable execution 的五項保證</li>
+<li>Workflow 與 Agent 的分工；Identity 整合</li>
+<li>九條 import-linter 規則、設計取捨、風險</li>
 </ul>
-<p class="lnk"><a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md" target="_blank" rel="noopener">開啟 Architecture</a></p>
+<p class="lnk"><a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md">開啟 Architecture</a></p>
 </div>
 <div class="card rise" style="--i:2">
 <p class="tag">開發方法</p>
-<h3>怎麼用 agent 建出來</h3>
+<h3>如何用 agent 開發</h3>
 <ul class="lst">
 <li>四種角色：人、Orchestrator、Implementer、Reviewer</li>
-<li>七步流程：plan、wave 並行、兩次整支 review、merge</li>
-<li>四層 quality gate；Harness：邊界與反模式</li>
-<li>經驗教訓 12 條、度量與改善迴圈</li>
+<li>七個步驟：plan、wave 並行、兩次整體 review、merge</li>
+<li>四層 quality gate；Harness 的邊界與反模式</li>
+<li>12 條經驗教訓、成效衡量與改善</li>
 </ul>
-<p class="lnk"><a href="https://github.com/juice91/durable/blob/main/docs/design/ai-assisted-development.zh-TW.md" target="_blank" rel="noopener">開啟開發方法</a></p>
+<p class="lnk"><a href="https://github.com/juice91/durable/blob/main/docs/design/ai-assisted-development.zh-TW.md">開啟開發方法</a></p>
 </div>
 </div>
 <div class="footer"><p class="ft">Durable · 總覽 · 2026-11-19</p><p class="ft pg"></p></div>
 <aside>Spec 說「什麼」，Architecture 說「為什麼」，開發方法說「怎麼做出來」。三份都以 2026-11-14 的程式碼盤點為基礎。</aside>
 </section>
-<section data-n="3" id="spec-cap">
+<section data-n="4" id="spec-cap">
 <div class="head">
-<p class="eyebrow">Spec · 能力一覽</p>
-<h2>11 組功能需求，四個能力面</h2>
+<p class="eyebrow">Spec · 功能</p>
+<h2>功能總覽</h2>
 </div>
-<p class="lead">所有 API 在同一個 prefix 下，所有資料以 tenant 隔離；每組需求對應到程式碼裡的 route 或 module。</p>
+<p class="lead">所有功能透過同一組 API 提供，所有資料依 tenant 隔離；每一項都對應到實際的 route 或 module。</p>
 <div class="cards four">
-<div class="card rise" style="--i:0"><p class="tag">FR-1 · 2 · 3</p><h3>Agent 與 Run</h3><ul class="lst"><li>Draft、publish、version compare 與 restore</li><li>Run、event replay、SSE resume</li><li>Conversation：一次一回合，history 裁剪</li><li>每次 model request 記 token 與 cost</li></ul></div>
-<div class="card rise" style="--i:1"><p class="tag">FR-4 · 5</p><h3>Tool 與 Workflow</h3><ul class="lst"><li>內建 tool、tenant 註冊的 MCP server</li><li>五種 node：Agent、Tool、Branch、Parallel、Approval</li><li>Approval 三方競爭只有一個生效</li><li>單步 32 KiB、單次 run 14 天上限</li></ul></div>
-<div class="card rise" style="--i:2"><p class="tag">FR-6 · 7 · 8</p><h3>Knowledge、Memory、Processor</h3><ul class="lst"><li>Knowledge Base：上傳、chunk、embed、檢索帶引用</li><li>Working、observational、semantic recall 三種 memory</li><li>Retention 掃除與 forget</li><li>Processor：PII、regex、長度、moderation</li></ul></div>
-<div class="card rise" style="--i:3"><p class="tag">FR-9 · 10 · 11</p><h3>Observability、Studio、Tenant</h3><ul class="lst"><li>每次 run 一條 trace；tenant 標籤的 log</li><li>Metrics：summary、timeseries、breakdown</li><li>Studio 十餘個頁面</li><li>Tenant isolation、role、企業 identity</li></ul></div>
+<div class="card rise" style="--i:0"><p class="tag">FR-1 · 2 · 3</p><h3>Agent 與 Run</h3><ul class="lst"><li>Draft、publish、版本比較與還原</li><li>Event 可 replay，SSE 斷線後可接續</li><li>Conversation 一次只跑一回合，自動控制 history 長度</li><li>每次 model request 都記錄 token 與 cost</li></ul></div>
+<div class="card rise" style="--i:1"><p class="tag">FR-4 · 5</p><h3>Tool 與 Workflow</h3><ul class="lst"><li>內建 tool，以及 tenant 自行註冊的 MCP server</li><li>五種 node：Agent、Tool、Branch、Parallel、Approval</li><li>Approval 的同意、拒絕、逾時只有一個會生效</li><li>單一 run 最長可等待 14 天</li></ul></div>
+<div class="card rise" style="--i:2"><p class="tag">FR-6 · 7 · 8</p><h3>Knowledge、Memory、Processor</h3><ul class="lst" style="width:414px;transform:translate(-4px, 0);box-sizing:border-box"><li>RAG 知識庫：上傳、切塊、embed、pgvector 檢索，回答時附上出處</li><li>三種 memory：working、observational、semantic recall</li><li>依保留期限自動清除，也可指定刪除</li><li>Processor：PII 遮蔽、regex 封鎖、長度限制、moderation</li></ul></div>
+<div class="card rise" style="--i:3"><p class="tag">FR-9 · 10 · 11</p><h3>Observability、Studio、Tenant</h3><ul class="lst"><li>每次 run 一條完整 trace；log 帶 tenant 標記</li><li>Metrics：摘要、時間序列、分類統計</li><li>Studio 操作介面</li><li>Tenant isolation、role、企業 identity</li></ul></div>
 </div>
 <div class="footer"><p class="ft">Durable · 總覽 · Spec</p><p class="ft pg"></p></div>
-<aside>Spec 的骨架。每張卡對應 Spec 的二到三組功能需求；endpoint 與參數細節在文件裡。</aside>
+<aside>Spec 的骨架。每張卡對應 Spec 中的二到三組功能需求；endpoint 與參數細節在文件裡。</aside>
 </section>
-<section data-n="4" id="spec-nfr">
+<section data-n="5" id="spec-nfr">
 <div class="head">
 <p class="eyebrow">Spec · 非功能需求</p>
-<h2>每條非功能需求都有機器可判定的驗證</h2>
+<h2>非功能需求與驗證方式</h2>
 </div>
 <table class="tbl rise" style="--i:0">
 <tr><th style="width:22%">需求</th><th style="width:48%">內容</th><th style="width:30%">驗證</th></tr>
-<tr><td>Durable</td><td>任一 step 被 kill -9 後，新 Worker 接手完成；已記錄的 step 不重跑</td><td>Crash matrix，19 個 crash point</td></tr>
-<tr><td>Exactly-once side effect</td><td>reserve → call → complete；斷在 call 之後進 needs_attention，不自動重呼叫</td><td>假外部服務以 idempotency key 計數</td></tr>
-<tr><td>Event 完整</td><td>seq 連續無重複；replay 回既有列；SSE replay 與 database 一致</td><td>Crash matrix 斷言</td></tr>
-<tr><td>Tenant isolation</td><td>跨 tenant 讀取一律 404；log 查詢不跨 tenant；保留欄位不收 client 輸入</td><td>每任務必測跨 tenant 情境</td></tr>
-<tr><td>輸入防護</td><td>body 超過 256 KiB 回 413；非 UTF-8 回 415；JSON 深度超過 32 回 422；不回顯輸入</td><td>Request guard 測試</td></tr>
-<tr><td>Egress 與 secret</td><td>MCP 只走 https、拒內網位址、不跟 redirect；header 值加密且不回傳</td><td>Egress policy 測試</td></tr>
-<tr><td>分層邊界</td><td>九條 import-linter 契約，違反即 build fail</td><td>import-linter</td></tr>
+<tr><td>Durable</td><td>在任何 step 被 kill -9 後，新的 Worker 會接手完成；已完成的 step 不重跑</td><td>Crash matrix，19 個中斷點</td></tr>
+<tr><td>Exactly-once side effect</td><td>對外動作先預留、再呼叫、再記錄；結果不確定時進入 needs_attention 交人判斷，不自動重試</td><td>模擬外部服務，以 idempotency key 確認只被呼叫一次</td></tr>
+<tr><td>Event 完整</td><td>seq 連續、不重複；重複寫入只保留一筆；SSE 重連後看到的內容與 database 一致</td><td>Crash matrix：檢查 event 不漏、不重複</td></tr>
+<tr><td>Tenant isolation</td><td>讀取其他 tenant 的資料一律回 404；log 查詢也不跨 tenant</td><td>每項功能都測跨 tenant 情境</td></tr>
+<tr><td>輸入防護</td><td>過大、格式錯誤或巢狀過深的請求一律拒絕，且不回顯內容</td><td>Request guard 測試</td></tr>
+<tr><td>Egress 與 secret</td><td>MCP 只走 https、不連內網、不跟隨 redirect；secret 加密保存且不回傳</td><td>Egress policy 測試</td></tr>
+<tr><td>分層邊界</td><td>九條 import-linter 規則，違反就無法 build</td><td>import-linter</td></tr>
 </table>
 <div class="footer"><p class="ft">Durable · 總覽 · Spec</p><p class="ft pg"></p></div>
-<aside>Spec 有 15 條非功能需求，這裡取七條核心。重點在右欄：每條都有自動化驗證，不靠人記得。</aside>
+<aside>Spec 有 15 條非功能需求，這裡列出 7 條核心。重點在右欄：每一條都有自動化驗證，不靠人記得。</aside>
 </section>
-<section data-n="5" id="spec-accept">
+<section data-n="6" id="spec-accept">
 <div class="head">
-<p class="eyebrow">Spec · 驗收標準</p>
-<h2>三項自動判定，三項人走一次</h2>
+<p class="eyebrow">Spec · 驗收</p>
+<h2>驗收標準</h2>
 </div>
 <div class="two">
-<div class="box rise" style="--i:0"><h3>自動判定</h3><p class="txt">1. 測試腳本全綠、無 skip：import-linter、全部 pytest 含 crash matrix、API 對真 Postgres、Studio vitest。</p><p class="txt">2. Crash matrix 每個情境：side effect 恰好一次、seq 連續、run 結束在 completed、SSE replay 一致。</p><p class="txt">3. Hosted CI 與自架 CI 在 main 上綠；每夜加跑 worker 與 recovery suite。</p></div>
-<div class="box rise" style="--i:1"><h3>人工檢查</h3><p class="txt">4. 建 Agent、publish、Playground 執行、trace、log、metrics 一路走通。</p><p class="txt">5. 含 Approval 的 Workflow：執行、停在 approval、重啟 Worker、按同意、繼續跑完；decision event 只有一筆。</p><p class="txt">6. Knowledge 與 Memory：上傳文件、ingest、帶引用回答、更新 working memory、刪除 resource 後 memory 消失。</p></div>
+<div class="box rise" style="--i:0"><h3>自動檢查</h3><p class="txt">1. 全部測試通過且沒有 skip：import-linter、pytest（含 crash matrix）、API 接真實 Postgres、Studio vitest。</p><p class="txt">2. Crash matrix 的每個情境：side effect 只發生一次、seq 連續、run 以 completed 結束、SSE 重連結果一致。</p><p class="txt">3. Hosted CI 與自建 CI 在 main 上全部通過；每晚另外跑 worker 與 recovery 測試。</p></div>
+<div class="box rise" style="--i:1"><h3>人工檢查</h3><p class="txt">4. 建立 Agent、publish、在 Playground 執行，再看 trace、log、metrics，整條路徑走得通。</p><p class="txt">5. 含 Approval 的 Workflow：執行到 approval 停下，重啟 Worker，按下同意後流程跑完；decision event 只有一筆。</p><p class="txt">6. Knowledge 與 Memory：上傳文件、完成匯入、回答附上出處、更新 working memory；刪除使用者後 memory 一併清除。</p></div>
 </div>
-<p class="note">Merge 條件：最終整支 review 沒有未解的 Critical 或 Important；Studio 在 1440 / 1024 / 768 / 400 px、深淺色、純鍵盤都可操作，Lighthouse a11y ≥ 95。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/system-spec.zh-TW.md" target="_blank" rel="noopener">Spec</a></p>
+<p class="note">Merge 條件：final review 沒有未解決的 Critical 或 Important；Studio 在各種螢幕寬度、深淺色、純鍵盤操作下都可正常使用，無障礙評分 95 以上。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/system-spec.zh-TW.md">Spec</a></p>
 <div class="footer"><p class="ft">Durable · 總覽 · Spec</p><p class="ft pg"></p></div>
-<aside>Spec 節收尾。左邊機器判定，右邊人走一次；兩邊都過才算驗收。</aside>
+<aside>Spec 節收尾。左邊由機器判定，右邊由人實際走一次；兩邊都通過才算驗收。</aside>
 </section>
-<section data-n="6" id="arch-map">
+<section data-n="7" id="arch-map">
 <div class="head">
-<p class="eyebrow">Architecture · 系統全貌</p>
-<h2>兩個 process、一個 database，只透過 Postgres 相會</h2>
+<p class="eyebrow">Architecture · 全貌</p>
+<h2>系統架構</h2>
 </div>
 <div class="flow">
-<div class="node rise" style="--i:0"><p class="tag">Console</p><h3>Studio</h3><p class="txt">Next.js · 設計、publish、執行、觀看</p></div>
+<div class="node rise" style="--i:0"><p class="tag">Console</p><h3>Studio</h3><p class="txt">Next.js · 設計、publish、執行、查看結果</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node rise" style="--i:1"><p class="tag">Control plane</p><h3>API</h3><p class="txt">FastAPI · auth、記錄 run、enqueue、SSE</p></div>
+<div class="node rise" style="--i:1"><p class="tag">Control plane</p><h3>API</h3><p class="txt">FastAPI · 驗證身分、建立 run、排入 queue、SSE</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
 <div class="node deep rise" style="--i:2"><p class="tag">Single source of truth</p><h3>Postgres</h3><p class="txt">Run、event、queue、等待狀態、vector、memory</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node rise" style="--i:3"><p class="tag">Execution</p><h3>Worker</h3><p class="txt">DBOS + Pydantic AI · 每步落地</p></div>
+<div class="node rise" style="--i:3"><p class="tag">Execution</p><h3>Worker</h3><p class="txt">DBOS + Pydantic AI · 每完成一個 step 就存檔</p></div>
 </div>
 <div class="two">
-<div class="box rise" style="--i:4"><h3>API 與 Worker 不直接通訊</h3><p class="txt">API 寫入與 enqueue，Worker dequeue 與執行；任一方重啟不影響另一方。九條 import-linter 契約讓這條邊界變成 build fail。</p></div>
-<div class="box rise" style="--i:5"><h3>買 engine，寫 glue</h3><p class="txt">Agent loop、durable execution、vector search、telemetry 都是成熟開源元件；自建的是 policy、介面、把它們接起來的規則。沒有 Redis、Kafka、專用 vector DB。</p></div>
+<div class="box rise" style="--i:4"><h3>API 與 Worker 不直接溝通</h3><p class="txt">API 把 run 寫進 database 並排入 queue，Worker 從 queue 取出執行；任一方重啟都不影響另一方。這條界線由 import-linter 在 build 時強制檢查。</p></div>
+<div class="box rise" style="--i:5"><h3>核心元件採用成熟開源方案</h3><p class="txt">Agent loop、durable execution、vector search、telemetry 都使用成熟的開源元件；自行開發的是 policy、介面與整合規則。沒有額外引入 Redis、Kafka 或專用 vector DB。</p></div>
 </div>
 <div class="footer"><p class="ft">Durable · 總覽 · Architecture</p><p class="ft pg"></p></div>
-<aside>Architecture 節開場。Model gateway 與 MCP server 在 Worker 右側，經 allowlist 與 egress policy；telemetry 到 Grafana LGTM。細圖在文件裡。</aside>
+<aside>Architecture 節開場。Model gateway 與 MCP server 在 Worker 右側，都經過 allowlist 與 egress policy；telemetry 送到 Grafana LGTM。細圖在文件裡。</aside>
 </section>
-<section data-n="7" id="arch-life">
+<section data-n="8" id="arch-life">
 <div class="head">
 <p class="eyebrow">Architecture · 一次 Run</p>
-<h2>每種 run 都走同一條路</h2>
+<h2>執行生命週期</h2>
 </div>
 <div class="steps">
-<div class="step rise" style="--i:0"><p class="n">01</p><div class="body"><h3>Studio 發出請求</h3><p class="txt">帶輸入、可選的 run_id（idempotent retry）、context、model override 或 draft 快照。</p></div></div>
-<div class="step rise" style="--i:1"><p class="n">02</p><div class="body"><h3>API 檢查、記錄、enqueue</h3><p class="txt">Request guard、version 解析、allowlist；插入 run 列，狀態 queued；DBOS workflow id 等於 run id。</p></div></div>
-<div class="step rise" style="--i:2"><p class="n">03</p><div class="body"><h3>Worker 啟動，逐 step 執行</h3><p class="txt">第一個 step 讀設定並標 running；之後每次 model request 與 tool call 是一個 step，event 連同 usage 同一 transaction 寫入。</p></div></div>
-<div class="step rise" style="--i:3"><p class="n">04</p><div class="body"><h3>Studio 即時觀看</h3><p class="txt">Event 經 Postgres NOTIFY 到 API，以 SSE 送出；斷線後以最後 seq 續接。</p></div></div>
-<div class="step rise" style="--i:4"><p class="n">05</p><div class="body"><h3>以終態結束</h3><p class="txt">completed、failed 或 needs_attention；heartbeat 每 5 秒，20 秒無 heartbeat 顯示 recovering。</p></div></div>
+<div class="step rise" style="--i:0"><p class="n">01</p><div class="body"><h3>Studio 送出請求</h3><p class="txt">帶上輸入、context、指定模型或 draft；以同一個 run_id 重送，也只會產生一個 run。</p></div></div>
+<div class="step rise" style="--i:1"><p class="n">02</p><div class="body"><h3>API 檢查、建立 run、排入 queue</h3><p class="txt">檢查輸入、版本與模型 allowlist；建立狀態為 queued 的 run，DBOS workflow id 與 run id 相同。</p></div></div>
+<div class="step rise" style="--i:2"><p class="n">03</p><div class="body"><h3>Worker 逐 step 執行</h3><p class="txt">每次 model request 或 tool call 都是一個 step；event 與用量在同一個 transaction 寫入後，才進入下一步。</p></div></div>
+<div class="step rise" style="--i:3"><p class="n">04</p><div class="body"><h3>Studio 即時顯示進度</h3><p class="txt">新的 event 透過 Postgres NOTIFY 通知 API，再以 SSE 推到畫面；斷線後從最後一個 seq 接續。</p></div></div>
+<div class="step rise" style="--i:4"><p class="n">05</p><div class="body"><h3>Run 結束</h3><p class="txt">以 completed、failed 或 needs_attention 結束；Worker 每 5 秒送出 heartbeat，超過 20 秒沒有回報就顯示為 recovering。</p></div></div>
 </div>
 <div class="footer"><p class="ft">Durable · 總覽 · Architecture</p><p class="ft pg"></p></div>
-<aside>Agent、conversation turn、tool test、workflow、KB ingest、memory observe、retention，八種 run 都是這條路，差別只在 DBOS workflow 名稱與 queue。</aside>
+<aside>Agent、conversation、tool 測試、workflow、KB 匯入、memory 整理、retention 清除，八種 run 都走這條路，差別只在 DBOS workflow 與 queue。</aside>
 </section>
-<section data-n="8" id="arch-durable">
+<section data-n="9" id="arch-durable">
 <div class="head">
-<p class="eyebrow">Architecture · Durable execution 契約</p>
-<h2>五條規則，讓 Worker crash 變得安全</h2>
+<p class="eyebrow">Architecture · Durable execution</p>
+<h2>持久執行的五項保證</h2>
 </div>
-<p class="lead">Crash matrix 在 19 個具名 crash point 以 kill -9 殺掉真實 process，逐條驗證。</p>
+<p class="lead">Crash matrix 在 19 個具名中斷點以 kill -9 終止真實 process，逐項驗證。</p>
 <div class="cards five">
-<div class="card rise" style="--i:0"><p class="tag">一</p><h3>一個 run 一個 workflow</h3><p class="txt">Workflow id 等於 run id；重啟時 replay 已記錢的 step，不重跑。</p></div>
-<div class="card rise" style="--i:1"><p class="tag">二</p><h3>Event idempotent、無空洞</h3><p class="txt">唯一 event_key；seq 在 row lock 下配號；replay 回既有列。</p></div>
-<div class="card warn rise" style="--i:2"><p class="tag">三</p><h3>Side effect：reserve、call、complete</h3><p class="txt">斷在 call 之後進 needs_attention 交人判斷，不呼叫第二次。</p></div>
-<div class="card rise" style="--i:3"><p class="tag">四</p><h3>非決定性全部記錄</h3><p class="txt">時鐘、version 解析、環境上限、approval 期限都在 step 裡讀一次。</p></div>
-<div class="card rise" style="--i:4"><p class="tag">五</p><h3>Step 錯誤可 replay</h3><p class="txt">Exception 可 pickle，replay 時型別與訊息不變。</p></div>
+<div class="card rise" style="--i:0"><p class="tag">一</p><h3>每個 run 都能接續</h3><p class="txt">Workflow id 等於 run id；重啟後 replay 已完成的 step，不重新執行。</p></div>
+<div class="card rise" style="--i:1"><p class="tag">二</p><h3>Event 不漏、不重複</h3><p class="txt">每筆 event 有唯一的 event_key；seq 依序編號；重複寫入只保留一筆。</p></div>
+<div class="card warn rise" style="--i:2"><p class="tag">三</p><h3>Side effect 只發生一次</h3><p class="txt">先預留、再呼叫、再記錄；若在呼叫後中斷，就進入 needs_attention，不呼叫第二次。</p></div>
+<div class="card rise" style="--i:3"><p class="tag">四</p><h3>Replay 結果一致</h3><p class="txt">時間、版本、期限這類會變動的值，只在 step 內讀取一次並保存。</p></div>
+<div class="card rise" style="--i:4"><p class="tag">五</p><h3>錯誤也能 replay</h3><p class="txt">Exception 完整保存，replay 時型別與訊息都不變。</p></div>
 </div>
-<p class="note">已知約束：DBOS 只恢復同一個 app version 的待定 workflow；部署頻繁時，跨天的 approval 等待需要版本策略（固定版本、滾動退場或 fork 遷移），尚待決定。</p>
+<p class="note">已知限制：DBOS 只恢復同一個 app version 的 workflow；部署頻繁時，跨天等待的 approval 需要版本切換策略（固定版本、逐步淘汰舊版或分支遷移），目前尚未決定。</p>
 <div class="footer"><p class="ft">Durable · 總覽 · Architecture</p><p class="ft pg"></p></div>
-<aside>第三條標橙色，是正確性問題而非省錢。底部的 app version 約束是目前最該先決定的運維議題。</aside>
+<aside>第三項標橙色，因為它是正確性問題，不是效率問題。底部的 app version 限制是目前最需要先決定的運維議題。</aside>
 </section>
-<section data-n="9" id="arch-claim" class="accent">
+<section data-n="10" id="arch-claim" class="accent">
 <div class="mid">
 <p class="eyebrow">Architecture · 核心主張</p>
-<p class="quote">Run 的壽命由 database 決定，<br>不由 process 決定。</p>
-<p class="lead">一次 run 跨分鐘到數天；process 隨時 deploy、重排、crash。兩者解耦，其餘目標才成立。</p>
+<p class="quote" style="transform:translate(0, 1px)">執行進度存在資料庫，<br>服務重啟也不會中斷。</p>
+<p class="lead">一次 run 可能持續幾分鐘到幾天，process 卻隨時可能部署、重啟或當機。把兩者分開，其他保證才能成立。</p>
 </div>
-<aside>整份 Architecture 的一句話。前面五條契約、後面的取捨，都是為了這一句。</aside>
+<aside>整份 Architecture 的一句話。前面的五項保證與後面的取捨，都建立在這句之上。</aside>
 </section>
-<section data-n="10" id="arch-trade">
+<section data-n="11" id="arch-trade">
 <div class="head">
 <p class="eyebrow">Architecture · 設計取捨</p>
 <h2>架構精簡，模組可持續擴充</h2>
 </div>
 <table class="tbl rise" style="--i:0">
-<tr><th style="width:18%">決定</th><th style="width:26%">選了</th><th style="width:22%">沒選</th><th style="width:34%">理由與代價</th></tr>
-<tr><td>Durable execution</td><td>DBOS，在 Postgres 內</td><td>Temporal、自建 state machine</td><td>不多一套服務；代價是恢復綁 app version</td></tr>
-<tr><td>Queue 與通知</td><td>DBOS queue + Postgres NOTIFY</td><td>Redis、Kafka</td><td>一個 database；NOTIFY 不持久，event 先落列</td></tr>
-<tr><td>Vector</td><td>pgvector HNSW</td><td>專用 vector DB</td><td>同一筆 tenant 過濾；千萬級時重評</td></tr>
-<tr><td>Workflow</td><td>宣告式 interpreter</td><td>讓 tenant 寫 Python</td><td>Tenant isolation、版本化、可視覺化；代價是表達力較低</td></tr>
-<tr><td>Identity 與授權</td><td>外部 IdP + 平台 grants 表</td><td>OpenFGA、OPA、自建登入</td><td>Organization 等於 tenant；資源授權資料本就在 Postgres</td></tr>
-<tr><td>Console</td><td>自寫 Studio</td><td>現成 console</td><td>現成品綁自己的 runtime；代價是最大的自製量</td></tr>
+<tr><th style="width:18%">項目</th><th style="width:26%">採用</th><th style="width:22%">未採用</th><th style="width:34%">理由與代價</th></tr>
+<tr><td>Durable execution</td><td>DBOS，直接使用 Postgres</td><td>Temporal、自行開發</td><td>不必另外維運一套服務；代價是恢復範圍受 app version 限制</td></tr>
+<tr><td>Queue 與通知</td><td>DBOS queue + Postgres NOTIFY</td><td>Redis、Kafka</td><td>只用一個 database；NOTIFY 不保證送達，因此 event 一律先寫入</td></tr>
+<tr><td>Vector</td><td>pgvector HNSW</td><td>專用 vector DB</td><td>tenant 過濾在同一處完成；資料量達千萬級時再評估</td></tr>
+<tr><td>Workflow</td><td>宣告式 interpreter</td><td>讓 tenant 撰寫 Python</td><td>較容易做到 tenant isolation、版本管理與視覺化；代價是彈性較低</td></tr>
+<tr><td>Identity 與授權</td><td>規劃中：ZITADEL + 平台 grants 表</td><td>OpenFGA、OPA、自建登入</td><td>ZITADEL 的 organization 直接對應 tenant；授權資料本來就在 Postgres</td></tr>
+<tr><td>Console</td><td>自行開發 Studio</td><td>現成 console</td><td>現成產品綁定自家 runtime；代價是開發量最大</td></tr>
 </table>
-<p class="note">架構精簡：一個 database、兩個 process、一句話的故障模型。模組在這個基礎上延伸：多租戶、審批、記憶、評測都沿用同一套 durable execution 與 tenant 隔離，沒有為新功能再加元件。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md" target="_blank" rel="noopener">Architecture</a></p>
+<p class="note">架構精簡：一個 database、兩個 process，故障模型一句話就能說清楚。模組在這個基礎上延伸：多租戶、approval、memory、evals 都沿用同一套 durable execution 與 tenant isolation，沒有為新功能再增加元件。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md">Architecture</a></p>
 <div class="footer"><p class="ft">Durable · 總覽 · Architecture</p><p class="ft pg"></p></div>
-<aside>Architecture 節收尾。重點是精簡的核心讓模組能持續擴充：沒有重造 engine，新模組都建在同一套基礎上。</aside>
+<aside>Architecture 節收尾。重點是精簡的核心讓模組能持續擴充：沒有重造底層 engine，新模組都建立在同一套基礎上。</aside>
 </section>
-<section data-n="11" id="dev-roles">
+<section data-n="12" id="dev-roles">
 <div class="head">
 <p class="eyebrow">開發方法 · 角色</p>
-<h2>一個人與三類 agent，由獨立的 Reviewer 把關</h2>
+<h2>角色分工</h2>
 </div>
 <div class="cards four">
-<div class="card rise" style="--i:0"><p class="tag">人</p><h3>方向與拍板</h3><ul class="lst"><li>定 milestone 範圍、非目標與邊界；邊界變動時拍板</li><li>審核 plan 的決策表</li><li>跑 browser check</li><li>一句話拍板 merge</li></ul></div>
-<div class="card rise" style="--i:1"><p class="tag">Orchestrator</p><h3>計畫與調度</h3><ul class="lst"><li>研究並撰寫 milestone plan</li><li>拆任務、排 wave、指派</li><li>持有共用檔案順序與 migration lock</li><li>收 review 結果、提交 commit</li></ul></div>
-<div class="card rise" style="--i:2"><p class="tag">Implementer · Tester</p><h3>實作與測試</h3><ul class="lst"><li>依任務 spec 實作</li><li>Tester 寫 plan 列名的測試，跑到綠、不 skip</li><li>只改自己 Owns 的路徑</li><li>測試不呼叫真實 LLM</li></ul></div>
-<div class="card rise" style="--i:3"><p class="tag">Reviewer</p><h3>獨立 review</h3><ul class="lst"><li>全新 context，只拿 diff 與任務原文</li><li>Critical、Important、Minor 分級</li><li>每條帶檔案行號與失敗情境</li><li>檢查品牌與授權規則</li></ul></div>
+<div class="card rise" style="--i:0"><p class="tag">人</p><h3>決定方向</h3><ul class="lst"><li>決定 milestone 的範圍、不做什麼與邊界；邊界需要調整時由人決定</li><li>審核 plan 的決策表</li><li>執行 browser check</li><li>決定是否 merge</li></ul></div>
+<div class="card rise" style="--i:1"><p class="tag">Orchestrator</p><h3>規劃與分派</h3><ul class="lst"><li>研究並撰寫 milestone plan</li><li>拆解任務、安排 wave、分派</li><li>管理共用檔案的修改順序與 migration lock</li><li>彙整 review 結果並提交 commit</li></ul></div>
+<div class="card rise" style="--i:2"><p class="tag">Implementer · Tester</p><h3>實作與測試</h3><ul class="lst"><li>依任務 spec 實作</li><li>Tester 撰寫 plan 指定的測試，全部通過、不 skip</li><li>只修改分配到的檔案</li><li>測試不呼叫真實 LLM</li></ul></div>
+<div class="card rise" style="--i:3"><p class="tag">Reviewer</p><h3>獨立 review</h3><ul class="lst"><li>使用全新 context，只看 diff 與任務原文</li><li>問題分為 Critical、Important、Minor</li><li>每個問題附上檔案位置與失敗情境</li><li>檢查品牌與授權規則</li></ul></div>
 </div>
-<p class="note">三類 agent 的組合每個 milestone 都調過，最後收斂到全部用同一家模型。Reviewer 的獨立性來自乾淨的 context，不是不同的模型。</p>
+<p class="note">三類 agent 的組合在每個 milestone 都調整過，最後全部採用同一家模型。Reviewer 的獨立性來自不共用 context，而不是換用不同的模型。</p>
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
-<aside>開發方法節開場。「Reviewer 獨立於 Implementer」是最核心的一條：Reviewer 只拿 diff 與任務原文，不共享 Implementer 的 context；人逐行讀程式碼不是目標。</aside>
+<aside>開發方法節開場。最核心的一條：Reviewer 只看 diff 與任務原文，不共用 Implementer 的 context；人不需要逐行閱讀程式碼。</aside>
 </section>
-<section data-n="12" id="dev-flow">
+<section data-n="13" id="dev-flow">
 <div class="head">
 <p class="eyebrow">開發方法 · 流程</p>
-<h2>七步流程，wave 重複，兩次整支 review</h2>
+<h2>開發流程</h2>
 </div>
 <div class="flow">
-<div class="node rise" style="--i:0"><p class="tag">1</p><h3>Milestone plan</h3><p class="txt">Orchestrator 寫，含任務表與決策表</p></div>
+<div class="node rise" style="--i:0"><p class="tag">1</p><h3>撰寫 milestone plan</h3><p class="txt">由 Orchestrator 撰寫，包含任務表與決策表</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node rise" style="--i:1"><p class="tag">2</p><h3>人審核決策表</h3><p class="txt">不同意才介入</p></div>
+<div class="node rise" style="--i:1"><p class="tag">2</p><h3>人審核決策表</h3><p class="txt">有不同意見時才介入</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node deep rise" style="--i:2"><p class="tag">3</p><h3>Wave 執行</h3><p class="txt">實作 → 測試 → review → commit；並行任務路徑不重疊</p></div>
+<div class="node deep rise" style="--i:2"><p class="tag">3</p><h3>依 wave 執行</h3><p class="txt">實作 → 測試 → review → commit；同一 wave 的任務修改不同檔案</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node rise" style="--i:3"><p class="tag">4</p><h3>Checkpoint review</h3><p class="txt">Wave 3 後整支審；修正再跑剩餘 wave</p></div>
+<div class="node rise" style="--i:3"><p class="tag">4</p><h3>Checkpoint review</h3><p class="txt">第三個 wave 後整體檢查，修正後再繼續</p></div>
 </div>
 <div class="flow">
-<div class="node rise" style="--i:4"><p class="tag">5</p><h3>Final review</h3><p class="txt">全新 agent 審整支 diff</p></div>
+<div class="node rise" style="--i:4"><p class="tag">5</p><h3>Final review</h3><p class="txt">由全新的 agent 檢查全部 diff</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node rise" style="--i:5"><p class="tag">6</p><h3>Browser check</h3><p class="txt">人走 plan 裡的旅程清單，真數據</p></div>
+<div class="node rise" style="--i:5"><p class="tag">6</p><h3>Browser check</h3><p class="txt">人依 plan 中的操作清單，用真實資料走一遍</p></div>
 <div class="arrw"><span class="arrow" aria-hidden="true"></span></div>
-<div class="node rise" style="--i:6"><p class="tag">7</p><h3>Merge main</h3><p class="txt">沒有未解的 Critical 或 Important；人一句話拍板</p></div>
+<div class="node rise" style="--i:6"><p class="tag">7</p><h3>Merge main</h3><p class="txt">沒有未解決的 Critical 或 Important，由人決定</p></div>
 </div>
-<p class="note">多個 milestone 同時進行，各自一個 branch 與 worktree；一任務一 commit，訊息帶任務編號。每個 milestone 的 review 與 browser check 都產生過修正 commit，沒有一次第一版就過。</p>
+<p class="note">多個 milestone 可同時進行，各自使用獨立的 branch 與 worktree；一個任務一個 commit，訊息附上任務編號。每個 milestone 的 review 與 browser check 都找出過問題，沒有一次是第一版就通過。</p>
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
-<aside>第三步深藍，因為它重複最多次。第七步的 merge 條件和 Spec 的驗收標準是同一條。</aside>
+<aside>第三步標深藍，因為它重複最多次。第七步的 merge 條件與 Spec 的驗收標準是同一條。</aside>
 </section>
-<section data-n="13" id="dev-gates">
+<section data-n="14" id="dev-gates">
 <div class="head">
 <p class="eyebrow">開發方法 · Quality gates</p>
-<h2>四層 gate 由快到慢，人只看最後一層</h2>
+<h2>品質關卡</h2>
 </div>
 <table class="tbl rise" style="--i:0">
-<tr><th style="width:16%">層</th><th style="width:24%">Gate</th><th style="width:60%">內容</th></tr>
-<tr><td>1 結構</td><td>import-linter</td><td>九條禁止契約：純 package 不依賴內部；API 永不 import Worker 或 Agent framework；只有 observability package 可 import OpenTelemetry</td></tr>
-<tr><td>2 單元與 package</td><td>pytest、vitest、tsc、lint</td><td>測試不呼叫真實 LLM，用 scripted model；Studio 測試數不得下降，commit 訊息寫前後總數</td></tr>
-<tr><td>3 整合與 recovery</td><td>API 對真 Postgres；crash matrix</td><td>Worker 在具名 crash point kill -9，同 executor id 的新 Worker 接手；斷言 side effect 恰好一次、seq 連續、SSE 一致</td></tr>
-<tr><td>4 Review 與人工</td><td>任務 review → checkpoint → final → browser check</td><td>Critical / Important / Minor；merge 標準是沒有未解的前兩級；browser check 含四種寬度、深淺色、純鍵盤、a11y ≥ 95</td></tr>
+<tr><th style="width:16%">層級</th><th style="width:24%">Gate</th><th style="width:60%">內容</th></tr>
+<tr><td>1 結構</td><td>import-linter</td><td>九條依賴規則：底層 package 不依賴上層；API 不 import Worker 或 Agent framework；只有 observability package 可以 import OpenTelemetry</td></tr>
+<tr><td>2 單元測試</td><td>pytest、vitest、tsc、lint</td><td>測試使用 scripted model，不呼叫真實 LLM；Studio 的測試數量只能增加，commit 訊息需註明前後數量</td></tr>
+<tr><td>3 整合與恢復</td><td>API 接真實 Postgres；crash matrix</td><td>在具名中斷點以 kill -9 終止 Worker，再由新的 Worker 接手；確認 side effect 只發生一次、seq 連續、SSE 一致</td></tr>
+<tr><td>4 Review 與人工</td><td>任務 review → checkpoint → final → browser check</td><td>問題分為 Critical、Important、Minor；前兩級全部解決才能 merge；browser check 涵蓋多種螢幕寬度、深淺色、純鍵盤操作與無障礙</td></tr>
 </table>
-<p class="note">規則進工具，不靠提醒：agent「記得」的架構規則在長任務後段會鬆掉，所以分層、schema 版本、測試數都變成 build fail。Deploy 只能手動觸發、限 main、secret 從 secret manager 取得。</p>
+<p class="note">規則寫進工具，而不是靠提醒：agent 在長時間任務後段容易忽略架構規則，因此分層、schema 版本、測試數量都設定為 build 失敗。部署只能手動觸發、只從 main 進行，secret 在部署當下才取用。</p>
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
-<aside>這頁回答「agent 寫的程式碼怎麼放心」。答案不是看得更仔細，而是把規則放進會失敗的地方。</aside>
+<aside>這一頁回答「agent 寫的程式碼要怎麼放心」。答案不是看得更仔細，而是把規則放進會自動失敗的地方。</aside>
 </section>
-<section data-n="14" id="dev-harness">
+<section data-n="15" id="dev-harness">
 <div class="head">
 <p class="eyebrow">開發方法 · Harness</p>
-<h2>邊界由 plan 與工具事先定義，agent 在邊界內實作</h2>
+<h2>邊界管理與常見反模式</h2>
 </div>
 <div class="split">
 <div class="side rise" style="--i:0">
-<p class="sub">什麼時候拆分邊界</p>
-<h3>五種理由之一，否則不拆</h3>
+<p class="sub">什麼時候該拆分</p>
+<h3>符合以下任一項才拆</h3>
 <ul class="lst">
-<li>信任不同：tenant 的 workflow 是資料，平台的是程式碼</li>
-<li>壽命不同：run 活得比 process 久，狀態在 database</li>
-<li>故障域不同：API 與 Worker 不直接通訊</li>
-<li>依賴重量不同：API 不帶 Agent framework；純 package 無 I/O</li>
-<li>資源只能有一個主人：schema 只有 Alembic 能改</li>
+<li>信任程度不同：tenant 的 workflow 是資料，平台的 workflow 是程式碼</li>
+<li>存活時間不同：run 比 process 活得久，狀態放在 database</li>
+<li>故障範圍不同：API 與 Worker 不直接溝通</li>
+<li>依賴輕重不同：API 不載入 Agent framework；純 package 不做 I/O</li>
+<li>資源只能有一個管理者：schema 只由 Alembic 修改</li>
 </ul>
 </div>
 <div class="side now rise" style="--i:1">
 <p class="sub">後端反模式</p>
-<h3>Reviewer 逐條檢查</h3>
+<h3>Reviewer 逐項檢查</h3>
 <ul class="lst">
-<li>在 process 記憶體裡等待（sleep、polling、等 approval）</li>
-<li>非 idempotent 的 side effect；自動 retry 掩蓋錯誤</li>
-<li>Replay step 裡的隱藏非決定性：時鐘、latest version</li>
-<li>API 直接呼叫 Worker；應用程式碼改 schema</li>
-<li>跨 tenant 查詢少了 tenant 條件；用 LLM 判斷 branch</li>
-<li>巨大的 utils；重複實作既有函式；一次大 PR</li>
+<li>在 process 記憶體中等待（sleep、polling、等 approval）</li>
+<li>Side effect 不具 idempotency；用自動 retry 掩蓋錯誤</li>
+<li>Replay 時結果不一致：例如在 step 外讀取時間或最新版本</li>
+<li>API 直接呼叫 Worker；應用程式碼直接修改 schema</li>
+<li>查詢漏掉 tenant 條件；讓 LLM 決定流程分支</li>
+<li>過大的 utils 檔；重複實作既有函式；一次提交過大的 PR</li>
 </ul>
 </div>
 </div>
-<p class="note">邊界由人界定，Orchestrator 寫進 plan（Owns 欄、分層規則）。邊界會在 agent 的 context 中流失，所以迭代中由人介入調整：任務撞到邊界時 Implementer 停下回報，人拍板後才改契約、改 plan。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/ai-assisted-development.zh-TW.md" target="_blank" rel="noopener">開發方法</a></p>
+<p class="note">邊界由人決定，Orchestrator 寫進 plan（Owns 欄位、分層規則）。邊界會在 agent 的 context 中逐漸流失，因此過程中需要人介入調整：任務碰到邊界時，Implementer 停下回報，人確認後才調整規則與 plan。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/ai-assisted-development.zh-TW.md">開發方法</a></p>
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
-<aside>Harness 是包在模型外、讓它能做事的執行框架；它的工作之一是把邊界說清楚，agent 不必猜。左邊給 Orchestrator 寫 plan 用，右邊給 Reviewer 用；前八條反模式在Durable是 Critical。</aside>
+<aside>Harness 是包在模型外、讓它能實際執行工作的框架；它的任務之一是把邊界說清楚，讓 agent 不必猜。左邊給 Orchestrator 撰寫 plan 時使用，右邊給 Reviewer 使用；前八項反模式在 Durable 一律視為 Critical。</aside>
 </section>
-<section data-n="15" id="next">
+<section data-n="16" id="next">
 <div class="head">
-<p class="eyebrow">下一個 milestone · 2026-11-19</p>
-<h2>四條主線，各自可獨立交付</h2>
+<p class="eyebrow">下一階段 · 規劃中</p>
+<h2>下一階段規劃</h2>
 </div>
 <div class="cards four">
-<div class="card rise" style="--i:0"><p class="tag">A · 先做</p><h3>Identity 與 Governance</h3><ul class="lst"><li>ZITADEL OIDC；org → tenant、roles 進 Principal</li><li>四種 role，寫入路由 require_role</li><li>資源授權表，與資源同 transaction</li><li>Append-only 稽核表；配額與 token 預算</li></ul></div>
-<div class="card rise" style="--i:1"><p class="tag">B · 其次</p><h3>Authoring 與 Verification</h3><ul class="lst"><li>Per-node 編輯、草稿與版本 diff</li><li>引擎層 dry run：side effect 記錄不執行</li><li>從第 N 步重跑，前段沿用 step 快照</li><li>工具 mock／fixture；套件紅燈不得 publish</li></ul></div>
-<div class="card rise" style="--i:2"><p class="tag">C · 最後</p><h3>Connect 與 Embed</h3><ul class="lst"><li>Webhook 入向觸發（簽章驗證）</li><li>Slack／LINE／e-mail 通知連接器</li><li>第三方 OAuth，refresh token 自動更新</li><li>TypeScript SDK、React 元件、本機 runner</li></ul></div>
-<div class="card plan rise" style="--i:3"><p class="tag">D · 穿插</p><h3>Operate</h3><ul class="lst"><li>模型 fallback 鏈、逾時、重試</li><li>排程失敗與預算告警</li><li>Bundle 匯出／匯入、promotion、回滾</li><li>注入偵測、保留期限、SDK 與文件</li></ul></div>
+<div class="card rise" style="--i:0"><p class="tag">A · 先做</p><h3>Identity 與 Governance</h3><ul class="lst"><li>以 ZITADEL OIDC 登入；organization 對應 tenant</li><li>四種 role，寫入操作依 role 限制</li><li>資源授權表，與資源在同一個 transaction 寫入</li><li>Append-only 稽核紀錄；配額與 token 預算</li></ul></div>
+<div class="card rise" style="--i:1"><p class="tag">B · 其次</p><h3>Authoring 與 Verification</h3><ul class="lst"><li>逐一編輯 node，比對草稿與版本 diff</li><li>引擎層 dry run：side effect 只記錄不執行</li><li>從第 N 步重跑，前面沿用 step 快照</li><li>工具 mock 與 fixture；測試未通過就不能 publish</li></ul></div>
+<div class="card rise" style="--i:2"><p class="tag">C · 最後</p><h3>Connect 與 Embed</h3><ul class="lst"><li>Webhook 觸發（含簽章驗證）</li><li>Slack、LINE、e-mail 通知</li><li>第三方 OAuth，refresh token 自動更新</li><li>TypeScript SDK、React 元件、本機 runner</li></ul></div>
+<div class="card plan rise" style="--i:3"><p class="tag">D · 穿插</p><h3>Operate</h3><ul class="lst"><li>模型 fallback、逾時與重試</li><li>排程失敗與預算告警</li><li>Bundle 匯出匯入、跨環境 promotion、回滾</li><li>Prompt injection 偵測、保留期限、SDK 與文件</li></ul></div>
 </div>
-<p class="note">依賴：A 的 Principal 與路由守衛是 B 發佈門檻與 C 金鑰／角色的基礎；B 的 step 快照與 run 重放被 C 的本機 runner 和 D 的多環境共用；D 的模型降級與告警在 B 之前就值得做。身分與授權做成核心介面加插件，ZITADEL 為獨立套件。完整計畫：下一個 milestone 規劃</p>
+<p class="note">依賴關係：B 的發佈門檻與 C 的金鑰都建立在 A 的身分與權限上；B 的 step 快照與 run 重跑也會被 C 與 D 使用；D 的模型 fallback 與告警已有實際需求，可以在 B 之前完成。身分與授權做成可替換的 plug-in，ZITADEL 是其中一種實作。</p>
 <div class="footer"><p class="ft">Durable · 總覽 · 2026-11-19</p><p class="ft pg"></p></div>
-<aside>每條主線都有現況、交付、驗收三欄，細節在下一個 milestone 規劃。D 是灰色因為它穿插在 A、B、C 之間，不是一條獨立的序列。</aside>
+<aside>每條主線都有現況、交付、驗收三欄。D 以灰色標示，因為它穿插在 A、B、C 之間，而不是獨立的一段。</aside>
 </section>
-<section data-n="16" id="auth">
+<section data-n="17" id="auth">
 <div class="head">
-<p class="eyebrow">Milestone · A 的設計依據</p>
-<h2>企業 identity 需求可直接對應 ZITADEL，平台只改一處</h2>
+<p class="eyebrow">下一階段 · 規劃中 · 尚未實作</p>
+<h2>企業身分整合規劃（ZITADEL）</h2>
 </div>
-<div class="hdr rise" style="--i:0"><p class="h1">用戶需求</p><p class="h2">ZITADEL 對應</p><p class="h3">Durable 改動</p></div>
+<div class="hdr rise" style="--i:0"><p class="h1">用戶需求</p><p class="h2">ZITADEL 提供</p><p class="h3">Durable 需要的修改</p></div>
 <table class="tbl rise" style="--i:1">
 <tr><th style="width:34%">需求</th><th style="width:36%">ZITADEL 提供</th><th style="width:30%">平台端</th></tr>
-<tr><td>企業帳號登入、SSO、MFA、密碼重設</td><td>Hosted login，OIDC PKCE；企業 IdP 以 SAML / OIDC 接入</td><td>Studio 改走 OIDC；不自建登入</td></tr>
-<tr><td>Tenant 之間資料完全隔離</td><td>每個客戶一個 Organization；user 只屬於一個 org</td><td>Org id → tenant_id；SQL tenant 過濾不變</td></tr>
-<tr><td>Role：admin、designer、approver、viewer</td><td>Project roles，客戶 org 管理者自行指派，進 token</td><td>API 新增 require_role</td></tr>
-<tr><td>機器存取：外部前端、MCP、OTLP</td><td>Service user + PAT 或 JWT key，scope 用同一套 role</td><td>與現有 tenant API key 並收一個版本</td></tr>
-<tr><td>離職帳號的 memory 與資料處理</td><td>User 停用／刪除事件可觸發外部呼叫</td><td>呼叫既有的 forget API</td></tr>
-<tr><td>某個 Agent 或 Workflow 只給特定人</td><td>不在範圍：ZITADEL 的 role 是 project 層級</td><td>平台 database 一張 resource_grants 表，與資源同 transaction 寫入</td></tr>
+<tr><td>企業帳號登入、SSO、MFA、密碼重設</td><td>現成登入頁（OIDC PKCE）；企業 IdP 可透過 SAML 或 OIDC 串接</td><td>Studio 改用 OIDC 登入，不自建登入</td></tr>
+<tr><td>不同 tenant 的資料完全隔離</td><td>每個客戶一個 organization；user 只屬於一個 organization</td><td>Organization id 對應 tenant_id；SQL 的 tenant 過濾維持不變</td></tr>
+<tr><td>Role：admin、designer、approver、viewer</td><td>Project roles 由客戶的管理者自行指派，並寫入 token</td><td>API 新增 require_role 檢查</td></tr>
+<tr><td>程式存取：外部前端、MCP、OTLP</td><td>Service user 搭配 PAT 或 JWT key，權限沿用同一套 role</td><td>與現有 tenant API key 並行一個版本後切換</td></tr>
+<tr><td>離職帳號的 memory 與資料處理</td><td>使用者停用或刪除時可觸發外部呼叫</td><td>呼叫既有的 forget API</td></tr>
+<tr><td>某個 Agent 或 Workflow 只開放給特定人</td><td>不支援：ZITADEL 的 role 只到 project 層級</td><td>平台 database 新增 resource_grants 表，與資源在同一個 transaction 寫入</td></tr>
 </table>
-<p class="note">API 只改 current_principal：驗 JWT、sub → user_id、org id → tenant_id、roles 進 Principal。Worker 不參與授權；OpenFGA 等真有資源級分享需求再評估。</p>
+<p class="note">API 只需修改 current_principal：驗證 JWT，取得 user_id、tenant_id 與 roles。Worker 不參與授權；若出現更細的資源分享需求，再評估 OpenFGA。</p>
 <div class="footer"><p class="ft">Durable · 總覽 · Identity</p><p class="ft pg"></p></div>
-<aside>Identity 交給 ZITADEL，tenant 與 role 從 token 來，資源級授權留在自己的 database。先做 OIDC mode 與 Studio 登入即可上生產。</aside>
+<aside>身分交給 ZITADEL，tenant 與 role 從 token 取得，資源層級的授權保留在自己的 database。先完成 OIDC 模式與 Studio 登入，即可上線。</aside>
 </section>
-<section data-n="17" id="ms-a">
+<section data-n="18" id="ms-a">
 <div class="head">
-<p class="eyebrow">Milestone · A · 先做</p>
-<h2>Identity 與 Governance</h2>
+<p class="eyebrow">下一階段 · 規劃中 · A</p>
+<h2>規劃 A：身分與治理</h2>
 </div>
 <table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付</th><th style="width:36%">驗收</th></tr>
-<tr><td>企業登入</td><td>ZITADEL OIDC（PKCE）；current_principal 驗 JWT，org → tenant_id，sub → user_id，roles 進 Principal；Studio 登入頁與 token 更新</td><td>無 dev bearer 的部署能以 ZITADEL 帳號登入 Studio 並操作所有頁面</td></tr>
-<tr><td>Role</td><td>管理者／設計者／審批者／檢視者；管理路由加 require_role；審批者才可決定 approval</td><td>檢視者 token 呼叫任一寫入路由得 403；測試覆蓋全部管理路由</td></tr>
-<tr><td>資源級授權</td><td>資源授權表（agent／workflow／KB／schedule），與資源同 transaction 寫入；Studio 顯示與設定</td><td>未授權者列表看不到該資源，直接以 id 存取得 404</td></tr>
-<tr><td>離職流程</td><td>ZITADEL 停用事件 → forget API；所有權移轉 API 與 Studio 動作</td><td>停用後 memory 被遺忘且有稽核；資源可移轉</td></tr>
-<tr><td>稽核紀錄</td><td>Append-only 稽核表：approval、publish、封存、key 與 secret 的建立與使用；Studio 稽核頁與匯出</td><td>每筆敏感動作有 who／what／when／tenant；表無 UPDATE／DELETE 權限</td></tr>
-<tr><td>配額與預算</td><td>每 API key／tenant 的 RPS 與並行上限；每 tenant／agent 的 token 預算，超額停止並通知</td><td>超配額得 429；超預算的 run 以明確錯誤結束並寫稽核</td></tr>
+<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
+<tr><td>企業登入</td><td>ZITADEL OIDC（PKCE）；current_principal 驗證 JWT，取得 tenant_id、user_id 與 roles；Studio 新增登入頁與 token 更新</td><td>未啟用 dev bearer 的環境，可用 ZITADEL 帳號登入 Studio 並操作所有頁面</td></tr>
+<tr><td>Role</td><td>管理者、設計者、審批者、檢視者；管理類 route 加上 require_role；只有審批者能決定 approval</td><td>檢視者呼叫任何寫入 route 都得到 403；測試涵蓋全部管理 route</td></tr>
+<tr><td>資源級授權</td><td>Agent、Workflow、KB、schedule 的授權表，與資源在同一個 transaction 寫入；Studio 可檢視與設定</td><td>未授權者在列表中看不到該資源，直接以 id 存取得到 404</td></tr>
+<tr><td>離職流程</td><td>ZITADEL 停用事件觸發 forget API；提供所有權移轉的 API 與 Studio 操作</td><td>停用後 memory 被清除並留下稽核紀錄；資源可以移轉</td></tr>
+<tr><td>稽核紀錄</td><td>Append-only 稽核表：記錄 approval、publish、封存，以及 key 與 secret 的建立與使用；Studio 可查詢與匯出</td><td>每一筆敏感操作都有 who、what、when、tenant；資料表不允許 UPDATE 或 DELETE</td></tr>
+<tr><td>配額與預算</td><td>每個 API key 與 tenant 的 RPS 與並行上限；每個 tenant 或 agent 的 token 預算，超出即停止並通知</td><td>超出配額得到 429；超出預算的 run 以明確錯誤結束，並寫入稽核</td></tr>
 </table>
-<p class="note">身分與授權做成核心介面加插件：核心定義 Principal（roles）、token 驅動器 entry point 與登入導向；ZITADEL 是獨立套件，與 kb-sources 插件同模式。</p>
-<div class="footer"><p class="ft">Durable · 下一個 milestone 規劃</p><p class="ft pg"></p></div>
-<aside>A 先做的理由：ZITADEL、role、稽核、配額改的是同一層（Principal 與路由守衛），一起動最省；其餘三條主線都依賴它。</aside>
+<p class="note">身分與授權做成核心介面加 plug-in：核心定義 Principal（含 roles）、token 驗證的 entry point 與登入導向；ZITADEL 是獨立套件，作法與 kb-sources plug-in 相同。</p>
+<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
+<aside>A 先做的原因：登入、role、稽核、配額修改的是同一層（Principal 與 route 守衛），一起處理最省力；其他三條主線都依賴它。</aside>
 </section>
-<section data-n="18" id="ms-b">
+<section data-n="19" id="ms-b">
 <div class="head">
-<p class="eyebrow">Milestone · B · 其次</p>
-<h2>Authoring 與 Verification</h2>
+<p class="eyebrow">下一階段 · 規劃中 · B</p>
+<h2>規劃 B：編輯與驗證</h2>
 </div>
 <table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付</th><th style="width:36%">驗收</th></tr>
-<tr><td>Per-node 編輯</td><td>Studio 圖上編輯單一步驟，即時 schema 驗證；草稿與已發佈版本 diff；Architect 以「修改既有 workflow」操作，可讀完整 agent spec、改排程名稱</td><td>改一個步驟 → 存草稿 → diff 只顯示該步驟 → publish 成新版本</td></tr>
-<tr><td>Dry run（引擎）</td><td>引擎層 dry mode：side effect 工具（http.request、發文、secrets）記錄不執行或走 sandbox；每步輸入輸出與預估成本</td><td>以 dry mode 跑範例排程 workflow，無外部呼叫，輸出與成本可見</td></tr>
-<tr><td>從第 N 步重跑</td><td>以 step 快照重放：改第 N 步輸入後重跑 N 之後，之前步驟沿用</td><td>任一完成的 run 可選步驟改輸入重跑，前段不重算</td></tr>
-<tr><td>工具 mock／fixture</td><td>測試套件可為工具指定固定回應；錄製真實回應成 fixture</td><td>測試案例在無網路下可重跑且結果一致</td></tr>
-<tr><td>發佈門檻</td><td>指定套件未通過不得 publish；CI 以 API key 觸發套件並取結果</td><td>套件紅燈時 publish 得 409 並指出失敗案例；GitHub Actions 範例可跑</td></tr>
+<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
+<tr><td>逐一編輯 node</td><td>在 Studio 的流程圖上編輯單一 step，即時檢查 schema；比對草稿與已發佈版本的 diff；Architect 可直接修改既有 workflow，並讀取完整 agent spec</td><td>修改一個 step → 儲存草稿 → diff 只顯示該 step → publish 為新版本</td></tr>
+<tr><td>Dry run</td><td>引擎層的 dry 模式：http.request、發文、secrets 等 side effect 工具只記錄不執行，或改走 sandbox；顯示每一步的輸入輸出與預估成本</td><td>以 dry 模式執行一條排程 workflow，沒有任何外部呼叫，輸出與成本都可看到</td></tr>
+<tr><td>從第 N 步重跑</td><td>以 step 快照重放：修改第 N 步的輸入後，只重跑第 N 步之後的部分</td><td>任何已完成的 run 都能選擇一步、修改輸入後重跑，前段不重新計算</td></tr>
+<tr><td>工具 mock 與 fixture</td><td>測試套件可為工具指定固定回應，也可錄下真實回應作為 fixture</td><td>測試案例在沒有網路的情況下可重跑，結果一致</td></tr>
+<tr><td>發佈門檻</td><td>指定的測試套件未通過就不能 publish；CI 可用 API key 觸發測試並取得結果</td><td>測試失敗時 publish 回傳 409 並指出失敗案例；提供可執行的 GitHub Actions 範例</td></tr>
 </table>
-<p class="note">現況：整份 JSON 編輯、Architect 整份重寫、workflow 自帶 dry 輸入、沒有重跑與 mock。dry run、重跑、per-node 編輯共用 step 快照與 run 重放；發佈門檻依賴 A 的 role。</p>
-<div class="footer"><p class="ft">Durable · 下一個 milestone 規劃</p><p class="ft pg"></p></div>
-<aside>B 的核心是「step 快照與 run 重放」這一個機制，五個項目有三個建在它上面；它也和 DBOS app version 的版本策略直接相關。</aside>
+<p class="note">現況：只能編輯整份 JSON，Architect 每次重寫整份設定，沒有重跑與 mock。Dry run、重跑、逐一編輯共用 step 快照與 run 重放；發佈門檻需要 A 的 role。</p>
+<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
+<aside>B 的核心是「step 快照與 run 重放」這一個機制，五個項目中有三個建立在它之上；它也與 DBOS app version 的版本策略直接相關。</aside>
 </section>
-<section data-n="19" id="ms-c">
+<section data-n="20" id="ms-c">
 <div class="head">
-<p class="eyebrow">Milestone · C · 最後</p>
-<h2>Connect 與 Embed</h2>
+<p class="eyebrow">下一階段 · 規劃中 · C</p>
+<h2>規劃 C：連接與嵌入</h2>
 </div>
 <table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付</th><th style="width:36%">驗收</th></tr>
-<tr><td>入向觸發</td><td>Webhook 端點（簽章驗證）啟動 workflow；入向 e-mail／queue 作為第二階段</td><td>外部 POST 一次 webhook → 一個 run 啟動並帶入 payload</td></tr>
-<tr><td>通知連接器</td><td>Slack／LINE／e-mail 出站工具，憑證走 tenant secrets</td><td>Workflow 一個步驟即可發通知；密碼不出現在定義或日誌</td></tr>
-<tr><td>第三方 OAuth</td><td>OAuth 授權流程，refresh token 自動更新並保存為 secret</td><td>連線到期自動更新，工具呼叫不中斷</td></tr>
-<tr><td>Client SDK 與嵌入</td><td>TypeScript SDK、React 聊天元件、瀏覽器 OTLP 的 CORS、範例 app</td><td>外部靜態網站以 API key 嵌入對話並送出瀏覽器 trace</td></tr>
-<tr><td>本機工具執行</td><td>本機 runner（WebSocket 連回平台）在使用者機器執行工具，等待可崩潰恢復</td><td>Run 等待本機工具期間重啟 API 與 Worker，結果仍正確回填</td></tr>
+<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
+<tr><td>外部觸發</td><td>Webhook 端點啟動 workflow，並驗證簽章；e-mail 與 queue 觸發列為第二階段</td><td>外部送出一次 webhook，啟動一個 run 並帶入 payload</td></tr>
+<tr><td>通知連接器</td><td>Slack、LINE、e-mail 的出站工具，憑證存放在 tenant secrets</td><td>Workflow 用一個 step 就能發送通知；密碼不出現在設定或 log</td></tr>
+<tr><td>第三方 OAuth</td><td>OAuth 授權流程，refresh token 自動更新並存為 secret</td><td>連線到期時自動更新，工具呼叫不中斷</td></tr>
+<tr><td>Client SDK 與嵌入</td><td>TypeScript SDK、React 聊天元件、支援瀏覽器 OTLP 的 CORS 設定、範例 app</td><td>外部靜態網站用一把 API key 就能嵌入對話，並送出瀏覽器端 trace</td></tr>
+<tr><td>本機工具</td><td>本機 runner 透過 WebSocket 連回平台，在使用者電腦上執行工具；等待期間可承受服務重啟</td><td>Run 等待本機工具時重啟 API 與 Worker，結果仍能正確回填</td></tr>
 </table>
-<p class="note">現況：排程與手動觸發、http.request 手刻通知、secrets 保存靜態 token、AG-UI 串流與 client tools 協定。入向觸發與本機 runner 依賴 A 的 key／role 與 B 的重放；SDK 依賴文件站。</p>
-<div class="footer"><p class="ft">Durable · 下一個 milestone 規劃</p><p class="ft pg"></p></div>
-<aside>C 放最後不是因為不重要，而是每一項都站在 A 與 B 之上。本機 runner 的「等待可崩潰恢復」是 durable execution 契約第一條的延伸。</aside>
+<p class="note">現況：只有排程與手動觸發，通知需用 http.request 自行設定，secrets 只能存放固定 token，AG-UI 已支援串流與 client tools。外部觸發與本機 runner 需要 A 的 key 與 role、B 的重放機制；SDK 需要文件站。</p>
+<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
+<aside>C 排在最後並不是因為不重要，而是每一項都建立在 A 與 B 之上。本機 runner「等待期間可承受重啟」是 durable execution 第一項保證的延伸。</aside>
 </section>
-<section data-n="20" id="ms-d">
+<section data-n="21" id="ms-d">
 <div class="head">
-<p class="eyebrow">Milestone · D · 穿插</p>
-<h2>Operate</h2>
+<p class="eyebrow">下一階段 · 規劃中 · D</p>
+<h2>規劃 D：營運</h2>
 </div>
 <table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付</th><th style="width:36%">驗收</th></tr>
-<tr><td>模型路由與降級</td><td>Agent 版本上設 fallback 鏈、逾時、重試</td><td>主模型逾時自動改用備援並在 trace 標示</td></tr>
-<tr><td>告警</td><td>排程失敗／逾時、失敗率、預算告警到通知連接器</td><td>範例排程 workflow 失敗 5 分鐘內有通知</td></tr>
-<tr><td>多環境與升版</td><td>匯出／匯入 agent 與 workflow bundle；dev → staging → prod promotion；一鍵回滾</td><td>同一 bundle 可在另一 tenant 匯入並跑通測試套件</td></tr>
-<tr><td>提示注入與淨化</td><td>Processor 層注入偵測與來源標記；外部取回內容清洗</td><td>內嵌指令的網頁內容不改變 agent 行為，trace 標示攔截</td></tr>
-<tr><td>資料治理</td><td>保留期限、PII 遮罩擴到 run 輸入輸出、每 tenant secret 加密金鑰、資料匯出</td><td>到期資料自動清除且有稽核；匯出包含該 tenant 全部資料</td></tr>
-<tr><td>SDK 與文件</td><td>Python／TypeScript client、OpenAPI 發佈、TODO 頁補齊、一行 compose 與 demo 種子</td><td>新使用者照文件 30 分鐘內本機跑起 Studio 並完成嵌入範例</td></tr>
+<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
+<tr><td>模型路由與降級</td><td>在 agent 版本上設定 fallback 模型、逾時與重試</td><td>主模型逾時時自動改用備援，並在 trace 中標示</td></tr>
+<tr><td>告警</td><td>排程失敗或逾時、失敗率、預算超標時發送告警到通知連接器</td><td>排程失敗後 5 分鐘內收到通知</td></tr>
+<tr><td>多環境與升版</td><td>Agent 與 workflow 可打包為 bundle 匯出、匯入；支援 dev → staging → prod promotion 與一鍵回滾</td><td>同一個 bundle 可在另一個 tenant 匯入並通過測試套件</td></tr>
+<tr><td>Prompt injection 防護</td><td>在 processor 層偵測注入指令並標示來源；清理外部取回的內容</td><td>網頁內容夾帶的指令不會改變 agent 行為，trace 中標示已攔截</td></tr>
+<tr><td>資料治理</td><td>保留期限、run 輸入輸出的 PII 遮蔽、每個 tenant 獨立的 secret 加密金鑰、資料匯出</td><td>到期資料自動清除並留下稽核；匯出內容包含該 tenant 的全部資料</td></tr>
+<tr><td>SDK 與文件</td><td>Python 與 TypeScript client、發佈 OpenAPI、補齊待寫頁面、一行指令啟動與 demo 資料</td><td>新使用者依文件在 30 分鐘內於本機啟動 Studio，並完成嵌入範例</td></tr>
 </table>
-<p class="note">現況：單一模型、逾時靠人換；無告警；有版本與封存；OTLP 與 secret 遮罩；forget API；文件站進行中。模型降級與告警在 B 之前就值得做（範例排程 workflow 已碰到逾時）；多環境依賴 B 的 bundle 格式。</p>
-<div class="footer"><p class="ft">Durable · 下一個 milestone 規劃</p><p class="ft pg"></p></div>
-<aside>D 不是一條序列，是穿插在 A、B、C 之間的運維項目；前兩項（降級、告警）優先，因為已經在生產碰到。</aside>
+<p class="note">現況：只能使用單一模型，逾時需人工更換；沒有告警；已有版本與封存、OTLP 與 secret 遮罩、forget API。模型降級與告警已有實際需求，可以在 B 之前完成；多環境需要 B 的 bundle 格式。</p>
+<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
+<aside>D 不是獨立的一段工作，而是穿插在 A、B、C 之間的營運項目；前兩項（降級與告警）優先，因為已經在正式環境遇到。</aside>
 </section>
-<section data-n="21" id="ms-order">
+<section data-n="22" id="ms-order">
 <div class="head">
-<p class="eyebrow">Milestone · 順序與依賴</p>
-<h2>A 先、B 次、C 後，D 穿插</h2>
+<p class="eyebrow">下一階段 · 規劃中 · 順序</p>
+<h2>執行順序與依賴</h2>
 </div>
 <div class="steps">
-<div class="step rise" style="--i:0"><p class="n">A</p><div class="body"><h3>Identity 與 Governance 先做</h3><p class="txt">ZITADEL、role、稽核、配額改的都是同一層：Principal 與路由守衛。一起動最省，其餘三條主線都依賴它。</p></div></div>
-<div class="step rise" style="--i:1"><p class="n">B</p><div class="body"><h3>Authoring 與 Verification 其次</h3><p class="txt">Dry run、從第 N 步重跑、per-node 編輯共用 step 快照與 run 重放；發佈門檻依賴 A 的 role。</p></div></div>
-<div class="step rise" style="--i:2"><p class="n">C</p><div class="body"><h3>Connect 與 Embed 最後</h3><p class="txt">入向觸發與本機 runner 依賴 A 的 key／role 與 B 的重放機制；SDK 依賴文件站。</p></div></div>
-<div class="step rise" style="--i:3"><p class="n">D</p><div class="body"><h3>Operate 穿插</h3><p class="txt">模型降級與告警在 B 之前就值得做，範例排程 workflow 已碰到逾時；多環境與 promotion 依賴 B 的 bundle 格式。</p></div></div>
+<div class="step rise" style="--i:0"><p class="n">A</p><div class="body"><h3>先做 Identity 與 Governance</h3><p class="txt">ZITADEL、role、稽核、配額修改的都是同一層：Principal 與 route 守衛。一起處理最省力，其他三條主線都依賴它。</p></div></div>
+<div class="step rise" style="--i:1"><p class="n">B</p><div class="body"><h3>接著做 Authoring 與 Verification</h3><p class="txt">Dry run、從第 N 步重跑、逐一編輯 node 共用 step 快照與 run 重放；發佈門檻需要 A 的 role。</p></div></div>
+<div class="step rise" style="--i:2"><p class="n">C</p><div class="body"><h3>最後做 Connect 與 Embed</h3><p class="txt">外部觸發與本機 runner 需要 A 的 key 與 role，以及 B 的重放機制；SDK 需要文件站。</p></div></div>
+<div class="step rise" style="--i:3"><p class="n">D</p><div class="body"><h3>Operate 穿插進行</h3><p class="txt">模型降級與告警已有實際需求，可以在 B 之前完成；多環境與 promotion 需要 B 的 bundle 格式。</p></div></div>
 </div>
-<p class="note">尚未列入但與 B 直接相關的決定：DBOS app version 與頻繁 deploy 的版本策略。完整計畫與驗收條件：下一個 milestone 規劃</p>
-<div class="footer"><p class="ft">Durable · 下一個 milestone 規劃</p><p class="ft pg"></p></div>
-<aside>收尾。四條主線每條可獨立交付，但順序由依賴決定，不由重要性決定。</aside>
+<p class="note">另一件需要先決定的事：部署頻繁時 DBOS app version 的切換策略，這與 B 直接相關。</p>
+<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
+<aside>收尾。四條主線各自都能獨立交付，但順序由依賴關係決定，而不是由重要性決定。</aside>
 </section>
 </div>
 </main>
 <nav class="hud" aria-label="投影片導覽">
 <button type="button" id="prev" aria-label="上一張">‹</button>
-<span id="count" class="count">1 / 21</span>
+<span id="count" class="count">1 / 22</span>
 <button type="button" id="next" aria-label="下一張">›</button>
 <button type="button" id="notesBtn" aria-pressed="false" title="講者備註 (N)">N</button>
 </nav>
