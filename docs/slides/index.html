@@ -39,10 +39,10 @@
 <tr><td>流程要等主管審批幾小時到幾天，服務一重啟就斷</td><td>等待狀態存在資料庫，不占用服務；重啟後自動接回</td></tr>
 <tr><td>多個客戶或部門共用平台，資料不能混在一起</td><td>每筆資料都屬於一個 tenant；跨 tenant 一律看不到</td></tr>
 <tr><td>不知道 agent 做了什麼、花了多少錢、為什麼出錯</td><td>每次執行都有完整 trace、token 用量與費用紀錄</td></tr>
-<tr><td>業務人員要自己組流程與 Agent，不寫程式</td><td>在 Studio 以設定組出 Workflow、RAG、Memory，版本化並可回復</td></tr>
+<tr><td>使用者自己組流程與 Agent，程式品質不穩定</td><td>在 Studio 以設定組出 Workflow、RAG、Memory，版本化並可回復</td></tr>
 <tr><td>多套系統拼湊，部署與維運負擔重</td><td>一個 Postgres、兩個服務即可運作；輕量部署，可自架</td></tr>
 </table>
-<p class="note">設計目的：Durable。Agent 與 Workflow 都能持久執行，也能重複執行；中斷不遺失、動作不重複。租戶隔離、可觀測與精簡部署，都是為了讓這件事能在企業環境中成立。</p>
+<p class="note">設計目的：Durable。Agent 與 Workflow 都能持久執行，也能重複執行；中斷不遺失、動作不重複。租戶隔離、可觀測與精簡部署，都是為了讓這件事能實際上線運作。</p>
 <div class="footer"><p class="ft">Durable · 總覽</p><p class="ft pg"></p></div>
 <aside>開場先講問題。左欄是 AI Agent 上線時最常卡住的六件事，右欄是 Durable 對應的做法；後面的規格與架構都在展開右欄。</aside>
 </section>
@@ -336,12 +336,12 @@
 <section data-n="19" id="auth">
 <div class="head">
 <p class="eyebrow">下一階段 · 規劃中 · 尚未實作</p>
-<h2>企業身分整合規劃（ZITADEL）</h2>
+<h2>組織身分整合規劃（ZITADEL）</h2>
 </div>
 <div class="hdr rise" style="--i:0"><p class="h1">用戶需求</p><p class="h2">ZITADEL 提供</p><p class="h3">Durable 需要的修改</p></div>
 <table class="tbl rise" style="--i:1">
 <tr><th style="width:34%">需求</th><th style="width:36%">ZITADEL 提供</th><th style="width:30%">平台端</th></tr>
-<tr><td>企業帳號登入、SSO、MFA、密碼重設</td><td>現成登入頁（OIDC PKCE）；企業 IdP 可透過 SAML 或 OIDC 串接</td><td>Studio 改用 OIDC 登入，不自建登入</td></tr>
+<tr><td>組織帳號登入、SSO、MFA、密碼重設</td><td>現成登入頁（OIDC PKCE）；組織既有的 IdP 可透過 SAML 或 OIDC 串接</td><td>Studio 改用 OIDC 登入，不自建登入</td></tr>
 <tr><td>不同 tenant 的資料完全隔離</td><td>每個客戶一個 organization；user 只屬於一個 organization</td><td>Organization id 對應 tenant_id；SQL 的 tenant 過濾維持不變</td></tr>
 <tr><td>Role：admin、designer、approver、viewer</td><td>Project roles 由客戶的管理者自行指派，並寫入 token</td><td>API 新增 require_role 檢查</td></tr>
 <tr><td>程式存取：外部前端、MCP、OTLP</td><td>Service user 搭配 PAT 或 JWT key，權限沿用同一套 role</td><td>與現有 tenant API key 並行一個版本後切換</td></tr>
@@ -359,7 +359,7 @@
 </div>
 <table class="tbl rise" style="--i:0; font-size:24px">
 <tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
-<tr><td>企業登入</td><td>ZITADEL OIDC（PKCE）；current_principal 驗證 JWT，取得 tenant_id、user_id 與 roles；Studio 新增登入頁與 token 更新</td><td>未啟用 dev bearer 的環境，可用 ZITADEL 帳號登入 Studio 並操作所有頁面</td></tr>
+<tr><td>組織登入</td><td>ZITADEL OIDC（PKCE）；current_principal 驗證 JWT，取得 tenant_id、user_id 與 roles；Studio 新增登入頁與 token 更新</td><td>未啟用 dev bearer 的環境，可用 ZITADEL 帳號登入 Studio 並操作所有頁面</td></tr>
 <tr><td>Role</td><td>管理者、設計者、審批者、檢視者；管理類 route 加上 require_role；只有審批者能決定 approval</td><td>檢視者呼叫任何寫入 route 都得到 403；測試涵蓋全部管理 route</td></tr>
 <tr><td>資源級授權</td><td>Agent、Workflow、KB、schedule 的授權表，與資源在同一個 transaction 寫入；Studio 可檢視與設定</td><td>未授權者在列表中看不到該資源，直接以 id 存取得到 404</td></tr>
 <tr><td>離職流程</td><td>ZITADEL 停用事件觸發 forget API；提供所有權移轉的 API 與 Studio 操作</td><td>停用後 memory 被清除並留下稽核紀錄；資源可以移轉</td></tr>
