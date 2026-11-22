@@ -24,7 +24,7 @@
 <div class="mid">
 <p class="eyebrow">Durable · 核心主張</p>
 <p class="quote" style="transform:translate(0, 1px)">執行進度存在資料庫，<br>服務重啟也不會中斷。</p>
-<p class="lead">一次 run 可能持續幾分鐘到幾天，process 卻隨時可能部署、重啟或當機。把兩者分開，其他保證才能成立。</p>
+<p class="lead">一件工作可能要跑好幾天，服務卻隨時會因為部署或當機而重啟。進度存在資料庫，服務重啟後就從中斷的地方繼續。</p>
 </div>
 <aside>整份簡報的一句話，放在最前面。後面的規格、五項保證與取捨，都建立在這句之上。</aside>
 </section>
@@ -200,10 +200,10 @@
 <tr><td>Queue 與通知</td><td>DBOS queue + Postgres NOTIFY</td><td>Redis、Kafka</td><td>只用一個 database；NOTIFY 不保證送達，因此 event 一律先寫入</td></tr>
 <tr><td>Vector</td><td>pgvector HNSW</td><td>專用 vector DB</td><td>tenant 過濾在同一處完成；資料量達千萬級時再評估</td></tr>
 <tr><td>Workflow</td><td>宣告式 interpreter</td><td>讓 tenant 撰寫 Python</td><td>較容易做到 tenant isolation、版本管理與視覺化；代價是彈性較低</td></tr>
-<tr><td>Identity 與授權</td><td>規劃中：ZITADEL + 平台 grants 表</td><td>OpenFGA、OPA、自建登入</td><td>ZITADEL 的 organization 直接對應 tenant；授權資料本來就在 Postgres</td></tr>
+<tr><td>Identity 與授權</td><td>規劃中：OpenFGA（Fine-Grained Authorization）+ ZITADEL（External IdP）</td><td>OPA、自建登入、自建授權表</td><td>登入與細部授權都交給成熟的開源服務，不自建；代價是多維運兩個服務</td></tr>
 <tr><td>Console</td><td>自行開發 Studio</td><td>現成 console</td><td>現成產品綁定自家 runtime；代價是開發量最大</td></tr>
 </table>
-<p class="note">架構精簡：一個 database、兩個 process，故障模型一句話就能說清楚。模組在這個基礎上延伸：多租戶、approval、memory、evals 都沿用同一套 durable execution 與 tenant isolation，沒有為新功能再增加元件。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md">Architecture</a></p>
+<p class="note">核心維持一個 database、兩個 process，在這個基礎上可延伸擴充。完整文件：<a href="https://github.com/juice91/durable/blob/main/docs/design/architecture.zh-TW.md">Architecture</a></p>
 <div class="footer"><p class="ft">Durable · 總覽 · Architecture</p><p class="ft pg"></p></div>
 <aside>Architecture 節收尾。重點是精簡的核心讓模組能持續擴充：沒有重造底層 engine，新模組都建立在同一套基礎上。</aside>
 </section>
@@ -222,28 +222,13 @@
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
 <aside>開發方法只留這一頁摘要。重點是品質不靠人逐行閱讀，而是靠獨立 review 與會自動失敗的規則；細節在附錄四頁。</aside>
 </section>
-<section data-n="13" id="next">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中</p>
-<h2>下一階段規劃</h2>
-</div>
-<div class="cards four">
-<div class="card rise" style="--i:0"><p class="tag">A · 先做</p><h3>Identity 與 Governance</h3><ul class="lst"><li>以 ZITADEL OIDC 登入；organization 對應 tenant</li><li>四種 role，寫入操作依 role 限制</li><li>資源授權表，與資源在同一個 transaction 寫入</li><li>Append-only 稽核紀錄；配額與 token 預算</li></ul></div>
-<div class="card rise" style="--i:1"><p class="tag">B · 其次</p><h3>Authoring 與 Verification</h3><ul class="lst"><li>逐一編輯 node，比對草稿與版本 diff</li><li>引擎層 dry run：side effect 只記錄不執行</li><li>從第 N 步重跑，前面沿用 step 快照</li><li>工具 mock 與 fixture；測試未通過就不能 publish</li></ul></div>
-<div class="card rise" style="--i:2"><p class="tag">C · 最後</p><h3>Connect 與 Embed</h3><ul class="lst"><li>Webhook 觸發（含簽章驗證）</li><li>Slack、LINE、e-mail 通知</li><li>第三方 OAuth，refresh token 自動更新</li><li>TypeScript SDK、React 元件、本機 runner</li></ul></div>
-<div class="card plan rise" style="--i:3"><p class="tag">D · 穿插</p><h3>Operate</h3><ul class="lst"><li>模型 fallback、逾時與重試</li><li>排程失敗與預算告警</li><li>Bundle 匯出匯入、跨環境 promotion、回滾</li><li>Prompt injection 偵測、保留期限、SDK 與文件</li></ul></div>
-</div>
-<p class="note">依賴關係：B 的發佈門檻與 C 的金鑰都建立在 A 的身分與權限上；B 的 step 快照與 run 重跑也會被 C 與 D 使用；D 的模型 fallback 與告警已有實際需求，可以在 B 之前完成。身分與授權做成可替換的 plug-in，ZITADEL 是其中一種實作。</p>
-<div class="footer"><p class="ft">Durable · 總覽 · 2026-11-19</p><p class="ft pg"></p></div>
-<aside>每條主線都有現況、交付、驗收三欄。D 以灰色標示，因為它穿插在 A、B、C 之間，而不是獨立的一段。</aside>
-</section>
-<section data-n="14" id="appendix" class="dark cover">
+<section data-n="13" id="appendix" class="dark cover">
 <p class="eyebrow">附錄</p>
 <h1>附錄</h1>
-<p class="lead">開發方法的細節，以及下一階段各項規劃的交付內容與驗收方式。</p>
+<p class="lead">開發方法的細節：角色分工、開發流程、品質關卡與邊界管理。</p>
 <aside>以下為備查內容，正式簡報到上一頁為止。</aside>
 </section>
-<section data-n="15" id="dev-roles">
+<section data-n="14" id="dev-roles">
 <div class="head">
 <p class="eyebrow">開發方法 · 角色</p>
 <h2>角色分工</h2>
@@ -258,7 +243,7 @@
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
 <aside>開發方法節開場。最核心的一條：Reviewer 只看 diff 與任務原文，不共用 Implementer 的 context；人不需要逐行閱讀程式碼。</aside>
 </section>
-<section data-n="16" id="dev-flow">
+<section data-n="15" id="dev-flow">
 <div class="head">
 <p class="eyebrow">開發方法 · 流程</p>
 <h2>開發流程</h2>
@@ -283,7 +268,7 @@
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
 <aside>第三步標深藍，因為它重複最多次。第七步的 merge 條件與 Spec 的驗收標準是同一條。</aside>
 </section>
-<section data-n="17" id="dev-gates">
+<section data-n="16" id="dev-gates">
 <div class="head">
 <p class="eyebrow">開發方法 · Quality gates</p>
 <h2>品質關卡</h2>
@@ -299,7 +284,7 @@
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
 <aside>這一頁回答「agent 寫的程式碼要怎麼放心」。答案不是看得更仔細，而是把規則放進會自動失敗的地方。</aside>
 </section>
-<section data-n="18" id="dev-harness">
+<section data-n="17" id="dev-harness">
 <div class="head">
 <p class="eyebrow">開發方法 · Harness</p>
 <h2>邊界管理與常見反模式</h2>
@@ -309,7 +294,7 @@
 <p class="sub">什麼時候該拆分</p>
 <h3>符合以下任一項才拆</h3>
 <ul class="lst">
-<li>信任程度不同：tenant 的 workflow 是資料，平台的 workflow 是程式碼</li>
+<li>信任程度不同：系統功能由平台開發並測試，在平台內執行；使用者自己的程式（例如外部 agent、MCP server）在平台外執行，Workflow 只透過呼叫來使用</li>
 <li>存活時間不同：run 比 process 活得久，狀態放在 database</li>
 <li>故障範圍不同：API 與 Worker 不直接溝通</li>
 <li>依賴輕重不同：API 不載入 Agent framework；純 package 不做 I/O</li>
@@ -333,115 +318,11 @@
 <div class="footer"><p class="ft">Durable · 總覽 · 開發方法</p><p class="ft pg"></p></div>
 <aside>Harness 是包在模型外、讓它能實際執行工作的框架；它的任務之一是把邊界說清楚，讓 agent 不必猜。左邊給 Orchestrator 撰寫 plan 時使用，右邊給 Reviewer 使用；前八項反模式在 Durable 一律視為 Critical。</aside>
 </section>
-<section data-n="19" id="auth">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中 · 尚未實作</p>
-<h2>組織身分整合規劃（ZITADEL）</h2>
-</div>
-<div class="hdr rise" style="--i:0"><p class="h1">用戶需求</p><p class="h2">ZITADEL 提供</p><p class="h3">Durable 需要的修改</p></div>
-<table class="tbl rise" style="--i:1">
-<tr><th style="width:34%">需求</th><th style="width:36%">ZITADEL 提供</th><th style="width:30%">平台端</th></tr>
-<tr><td>組織帳號登入、SSO、MFA、密碼重設</td><td>現成登入頁（OIDC PKCE）；組織既有的 IdP 可透過 SAML 或 OIDC 串接</td><td>Studio 改用 OIDC 登入，不自建登入</td></tr>
-<tr><td>不同 tenant 的資料完全隔離</td><td>每個客戶一個 organization；user 只屬於一個 organization</td><td>Organization id 對應 tenant_id；SQL 的 tenant 過濾維持不變</td></tr>
-<tr><td>Role：admin、designer、approver、viewer</td><td>Project roles 由客戶的管理者自行指派，並寫入 token</td><td>API 新增 require_role 檢查</td></tr>
-<tr><td>程式存取：外部前端、MCP、OTLP</td><td>Service user 搭配 PAT 或 JWT key，權限沿用同一套 role</td><td>與現有 tenant API key 並行一個版本後切換</td></tr>
-<tr><td>離職帳號的 memory 與資料處理</td><td>使用者停用或刪除時可觸發外部呼叫</td><td>呼叫既有的 forget API</td></tr>
-<tr><td>某個 Agent 或 Workflow 只開放給特定人</td><td>不支援：ZITADEL 的 role 只到 project 層級</td><td>平台 database 新增 resource_grants 表，與資源在同一個 transaction 寫入</td></tr>
-</table>
-<p class="note">API 只需修改 current_principal：驗證 JWT，取得 user_id、tenant_id 與 roles。Worker 不參與授權；若出現更細的資源分享需求，再評估 OpenFGA。</p>
-<div class="footer"><p class="ft">Durable · 總覽 · Identity</p><p class="ft pg"></p></div>
-<aside>身分交給 ZITADEL，tenant 與 role 從 token 取得，資源層級的授權保留在自己的 database。先完成 OIDC 模式與 Studio 登入，即可上線。</aside>
-</section>
-<section data-n="20" id="ms-a">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中 · A</p>
-<h2>規劃 A：身分與治理</h2>
-</div>
-<table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
-<tr><td>組織登入</td><td>ZITADEL OIDC（PKCE）；current_principal 驗證 JWT，取得 tenant_id、user_id 與 roles；Studio 新增登入頁與 token 更新</td><td>未啟用 dev bearer 的環境，可用 ZITADEL 帳號登入 Studio 並操作所有頁面</td></tr>
-<tr><td>Role</td><td>管理者、設計者、審批者、檢視者；管理類 route 加上 require_role；只有審批者能決定 approval</td><td>檢視者呼叫任何寫入 route 都得到 403；測試涵蓋全部管理 route</td></tr>
-<tr><td>資源級授權</td><td>Agent、Workflow、KB、schedule 的授權表，與資源在同一個 transaction 寫入；Studio 可檢視與設定</td><td>未授權者在列表中看不到該資源，直接以 id 存取得到 404</td></tr>
-<tr><td>離職流程</td><td>ZITADEL 停用事件觸發 forget API；提供所有權移轉的 API 與 Studio 操作</td><td>停用後 memory 被清除並留下稽核紀錄；資源可以移轉</td></tr>
-<tr><td>稽核紀錄</td><td>Append-only 稽核表：記錄 approval、publish、封存，以及 key 與 secret 的建立與使用；Studio 可查詢與匯出</td><td>每一筆敏感操作都有 who、what、when、tenant；資料表不允許 UPDATE 或 DELETE</td></tr>
-<tr><td>配額與預算</td><td>每個 API key 與 tenant 的 RPS 與並行上限；每個 tenant 或 agent 的 token 預算，超出即停止並通知</td><td>超出配額得到 429；超出預算的 run 以明確錯誤結束，並寫入稽核</td></tr>
-</table>
-<p class="note">身分與授權做成核心介面加 plug-in：核心定義 Principal（含 roles）、token 驗證的 entry point 與登入導向；ZITADEL 是獨立套件，作法與 kb-sources plug-in 相同。</p>
-<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
-<aside>A 先做的原因：登入、role、稽核、配額修改的是同一層（Principal 與 route 守衛），一起處理最省力；其他三條主線都依賴它。</aside>
-</section>
-<section data-n="21" id="ms-b">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中 · B</p>
-<h2>規劃 B：編輯與驗證</h2>
-</div>
-<table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
-<tr><td>逐一編輯 node</td><td>在 Studio 的流程圖上編輯單一 step，即時檢查 schema；比對草稿與已發佈版本的 diff；Architect 可直接修改既有 workflow，並讀取完整 agent spec</td><td>修改一個 step → 儲存草稿 → diff 只顯示該 step → publish 為新版本</td></tr>
-<tr><td>Dry run</td><td>引擎層的 dry 模式：http.request、發文、secrets 等 side effect 工具只記錄不執行，或改走 sandbox；顯示每一步的輸入輸出與預估成本</td><td>以 dry 模式執行一條排程 workflow，沒有任何外部呼叫，輸出與成本都可看到</td></tr>
-<tr><td>從第 N 步重跑</td><td>以 step 快照重放：修改第 N 步的輸入後，只重跑第 N 步之後的部分</td><td>任何已完成的 run 都能選擇一步、修改輸入後重跑，前段不重新計算</td></tr>
-<tr><td>工具 mock 與 fixture</td><td>測試套件可為工具指定固定回應，也可錄下真實回應作為 fixture</td><td>測試案例在沒有網路的情況下可重跑，結果一致</td></tr>
-<tr><td>發佈門檻</td><td>指定的測試套件未通過就不能 publish；CI 可用 API key 觸發測試並取得結果</td><td>測試失敗時 publish 回傳 409 並指出失敗案例；提供可執行的 GitHub Actions 範例</td></tr>
-</table>
-<p class="note">現況：只能編輯整份 JSON，Architect 每次重寫整份設定，沒有重跑與 mock。Dry run、重跑、逐一編輯共用 step 快照與 run 重放；發佈門檻需要 A 的 role。</p>
-<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
-<aside>B 的核心是「step 快照與 run 重放」這一個機制，五個項目中有三個建立在它之上；它也與 DBOS app version 的版本策略直接相關。</aside>
-</section>
-<section data-n="22" id="ms-c">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中 · C</p>
-<h2>規劃 C：連接與嵌入</h2>
-</div>
-<table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
-<tr><td>外部觸發</td><td>Webhook 端點啟動 workflow，並驗證簽章；e-mail 與 queue 觸發列為第二階段</td><td>外部送出一次 webhook，啟動一個 run 並帶入 payload</td></tr>
-<tr><td>通知連接器</td><td>Slack、LINE、e-mail 的出站工具，憑證存放在 tenant secrets</td><td>Workflow 用一個 step 就能發送通知；密碼不出現在設定或 log</td></tr>
-<tr><td>第三方 OAuth</td><td>OAuth 授權流程，refresh token 自動更新並存為 secret</td><td>連線到期時自動更新，工具呼叫不中斷</td></tr>
-<tr><td>Client SDK 與嵌入</td><td>TypeScript SDK、React 聊天元件、支援瀏覽器 OTLP 的 CORS 設定、範例 app</td><td>外部靜態網站用一把 API key 就能嵌入對話，並送出瀏覽器端 trace</td></tr>
-<tr><td>本機工具</td><td>本機 runner 透過 WebSocket 連回平台，在使用者電腦上執行工具；等待期間可承受服務重啟</td><td>Run 等待本機工具時重啟 API 與 Worker，結果仍能正確回填</td></tr>
-</table>
-<p class="note">現況：只有排程與手動觸發，通知需用 http.request 自行設定，secrets 只能存放固定 token，AG-UI 已支援串流與 client tools。外部觸發與本機 runner 需要 A 的 key 與 role、B 的重放機制；SDK 需要文件站。</p>
-<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
-<aside>C 排在最後並不是因為不重要，而是每一項都建立在 A 與 B 之上。本機 runner「等待期間可承受重啟」是 durable execution 第一項保證的延伸。</aside>
-</section>
-<section data-n="23" id="ms-d">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中 · D</p>
-<h2>規劃 D：營運</h2>
-</div>
-<table class="tbl rise" style="--i:0; font-size:24px">
-<tr><th style="width:16%">項目</th><th style="width:48%">交付內容</th><th style="width:36%">驗收方式</th></tr>
-<tr><td>模型路由與降級</td><td>在 agent 版本上設定 fallback 模型、逾時與重試</td><td>主模型逾時時自動改用備援，並在 trace 中標示</td></tr>
-<tr><td>告警</td><td>排程失敗或逾時、失敗率、預算超標時發送告警到通知連接器</td><td>排程失敗後 5 分鐘內收到通知</td></tr>
-<tr><td>多環境與升版</td><td>Agent 與 workflow 可打包為 bundle 匯出、匯入；支援 dev → staging → prod promotion 與一鍵回滾</td><td>同一個 bundle 可在另一個 tenant 匯入並通過測試套件</td></tr>
-<tr><td>Prompt injection 防護</td><td>在 processor 層偵測注入指令並標示來源；清理外部取回的內容</td><td>網頁內容夾帶的指令不會改變 agent 行為，trace 中標示已攔截</td></tr>
-<tr><td>資料治理</td><td>保留期限、run 輸入輸出的 PII 遮蔽、每個 tenant 獨立的 secret 加密金鑰、資料匯出</td><td>到期資料自動清除並留下稽核；匯出內容包含該 tenant 的全部資料</td></tr>
-<tr><td>SDK 與文件</td><td>Python 與 TypeScript client、發佈 OpenAPI、補齊待寫頁面、一行指令啟動與 demo 資料</td><td>新使用者依文件在 30 分鐘內於本機啟動 Studio，並完成嵌入範例</td></tr>
-</table>
-<p class="note">現況：只能使用單一模型，逾時需人工更換；沒有告警；已有版本與封存、OTLP 與 secret 遮罩、forget API。模型降級與告警已有實際需求，可以在 B 之前完成；多環境需要 B 的 bundle 格式。</p>
-<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
-<aside>D 不是獨立的一段工作，而是穿插在 A、B、C 之間的營運項目；前兩項（降級與告警）優先，因為已經在正式環境遇到。</aside>
-</section>
-<section data-n="24" id="ms-order">
-<div class="head">
-<p class="eyebrow">下一階段 · 規劃中 · 順序</p>
-<h2>執行順序與依賴</h2>
-</div>
-<div class="steps">
-<div class="step rise" style="--i:0"><p class="n">A</p><div class="body"><h3>先做 Identity 與 Governance</h3><p class="txt">ZITADEL、role、稽核、配額修改的都是同一層：Principal 與 route 守衛。一起處理最省力，其他三條主線都依賴它。</p></div></div>
-<div class="step rise" style="--i:1"><p class="n">B</p><div class="body"><h3>接著做 Authoring 與 Verification</h3><p class="txt">Dry run、從第 N 步重跑、逐一編輯 node 共用 step 快照與 run 重放；發佈門檻需要 A 的 role。</p></div></div>
-<div class="step rise" style="--i:2"><p class="n">C</p><div class="body"><h3>最後做 Connect 與 Embed</h3><p class="txt">外部觸發與本機 runner 需要 A 的 key 與 role，以及 B 的重放機制；SDK 需要文件站。</p></div></div>
-<div class="step rise" style="--i:3"><p class="n">D</p><div class="body"><h3>Operate 穿插進行</h3><p class="txt">模型降級與告警已有實際需求，可以在 B 之前完成；多環境與 promotion 需要 B 的 bundle 格式。</p></div></div>
-</div>
-<p class="note">另一件需要先決定的事：部署頻繁時 DBOS app version 的切換策略，這與 B 直接相關。</p>
-<div class="footer"><p class="ft">Durable · 下一階段</p><p class="ft pg"></p></div>
-<aside>收尾。四條主線各自都能獨立交付，但順序由依賴關係決定，而不是由重要性決定。</aside>
-</section>
 </div>
 </main>
 <nav class="hud" aria-label="投影片導覽">
 <button type="button" id="prev" aria-label="上一張">‹</button>
-<span id="count" class="count">1 / 24</span>
+<span id="count" class="count">1 / 17</span>
 <button type="button" id="next" aria-label="下一張">›</button>
 <button type="button" id="notesBtn" aria-pressed="false" title="講者備註 (N)">N</button>
 </nav>
