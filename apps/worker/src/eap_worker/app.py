@@ -27,6 +27,7 @@ from eap_worker import kb_ingest as _kb_ingest  # noqa: F401  (eap.kb_ingest and
 from eap_worker import observational as _observational  # noqa: F401  (eap-observer, eap.memory_observe*, RM.13)
 from eap_worker import retention as _retention  # noqa: F401  (eap.memory_retention and its steps, RM.15)
 from eap_worker import attachment_retention as _attachment_retention  # noqa: F401  (eap.attachment_retention)
+from eap_worker import audit_retention as _audit_retention  # noqa: F401  (eap.audit_retention, IAM P0b)
 from eap_worker import mcp_catalog_mirror as _mcp_catalog_mirror  # noqa: F401  (eap.mcp_catalog_mirror and its steps)
 from eap_worker import mcp_runtime_sweep as _mcp_runtime_sweep  # noqa: F401  (eap.mcp_runtime_sweep and its step)
 from eap_worker import eval_run as _eval_run  # noqa: F401  (eap.eval_run, its steps and eap-judge, AC.11)
@@ -109,6 +110,8 @@ def launch(settings: WorkerSettings | None = None) -> WorkerSettings:
     _retention.apply_retention_schedule()
     # eap.attachment_retention: unsent uploads expire (EAP_ATTACHMENT_ORPHAN_HOURS, default 24 h); on by default.
     _attachment_retention.apply_attachment_retention_schedule()
+    # eap.audit_retention: audit_log rows older than EAP_AUDIT_RETENTION_DAYS (default 400) are pruned daily.
+    _audit_retention.apply_audit_retention_schedule()
     # eap.mcp_catalog_mirror: hourly by default, removed on EAP_MCP_CATALOG_SCHEDULE=off.
     _mcp_catalog_mirror.apply_catalog_schedule()
     # eap.mcp_runtime_sweep: every minute, removed on EAP_MCP_RUNTIME_SWEEP_SCHEDULE=off.
@@ -130,6 +133,7 @@ def validate_startup(settings: WorkerSettings) -> None:
     kb_ingest_concurrency()
     _retention.RetentionConfig.from_env()
     _attachment_retention.AttachmentRetentionConfig.from_env()
+    _audit_retention.AuditRetentionConfig.from_env()
     _mcp_catalog_mirror.CatalogMirrorConfig.from_env()
     _mcp_runtime_sweep.RuntimeSweepConfig.from_env()
     queue_polling_interval()

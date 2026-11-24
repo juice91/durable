@@ -54,6 +54,7 @@ from eap_run_store.workflow_checks import (
     optional_input_ref_warnings,
     output_ref_checks,
     reference_problems,
+    step_id_convention_warnings,
     unpublished_agents,
 )
 from eap_schemas import AgentSpec, canonical_spec_hash
@@ -144,13 +145,15 @@ def _insert_agent_version(
             row = conn.execute(
                 text(
                     "INSERT INTO agent_versions (id, agent_id, tenant_id, version, spec, spec_hash, created_at,"
-                    " created_by, restored_from, created_via)"
-                    " VALUES (:id, :a, :t, :v, CAST(:spec AS jsonb), :h, :now, :by, :rf, :via)"
-                    " RETURNING agent_id, version, spec, spec_hash, created_at, created_by, restored_from, created_via"
+                    " created_by, published_by, restored_from, created_via)"
+                    " VALUES (:id, :a, :t, :v, CAST(:spec AS jsonb), :h, :now, :by, :pub, :rf, :via)"
+                    " RETURNING agent_id, version, spec, spec_hash, created_at, created_by, published_by,"
+                    " restored_from, created_via"
                 ),
                 {
                     "id": str(uuid.uuid4()), "a": str(agent_id), "t": tenant_id, "v": version, "spec": _dump(spec),
-                    "h": spec_hash, "now": _now(), "by": created_by, "rf": restored_from, "via": created_via,
+                    "h": spec_hash, "now": _now(), "by": created_by, "pub": created_by, "rf": restored_from,
+                    "via": created_via,
                 },
             ).mappings().one()
     except IntegrityError:
@@ -181,7 +184,7 @@ def publish_agent(
     latest = latest_version.version if latest_version is not None else None
 
     spec = validate_stored_draft(agent.draft_spec)
-    check_publishable(conn, tenant_id, spec)
+    check_publishable(conn, tenant_id, spec, agent_id=agent_id)
     warnings = publish_warnings(spec)
     new_hash = canonical_spec_hash(spec)
     if latest_version is not None and latest_version.spec_hash == new_hash:
@@ -240,7 +243,7 @@ def restore_agent_version(
         raise DefinitionInvalid(
             f"version {version_num} is no longer a valid agent spec ({where}: {first.get('msg')})"
         ) from None
-    check_publishable(conn, tenant_id, spec)
+    check_publishable(conn, tenant_id, spec, agent_id=agent_id)
 
     restored = _insert_agent_version(
         conn, tenant_id, agent_id, latest.version + 1, dict(source.spec), source.spec_hash, created_by,
@@ -350,13 +353,15 @@ def _insert_workflow_version(
             row = conn.execute(
                 text(
                     "INSERT INTO workflow_versions (id, workflow_id, tenant_id, version, spec, spec_hash,"
-                    " created_at, created_by, created_via)"
-                    " VALUES (:id, :w, :t, :v, CAST(:spec AS jsonb), :h, :now, :by, :via)"
-                    " RETURNING workflow_id, version, spec, spec_hash, created_at, created_by, created_via"
+                    " created_at, created_by, published_by, created_via)"
+                    " VALUES (:id, :w, :t, :v, CAST(:spec AS jsonb), :h, :now, :by, :pub, :via)"
+                    " RETURNING workflow_id, version, spec, spec_hash, created_at, created_by, published_by,"
+                    " created_via"
                 ),
                 {
                     "id": str(uuid.uuid4()), "w": str(workflow_id), "t": tenant_id, "v": version,
-                    "spec": _dump(spec), "h": spec_hash, "now": _now(), "by": created_by, "via": created_via,
+                    "spec": _dump(spec), "h": spec_hash, "now": _now(), "by": created_by, "pub": created_by,
+                    "via": created_via,
                 },
             ).mappings().one()
     except IntegrityError:
@@ -376,6 +381,7 @@ def _workflow_problems_and_warnings(
     warnings += judge_cost_cap_warnings(spec)
     warnings += agent_step_cost_cap_warnings(conn, spec, tenant_id)
     warnings += optional_input_ref_warnings(spec)
+    warnings += step_id_convention_warnings(spec)
     if problems:
         unpublished = unpublished_agents(conn, spec, tenant_id)
         if unpublished:

@@ -16,7 +16,6 @@ import anyio
 import pytest
 from eap_mcp_runtime import RuntimeHandle, RuntimeSpec, RuntimeStatus
 from sqlalchemy import create_engine, text
-from sqlalchemy.pool import StaticPool
 
 from eap_schemas import McpToolRef
 from eap_secrets import KEY_ENV, OLD_KEYS_ENV, generate_key, load_keyring, mcp_env_context, mcp_header_context
@@ -79,8 +78,12 @@ class FakeRuntime:
 
 
 @pytest.fixture
-def engine():
-    eng = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+def engine(tmp_path):
+    # A file database with a real pool: the code under test reads from worker threads (asyncio.to_thread)
+    # while the sweep writes from the loop thread. A StaticPool hands every thread the SAME sqlite
+    # connection, so one thread's rollback on release could undo another thread's uncommitted UPDATE
+    # (the sweep's `stopped`), leaving the row `stopping` until the caller's start timeout.
+    eng = create_engine(f"sqlite:///{tmp_path / 'mcp.db'}", connect_args={"check_same_thread": False, "timeout": 30})
     with eng.begin() as conn:
         for ddl in DDL:
             conn.execute(text(ddl))

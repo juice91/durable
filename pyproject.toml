@@ -1,6 +1,6 @@
 [project]
 name = "pydanticos"
-version = "0.1.0"
+version = "0.3.0"
 description = "PydanticOS - Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -19,14 +19,14 @@ dev = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/*", "apps/api", "apps/worker"]
+members = ["packages/*", "plugins/*", "apps/api", "apps/worker"]
 
 [tool.uv.sources]
 eap-schemas = { workspace = true }
 eap-mcp-runtime = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -91,6 +91,40 @@ source_modules = ["eap_kb_sources"]
 forbidden_modules = ["eap_api", "eap_worker", "eap_runtime", "fastapi", "starlette", "dbos", "pydantic_ai"]
 
 [[tool.importlinter.contracts]]
+name = "The core never imports an IAM plug-in (eap_iam_*)"
+type = "forbidden"
+# IAM implementations are separate distributions found through the entry-point groups eap.iam.identity,
+# eap.iam.policy and eap.iam.membership; nothing in the core (or the interfaces) may import one.
+source_modules = [
+    "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db",
+    "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam",
+]
+forbidden_modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+
+[[tool.importlinter.contracts]]
+name = "IAM plug-ins depend on the interfaces, never on entry points or the worker"
+type = "forbidden"
+# A plug-in may import eap_iam, eap_schemas and eap_run_store (the apikey plug-in for the grandfathered api_keys table; the openfga
+# plug-in for the read-only resource catalog its reconcile job needs).
+source_modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+forbidden_modules = [
+    "eap_api", "eap_worker", "eap_runtime", "eap_db", "fastapi", "starlette", "dbos", "pydantic_ai",
+]
+
+[[tool.importlinter.contracts]]
+name = "IAM plug-ins are independent of each other"
+type = "independence"
+modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+
+[[tool.importlinter.contracts]]
+name = "IAM interfaces are web- and database-free"
+type = "forbidden"
+source_modules = ["eap_iam"]
+forbidden_modules = [
+    "fastapi", "starlette", "sqlalchemy", "psycopg", "eap_run_store", "eap_api", "eap_worker", "eap_db", "dbos", "pydantic_ai",
+]
+
+[[tool.importlinter.contracts]]
 name = "Processors import only the standard library, eap_schemas and re2"
 type = "forbidden"
 source_modules = ["eap_processors"]
@@ -122,7 +156,7 @@ type = "forbidden"
 # D19: ag-ui-protocol is used only inside eap_api.ag_ui; data reaching the run row and the worker
 # uses eap_schemas.client_tools. Direct imports only: the rest of eap_api reaches ag_ui through
 # eap_api.ag_ui (the sanctioned path), and the other roots may not import eap_api at all.
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
 forbidden_modules = ["ag_ui"]
 ignore_imports = ["eap_api.ag_ui -> ag_ui", "eap_api.ag_ui.** -> ag_ui"]
 unmatched_ignore_imports_alerting = "none"  # eap_api.ag_ui arrives with AGUI.4
@@ -246,5 +280,5 @@ forbidden_modules = ["eap_api.routes"]
 # eap_api.bodies and eap_api.views.
 
 [tool.pytest.ini_options]
-testpaths = ["packages", "apps/api", "apps/worker", "tests"]
+testpaths = ["packages", "plugins", "apps/api", "apps/worker", "tests"]
 norecursedirs = ["node_modules", ".venv", ".next", "spikes", "firstmate", "conversation-export"]

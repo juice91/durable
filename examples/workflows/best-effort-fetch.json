@@ -24,18 +24,18 @@
           "timeout_s": 10,
           "max_response_bytes": 4096
         },
-        "next": "gate"
+        "next": "check_gate"
       },
       {
-        "id": "gate",
+        "id": "check_gate",
         "type": "branch",
         "cases": [
-          {"when": {"op": "exists", "left": {"$ref": "steps.fetch.output.error"}}, "next": "fallback"}
+          {"when": {"op": "exists", "left": {"$ref": "steps.fetch.output.error"}}, "next": "ret_fallback"}
         ],
-        "default": "use_page"
+        "default": "ret_use_page"
       },
       {
-        "id": "fallback",
+        "id": "ret_fallback",
         "type": "tool",
         "tool_id": "workflow.return",
         "input": {
@@ -48,7 +48,7 @@
         }
       },
       {
-        "id": "use_page",
+        "id": "ret_use_page",
         "type": "tool",
         "tool_id": "workflow.return",
         "input": {

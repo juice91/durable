@@ -1042,6 +1042,7 @@ export const EXTRACTOR_LABELS: Readonly<Record<string, string>> = {
   yaml: "YAML",
   json: "JSON",
   "markdown-doxygen": "Doxygen Markdown",
+  code: "Source code",
 };
 
 function plural(n: number, one: string, many = `${one}s`): string {
@@ -1069,6 +1070,7 @@ const EMPTY_EXTRACTION_CAUSES: Readonly<Record<string, string>> = {
   yaml: "Expected for a YAML file with no values, or only a licence header.",
   json: "Expected for a JSON file with no values.",
   "markdown-doxygen": "Expected for a page with only Doxygen commands and no prose.",
+  code: "Expected for a generated or minified file, or one with no code.",
 };
 
 /** The note for an empty document (ready, 0 chunks: `empty_reason`), or null for any other one;

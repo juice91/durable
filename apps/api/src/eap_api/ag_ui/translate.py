@@ -120,6 +120,11 @@ SILENT_EVENT_TYPES = frozenset(
      "eval_case_result", "ingest_progress", "extracted", "text_delta", "cancel_requested",
      # `score` is read by Studio's Scores tab from /runs/{id}/events, never from the AG-UI stream.
      "score",
+     # Agents as tools: the child run's link (Studio reads it from /runs/{id}/events); the AG-UI client
+     # sees the call and its result as an ordinary tool call.
+     "agent_tool_started", "agent_tool_completed",
+     # The Architect's context provenance (hashes only); Studio reads it from /runs/{id}/events.
+     "system_context_loaded",
      # `message_feedback` run events are legacy and no longer written: feedback is per user, so the
      # replay sends the viewer's own rows (FeedbackItems), never the shared run event.
      "message_feedback"}

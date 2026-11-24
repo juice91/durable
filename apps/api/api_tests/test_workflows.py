@@ -298,9 +298,9 @@ def test_publish_422_multiple_problems_aggregated(client, auth_header, monkeypat
     assert "step 'ask'" in detail
     assert "step 'now'" in detail
     assert "; " in detail
-    ask, now = detail.split("; ")
+    ask, *now = detail.split("; ")  # the tool step also reports its empty input (tickets.create needs fields)
     assert ask.startswith("step 'ask'")
-    assert now.startswith("step 'now'")
+    assert all(part.startswith("step 'now'") for part in now)
 
 
 def test_list_versions_newest_first(client, auth_header):

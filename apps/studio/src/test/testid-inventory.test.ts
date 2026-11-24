@@ -67,6 +67,10 @@ export const DYNAMIC_PREFIXES: Record<string, string> = {
   "processor-input-": "ProcessorsEditor input rows: processor-input-<index>, plus -error",
   "processor-output-": "ProcessorsEditor output rows: processor-output-<index>, plus -error",
   "context-field-": "ContextFieldsEditor rows: context-field-<index>, plus -problems",
+  "account-link-": "AccountMenu link per issuer account page id: account-link-<manage|password|two-factor> (ZITADEL only)",
+  "account-theme-": "AccountMenu theme radio item per theme preference: account-theme-<light|dark|system>",
+  "profile-role-": "ProfileSection role row per role the account holds: profile-role-<role>",
+  "profile-link-": "ProfileSection issuer account link per account page id: profile-link-<manage|password|two-factor> (ZITADEL only)",
   "payload-": "PayloadBlock id from its label: payload-input, payload-output, plus -truncated",
 };
 

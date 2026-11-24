@@ -19,6 +19,7 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: studio}
+      annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_STUDIO@@"}
     spec:
       terminationGracePeriodSeconds: 30
       securityContext:
@@ -37,6 +38,30 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
             readOnlyRootFilesystem: true
+          env:
+            # Read by the Studio server at request time (an inline runtime-config script), not baked into the build: when the
+            # browser is on a loopback origin (the SSH tunnel) it calls this API forward directly, so the API pod sees a
+            # loopback peer. See apps/studio/src/lib/base-url.ts.
+            - {name: EAP_STUDIO_LOOPBACK_API_URL, value: "http://127.0.0.1:18000"}
+            # The dev bearer for that same loopback page, also a runtime value: the Studio server includes it in the page
+            # only for a request whose Host is a loopback name (the SSH tunnel), never through the public host, and the
+            # API accepts it only from a loopback TCP peer. It is not in the built bundle (a CI check greps for it).
+            - {name: EAP_STUDIO_LOOPBACK_DEV_BEARER, value: "Bearer dev:studio:operator"}
+            # Sign-in mode and the OIDC settings of Studio's public client (read at request time, never baked in). The
+            # switch and the issuer come from the ConfigMap; the client id and the project id are not secret but live
+            # with the other ZITADEL values in the deploy secrets and are optional: with either missing `zitadel` mode stays off.
+            - name: EAP_STUDIO_AUTH
+              valueFrom:
+                configMapKeyRef: {name: pydanticos-config, key: EAP_STUDIO_AUTH, optional: true}
+            - name: EAP_STUDIO_ZITADEL_ISSUER
+              valueFrom:
+                configMapKeyRef: {name: pydanticos-config, key: EAP_ZITADEL_ISSUER, optional: true}
+            - name: EAP_STUDIO_ZITADEL_CLIENT_ID
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_ZITADEL_STUDIO_CLIENT_ID, optional: true}
+            - name: EAP_STUDIO_ZITADEL_PROJECT_ID
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_ZITADEL_PROJECT_ID, optional: true}
           ports:
             - {name: http, containerPort: 3000}
           resources:

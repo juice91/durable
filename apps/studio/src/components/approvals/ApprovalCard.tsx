@@ -8,6 +8,7 @@ import { announceToolDecided, decideToolApproval, MAX_TOOL_APPROVAL_COMMENT, par
 import { putSecret } from "@/lib/secrets";
 import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
+import { ProvenanceFooter } from "@/components/architect/ProvenanceFooter";
 import { serverFieldErrors, validateAgainstSchema } from "@/lib/schemaValidation";
 import type { JsonSchema } from "@/lib/tools";
 
@@ -48,6 +49,16 @@ export interface ApprovalCardProps {
   /** Optional (AGUI.12): records the decision another way than the REST routes (the AG-UI chat
    * answers its interrupt with `resume`). Errors are shown like a REST failure. */
   submit?: (decision: "approve" | "deny", comment: string) => Promise<void>;
+}
+
+/** The definition kind of an Architect publish approval (`architect.publish_agent` / `_workflow`), else null. */
+function publishedKind(approval: ApprovalTarget): "agent" | "workflow" | null {
+  if (approval.kind !== "tool") return null;
+  const id = (approval.args as { id?: unknown } | null)?.id;
+  if (typeof id !== "string" || !id) return null;
+  if (approval.toolName.endsWith("architect.publish_agent") || approval.toolName === "architect__publish_agent") return "agent";
+  if (approval.toolName.endsWith("architect.publish_workflow") || approval.toolName === "architect__publish_workflow") return "workflow";
+  return null;
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
@@ -255,6 +266,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
                 {approval.summary}
               </p>
             </CopyableText>
+          ) : null}
+          {publishedKind(approval) ? (
+            <ProvenanceFooter kind={publishedKind(approval)!} definitionId={String((approval.args as { id?: unknown }).id)} card="publish" />
           ) : null}
           <p className="mb-1 text-caption font-medium text-muted-foreground">Arguments</p>
           <CopyableText label="arguments" copyText={prettyJson(approval.args)}>

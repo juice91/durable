@@ -105,8 +105,8 @@ def _workflow(agent_id: str, ref: str, version: int | None) -> dict[str, Any]:
         "start": "triage",
         "steps": [
             {"id": "triage", "type": "agent", "agent_id": agent_id, "version": version,
-             "input": {"q": {"$ref": "input.q"}}, "next": "route"},
-            {"id": "route", "type": "branch",
+             "input": {"q": {"$ref": "input.q"}}, "next": "route_gate"},
+            {"id": "route_gate", "type": "branch",
              "cases": [{"when": {"op": "eq", "left": {"$ref": ref}, "right": "high"}, "next": "done"}],
              "default": "done"},
             {"id": "done", "type": "agent", "agent_id": agent_id, "input": {"q": {"$ref": "steps.triage.output"}}},
@@ -134,7 +134,7 @@ def test_pinned_unknown_field_is_422(client):
     resp = _publish(client, _workflow(agent_id, "steps.triage.output.priorty", 1))
     assert resp.status_code == 422
     detail = resp.json()["detail"]
-    assert "step 'route': $ref 'steps.triage.output.priorty'" in detail
+    assert "step 'route_gate': $ref 'steps.triage.output.priorty'" in detail
     assert "'priorty' is not a field of the output" in detail
 
 
@@ -145,7 +145,7 @@ def test_pinned_unlisted_field_of_an_open_object_only_warns(client):
     assert resp.status_code == 201, resp.text
     [warning] = resp.json()["warnings"]
     assert warning["code"] == "unlisted_output_field" and warning["path"] == "steps[1]"
-    assert "step 'route': $ref 'steps.triage.output.priorty'" in warning["message"]
+    assert "step 'route_gate': $ref 'steps.triage.output.priorty'" in warning["message"]
 
 
 @requires_pg
@@ -166,7 +166,7 @@ def test_unpinned_matching_field_still_warns(client):
     [warning] = resp.json()["warnings"]
     assert warning["code"] == "unpinned_agent_output_ref" and warning["path"] == "steps[1]"
     message = warning["message"]
-    assert "step 'route'" in message and "'steps.triage.output.priority'" in message
+    assert "step 'route_gate'" in message and "'steps.triage.output.priority'" in message
     assert "matches the latest version's output schema today" in message and "Pin the version" in message
 
 
@@ -269,9 +269,9 @@ def test_input_guarded_by_an_exists_branch_has_no_warning_but_a_default_does_not
     guarded = {
         "name": "Guarded optional input",
         "input_schema": {"type": "object", "properties": {"part_numbers": {"type": "array", "default": []}}},
-        "start": "route",
+        "start": "route_gate",
         "steps": [
-            {"id": "route", "type": "branch", "cases": [{"when": {"op": "exists", "left": {"$ref": "input.part_numbers"}}, "next": "targeted"}], "default": "all"},
+            {"id": "route_gate", "type": "branch", "cases": [{"when": {"op": "exists", "left": {"$ref": "input.part_numbers"}}, "next": "targeted"}], "default": "all"},
             {"id": "targeted", "type": "tool", "tool_id": "workflow.return", "input": {"value": {"$ref": "input.part_numbers"}}},
             {"id": "all", "type": "tool", "tool_id": "workflow.return", "input": {"value": "all"}},
         ],
@@ -292,3 +292,30 @@ def test_input_guarded_by_an_exists_branch_has_no_warning_but_a_default_does_not
     assert pub.status_code == 201, pub.text
     messages = [w["message"] for w in pub.json()["warnings"] if w["code"] == "optional_input_ref_unguarded"]
     assert messages and "input.default_field" in messages[0] and "exists" in messages[0]
+
+
+@requires_pg
+def test_step_id_convention_warning_in_the_publish_response(client):
+    """A branch not named *_gate and a return not named ret_* publish (201) with one warning each,
+    naming the step and the suggested name; a conforming spec publishes without the warning."""
+    def spec(gate: str, ret: str) -> dict:
+        return {
+            "name": "Step naming test", "input_schema": {"type": "object"}, "start": gate,
+            "steps": [
+                {"id": gate, "type": "branch", "default": ret,
+                 "cases": [{"when": {"op": "exists", "left": {"$ref": "input.a"}}, "next": ret}]},
+                {"id": ret, "type": "tool", "tool_id": "workflow.return", "input": {"value": {"ok": True}, "outcome": "completed"}},
+            ],
+        }
+
+    def publish(body: dict) -> list[dict]:
+        created = client.post(BASE, json={"spec": body}, headers=_auth())
+        assert created.status_code == 201, created.text
+        pub = client.post(f"{BASE}/{created.json()['id']}/versions", headers=_auth())
+        assert pub.status_code == 201, pub.text
+        return [w for w in pub.json().get("warnings", []) if w["code"] == "step_id_convention"]
+
+    bad = publish(spec("gate_check", "r_posted"))
+    assert [w["path"] for w in bad] == ["steps[0]", "steps[1]"]
+    assert "suggested name 'check_gate'" in bad[0]["message"] and "suggested name 'ret_posted'" in bad[1]["message"]
+    assert publish(spec("check_gate", "ret_posted")) == []

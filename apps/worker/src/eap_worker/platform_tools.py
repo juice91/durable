@@ -827,6 +827,12 @@ def register_platform_tools(registry: ToolRegistry) -> None:
     from eap_worker.html_extract_tool import register_html_extract_tool
 
     register_html_extract_tool(registry)
+    from eap_worker.atproto_richtext_tool import register_atproto_richtext_tool
+
+    register_atproto_richtext_tool(registry)
+    from eap_worker.workflow_history_tool import register_workflow_history_tool
+
+    register_workflow_history_tool(registry)
 
 
 __all__ = [

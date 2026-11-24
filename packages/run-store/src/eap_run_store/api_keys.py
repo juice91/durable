@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
-from sqlalchemy import CheckConstraint, DateTime, Index, PrimaryKeyConstraint, String, func, select, text, update
+from sqlalchemy import CheckConstraint, DateTime, Index, PrimaryKeyConstraint, String, Text, func, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 
@@ -48,6 +48,9 @@ API_KEY_ORIGINS_MAX_ITEMS = 20
 API_KEY_ORIGIN_MAX_CHARS = 255
 # Keys that are neither revoked nor expired, per tenant.
 MAX_ACTIVE_API_KEYS_PER_TENANT = 100
+# ... and per person, for the personal keys one person makes for themselves.
+MAX_ACTIVE_API_KEYS_PER_OWNER = 20
+API_KEY_OWNER_MAX_CHARS = 255
 # last_used_at is written at most this often per key.
 LAST_USED_THROTTLE_SECONDS = 60
 
@@ -59,6 +62,11 @@ API_KEY_SCOPES_CHECK = "jsonb_typeof(scopes) = 'array'"
 API_KEY_AGENT_IDS_CHECK = "agent_ids IS NULL OR jsonb_typeof(agent_ids) = 'array'"
 API_KEY_WORKFLOW_IDS_CHECK = "workflow_ids IS NULL OR jsonb_typeof(workflow_ids) = 'array'"
 API_KEY_ALLOWED_ORIGINS_CHECK = "allowed_origins IS NULL OR jsonb_typeof(allowed_origins) = 'array'"
+# Same text as migration 0039_api_key_owner.
+API_KEY_OWNER_CHECK = (
+    "(owner_subject IS NULL AND owner_email IS NULL) OR "
+    "(owner_subject IS NOT NULL AND char_length(owner_subject) BETWEEN 1 AND 255)"
+)
 
 _TOKEN_RE = re.compile(r"pos_([0-9a-f]{24})_([A-Za-z0-9_-]{43})")
 _KEY_ID_RE = re.compile(r"[0-9a-f]{24}")
@@ -88,6 +96,8 @@ class ApiKeyModel(Base):
     expires_at: Mapped[datetime | None] = mapped_column("expires_at", DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column("revoked_at", DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column("last_used_at", DateTime(timezone=True), nullable=True)
+    owner_subject: Mapped[str | None] = mapped_column("owner_subject", Text, nullable=True)
+    owner_email: Mapped[str | None] = mapped_column("owner_email", Text, nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="api_keys_pkey"),
@@ -98,7 +108,9 @@ class ApiKeyModel(Base):
         CheckConstraint(API_KEY_AGENT_IDS_CHECK, name="ck_api_keys_agent_ids"),
         CheckConstraint(API_KEY_WORKFLOW_IDS_CHECK, name="ck_api_keys_workflow_ids"),
         CheckConstraint(API_KEY_ALLOWED_ORIGINS_CHECK, name="ck_api_keys_allowed_origins"),
+        CheckConstraint(API_KEY_OWNER_CHECK, name="ck_api_keys_owner"),
         Index("ix_api_keys_tenant_created", "tenant_id", "created_at"),
+        Index("ix_api_keys_tenant_owner", "tenant_id", "owner_subject"),
     )
 
 
@@ -118,6 +130,9 @@ class ApiKeyRecord:
     expires_at: datetime | None
     revoked_at: datetime | None
     last_used_at: datetime | None
+    # The person a personal key belongs to (subject, and the e-mail they had at creation); None for a tenant key.
+    owner_subject: str | None = None
+    owner_email: str | None = None
 
     @property
     def prefix(self) -> str:
@@ -143,14 +158,18 @@ class CreatedApiKey:
 
 
 class ApiKeyLimitExceeded(Exception):
-    """The tenant already has MAX_ACTIVE_API_KEYS_PER_TENANT active keys. Pickle-safe."""
+    """The tenant already has MAX_ACTIVE_API_KEYS_PER_TENANT active keys, or (`per_owner`) the person already has
+    MAX_ACTIVE_API_KEYS_PER_OWNER personal ones. Pickle-safe."""
 
-    def __init__(self, tenant_id: str, limit: int):
-        super().__init__(tenant_id, limit)
+    def __init__(self, tenant_id: str, limit: int, per_owner: bool = False):
+        super().__init__(tenant_id, limit, per_owner)
         self.tenant_id = tenant_id
         self.limit = limit
+        self.per_owner = per_owner
 
     def __str__(self) -> str:
+        if self.per_owner:
+            return f"at most {self.limit} active personal API keys per person; revoke one first"
         return f"at most {self.limit} active API keys per tenant; revoke one first"
 
 
@@ -261,6 +280,8 @@ def _record(row: ApiKeyModel) -> ApiKeyRecord:
         expires_at=row.expires_at,
         revoked_at=row.revoked_at,
         last_used_at=row.last_used_at,
+        owner_subject=row.owner_subject,
+        owner_email=row.owner_email,
     )
 
 
@@ -302,13 +323,24 @@ class ApiKeyStore:
         workflow_ids: Iterable[str] | None = None,
         allowed_origins: Iterable[str] | None = None,
         expires_at: datetime | None = None,
+        owner_subject: str | None = None,
+        owner_email: str | None = None,
     ) -> CreatedApiKey:
         """A new key (ValueError on invalid input; ApiKeyLimitExceeded past the tenant's cap).
 
         Allowlists are deduplicated in order. Both `agent_ids` and `workflow_ids` None is a
         tenant-wide key; when only one is given, the other is stored as [] (nothing). `allowed_origins`
         None means any origin. Origins
-        are normalized (normalize_origin). `expires_at` must be timezone-aware and in the future."""
+        are normalized (normalize_origin). `expires_at` must be timezone-aware and in the future.
+
+        `owner_subject` makes a personal key (with the owner's `owner_email` as a display snapshot): it counts
+        against MAX_ACTIVE_API_KEYS_PER_OWNER as well as the tenant's cap. None is a tenant key."""
+        if owner_subject is not None and (
+            not isinstance(owner_subject, str) or not owner_subject or len(owner_subject) > API_KEY_OWNER_MAX_CHARS
+        ):
+            raise ValueError("owner_subject is a non-empty string of at most 255 characters")
+        if owner_subject is None:
+            owner_email = None
         if not tenant_id or not isinstance(tenant_id, str):
             raise ValueError("tenant_id is required")
         if not isinstance(created_by, str) or not created_by:
@@ -355,6 +387,18 @@ class ApiKeyStore:
             ).scalar_one()
             if active >= MAX_ACTIVE_API_KEYS_PER_TENANT:
                 raise ApiKeyLimitExceeded(tenant_id, MAX_ACTIVE_API_KEYS_PER_TENANT)
+            if owner_subject is not None:
+                owned = session.execute(
+                    select(func.count())
+                    .select_from(ApiKeyModel)
+                    .where(
+                        ApiKeyModel.tenant_id == tenant_id,
+                        ApiKeyModel.owner_subject == owner_subject,
+                        _active_clause(func.now()),
+                    )
+                ).scalar_one()
+                if owned >= MAX_ACTIVE_API_KEYS_PER_OWNER:
+                    raise ApiKeyLimitExceeded(tenant_id, MAX_ACTIVE_API_KEYS_PER_OWNER, per_owner=True)
             row = ApiKeyModel(
                 id=key_id,
                 tenant_id=tenant_id,
@@ -366,6 +410,8 @@ class ApiKeyStore:
                 allowed_origins=clean_origins,
                 created_by=created_by,
                 expires_at=expires_at,
+                owner_subject=owner_subject,
+                owner_email=owner_email[:320] if owner_email else None,
             )
             session.add(row)
             session.flush()
@@ -382,6 +428,37 @@ class ApiKeyStore:
                 .order_by(ApiKeyModel.created_at.desc(), ApiKeyModel.id.desc())
             ).scalars()
             return [_record(row) for row in rows]
+
+    def list_owned(self, tenant_id: str, owner_subject: str) -> list[ApiKeyRecord]:
+        """The personal keys `owner_subject` made in the tenant (revoked and expired included), newest first. Never
+        a tenant key, never another person's."""
+        if not owner_subject:
+            return []
+        with self.Session() as session:
+            rows = session.execute(
+                select(ApiKeyModel)
+                .where(ApiKeyModel.tenant_id == tenant_id, ApiKeyModel.owner_subject == owner_subject)
+                .order_by(ApiKeyModel.created_at.desc(), ApiKeyModel.id.desc())
+            ).scalars()
+            return [_record(row) for row in rows]
+
+    def revoke_owned(self, tenant_id: str, owner_subject: str, key_id: str) -> ApiKeyRecord | None:
+        """Revoke one of `owner_subject`'s personal keys (idempotent); None for a key that is not theirs: unknown,
+        another person's, or a tenant key."""
+        if not owner_subject or not isinstance(key_id, str) or not _KEY_ID_RE.fullmatch(key_id):
+            return None
+        with self.Session() as session, session.begin():
+            row = session.execute(
+                update(ApiKeyModel)
+                .where(
+                    ApiKeyModel.tenant_id == tenant_id,
+                    ApiKeyModel.id == key_id,
+                    ApiKeyModel.owner_subject == owner_subject,
+                )
+                .values(revoked_at=func.coalesce(ApiKeyModel.revoked_at, func.now()))
+                .returning(ApiKeyModel)
+            ).scalar_one_or_none()
+            return None if row is None else _record(row)
 
     def get(self, tenant_id: str, key_id: str) -> ApiKeyRecord | None:
         """One of the tenant's keys, else None (another tenant's key is None too)."""

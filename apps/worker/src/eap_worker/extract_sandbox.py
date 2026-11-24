@@ -51,7 +51,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from eap_knowledge import Document, ExtractionFailed, ExtractLimits, Section
+from eap_knowledge import CodeRef, Document, ExtractionFailed, ExtractLimits, Section
 from eap_worker.config import EXTRACT_MAX_OUTPUT_BYTES, extract_limits
 
 SANDBOX_MODULE = "eap_knowledge.sandbox"
@@ -303,6 +303,21 @@ def _int(value: Any, name: str, *, optional: bool = False, minimum: int = 0) -> 
     return value
 
 
+def _code_ref(raw: Any) -> CodeRef | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ExtractionFailed("extract_failed", "malformed result: code")
+    return CodeRef(
+        language=_str(raw.get("language"), "code.language") or "",
+        path=_str(raw.get("path"), "code.path") or "",
+        start_line=_int(raw.get("start_line"), "code.start_line", minimum=1) or 1,
+        end_line=_int(raw.get("end_line"), "code.end_line", minimum=1) or 1,
+        symbol=_str(raw.get("symbol"), "code.symbol", optional=True),
+        kind=_str(raw.get("kind"), "code.kind", optional=True) or "code",
+    )
+
+
 def _section(raw: Any) -> Section:
     if not isinstance(raw, dict):
         raise ExtractionFailed("extract_failed", "malformed result: section")
@@ -318,6 +333,7 @@ def _section(raw: Any) -> Section:
         page=_int(raw.get("page"), "page", optional=True, minimum=1),
         page_end=_int(raw.get("page_end"), "page_end", optional=True, minimum=1),
         condition=_str(raw.get("condition"), "condition", optional=True),
+        code=_code_ref(raw.get("code")),
     )
 
 
@@ -361,6 +377,8 @@ async def extract_in_sandbox(
     source_url: str | None = None,
     options: Mapping[str, Any] | None = None,
     max_tokens: int = 512,
+    overlap_tokens: int = 0,
+    code: Mapping[str, Any] | None = None,
     limits: ExtractLimits | None = None,
 ) -> SandboxResult:
     """Extract one document in the sandbox. ``content`` is the stored text (base64 for a PDF);
@@ -373,6 +391,8 @@ async def extract_in_sandbox(
         "source_url": source_url,
         "options": dict(options) if options is not None else None,
         "max_tokens": int(max_tokens),
+        "overlap_tokens": int(overlap_tokens),
+        "code": dict(code) if code is not None else None,
         # The child reads no environment: the limits it applies itself come in the payload.
         "limits": {"max_pdf_pages": limits.max_pdf_pages, "max_structured_bytes": limits.max_structured_bytes},
     }

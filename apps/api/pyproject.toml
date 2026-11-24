@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-api"
-version = "0.1.0"
+version = "0.3.0"
 description = "Control-plane API for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -16,6 +16,8 @@ dependencies = [
     "pydantic>=2",
     "psycopg[binary]>=3",
     "eap-kb-sources",
+    # IAM interfaces and the identity chain; the plug-ins (eap-iam-*) are separate distributions found through entry points.
+    "eap-iam",
     "eap-run-store",
     "eap-blob-store",
     "eap-db",
@@ -54,6 +56,7 @@ dev = [
 
 [tool.uv.sources]
 eap-kb-sources = { workspace = true }
+eap-iam = { workspace = true }
 eap-run-store = { workspace = true }
 eap-blob-store = { workspace = true }
 eap-db = { workspace = true }

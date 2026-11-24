@@ -1,5 +1,5 @@
 """End to end acceptance of the knowledge-base source sync (brief §19-§20): the real API (in process), the real
-DBOS worker (in process), the fixture-backed Acme Semiconductor fake server behind the real TI adapter, the
+DBOS worker (in process), the fixture-backed Acme Semiconductor fake server behind the real Acme adapter, the
 published example workflow, `eap.kb_ingest` with the real extractor and the `test:hash` embedder.
 
 The operator path, as the guide describes it: tenant secrets through `PUT /secrets/{name}`, a connection with
@@ -120,7 +120,7 @@ class Stack:
         created = self.call("POST", "/workflows", expect=201, json={"spec": EXAMPLE}).json()
         self.workflow_id = created["id"]
         published = self.call("POST", f"/workflows/{self.workflow_id}/versions", expect=201).json()
-        assert published["warnings"] == []
+        assert [w for w in published["warnings"] if w["code"] != "step_id_convention"] == []  # the system template keeps its ids (PR 147)
 
     def start(self, input_value: dict[str, Any]) -> str:
         r = self.call("POST", f"/workflows/{self.workflow_id}/runs", expect=202, json={"input": input_value})

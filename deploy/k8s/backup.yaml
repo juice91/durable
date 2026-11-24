@@ -21,6 +21,7 @@ spec:
             runAsUser: 999
             runAsGroup: 999
             seccompProfile: {type: RuntimeDefault}
+          # The dump runs in the CronJob itself, so backups happen even when the platform is down.
           containers:
             - name: pg-dump
               image: pgvector/pgvector:0.8.2-pg17-trixie
@@ -39,8 +40,16 @@ spec:
                 - name: EAP_DBOS_DATABASE_PASSWORD
                   valueFrom:
                     secretKeyRef: {name: pydanticos-secrets, key: EAP_DBOS_DATABASE_PASSWORD}
+                # Optional (identity services, deploy/k8s/iam): dumped only when present.
+                - name: ZITADEL_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: pydanticos-secrets, key: ZITADEL_DB_PASSWORD, optional: true}
+                - name: OPENFGA_DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: pydanticos-secrets, key: OPENFGA_DB_PASSWORD, optional: true}
+                # Dumps older than this many days are deleted after each backup.
                 - name: BACKUP_RETENTION_DAYS
-                  value: "30"
+                  value: "7"
               resources:
                 requests: {cpu: "100m", memory: 128Mi}
                 limits: {cpu: "1", memory: 1Gi}
@@ -52,7 +61,7 @@ spec:
             - name: backups
               hostPath:
                 # Placeholder. up.sh rewrites this to ${PYDANTICOS_DATA_DIR}/backups.
-                path: /var/lib/pydanticos-backups
+                path: /var/lib/pydanticos-backup-dir
                 type: Directory
             - name: tmp
               emptyDir: {}

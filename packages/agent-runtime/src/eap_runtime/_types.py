@@ -52,6 +52,9 @@ class RunDeps:
     side_effects: "SideEffectStore"
     ticket_service: "TicketService"
     request_context: RequestContext = field(default_factory=RequestContext, kw_only=True, repr=False)
+    # The built-in Architect's recorded `eap.load_system_context` output ({"block", "provenance"}); None for every
+    # other run. Read-only, rendered into the instructions by the worker; never stored or logged.
+    system_context: dict[str, Any] | None = field(default=None, kw_only=True, repr=False, compare=False)
 
 
 class SideEffectStore(Protocol):

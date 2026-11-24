@@ -43,7 +43,9 @@ def _ref(path: str) -> dict[str, str]:
 
 
 def _tool(sid: str, nxt: str | None = None, **inp: Any) -> dict[str, Any]:
-    return {"id": sid, "type": "tool", "tool_id": "clock.now", "input": inp, "next": nxt}
+    # clock.now takes no fields, so refs travel in json.query's free-form `data` (publish checks tool inputs).
+    step = {"tool_id": "json.query", "input": {"data": inp, "expression": "@"}} if inp else {"tool_id": "clock.now", "input": {}}
+    return {"id": sid, "type": "tool", **step, "next": nxt}
 
 
 def _agent_step(sid: str, agent_id: str, version: int | None, nxt: str | None = None, **inp: Any) -> dict[str, Any]:

@@ -113,6 +113,8 @@ class WorkerSettings:
     embedding_max_batch_tokens: int = DEFAULT_EMBEDDING_MAX_BATCH_TOKENS
     embedding_timeout_s: float = DEFAULT_EMBEDDING_TIMEOUT_S
     recall_timeout_s: float = DEFAULT_RECALL_TIMEOUT_S
+    # The packaged system manifest (the image copies it; EAP_SYSTEM_MANIFEST_PATH). None: the checkout's own file.
+    system_manifest_path: str | None = None
 
     @classmethod
     def from_env(cls) -> "WorkerSettings":
@@ -148,6 +150,7 @@ class WorkerSettings:
             ),
             embedding_timeout_s=_positive_float("EAP_EMBEDDING_TIMEOUT_S", DEFAULT_EMBEDDING_TIMEOUT_S),
             recall_timeout_s=_positive_float("EAP_RECALL_TIMEOUT_S", DEFAULT_RECALL_TIMEOUT_S),
+            system_manifest_path=os.environ.get("EAP_SYSTEM_MANIFEST_PATH") or None,
         )
 
 

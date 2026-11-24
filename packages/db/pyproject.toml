@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-db"
-version = "0.1.0"
+version = "0.3.0"
 description = "Alembic migrations that own the eap_app database schema"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -20,6 +20,9 @@ dependencies = [
     "eap-run-store",
     "eap-blob-store",
 ]
+
+[project.scripts]
+eap-db = "eap_db.plugin_migrations:main"
 
 [project.entry-points.pytest11]
 # Every pytest session in the workspace migrates its own throwaway Postgres schema.

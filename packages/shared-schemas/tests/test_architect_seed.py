@@ -229,7 +229,8 @@ def test_the_architect_seed_states_what_save_workflow_accepts_and_the_8_step_rul
     from eap_schemas.architect_seed import ARCHITECT_INSTRUCTIONS, WORKFLOW_DRAFTER_INSTRUCTIONS
 
     flat = " ".join(ARCHITECT_INSTRUCTIONS.split())
-    assert "1 to 40 steps" in flat and "branch steps" in flat and "parallel steps" in flat
+    assert "one step or more, up to the step limit that list_workflow_step_kinds returns" in flat
+    assert "{MAX_STEPS}" not in flat and "branch steps" in flat and "parallel steps" in flat
     assert "1 to 8" not in flat and "8 steps" not in flat
     assert "must use an http.request reducer" in flat and "response_query" in flat
     assert "1 to 8 steps" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())
@@ -273,3 +274,29 @@ def test_the_architect_is_told_to_discover_the_control_plane_before_saying_it_ca
     assert "platform__list_capabilities" in ARCHITECT_INSTRUCTIONS and "control__eval_suite_create" in ARCHITECT_INSTRUCTIONS
     assert "needs an engineer and name the missing capability" in ARCHITECT_INSTRUCTIONS
     assert control_tool_name("eval.suite.create") == "control__eval_suite_create"
+
+
+def test_the_architect_is_told_to_skip_items_its_own_recent_runs_rejected():
+    assert (
+        "To skip items your own recent runs rejected, read them with workflow.history (for example "
+        "`where {status: check_failed}`, `select url`) and add them to the exclude list."
+    ) in ARCHITECT_INSTRUCTIONS
+
+
+def test_the_drafter_text_states_the_platform_step_cap():
+    from eap_schemas.architect_seed import WORKFLOW_DRAFTER_INSTRUCTIONS
+    from eap_schemas.workflows import MAX_STEPS
+
+    assert f"takes up to {MAX_STEPS})" in " ".join(WORKFLOW_DRAFTER_INSTRUCTIONS.split())
+
+
+def test_the_architect_is_told_to_build_bluesky_facets_with_atproto_richtext():
+    assert "build text and facets with atproto.richtext and pass `facets` in the createRecord record" in ARCHITECT_INSTRUCTIONS
+
+
+def test_the_architect_is_taught_the_step_naming_convention():
+    text = ARCHITECT_INSTRUCTIONS
+    assert "<subject>_gate" in text and "ret_<reason>" in text
+    assert "kept short" in text and "Publishing warns" in text
+    for example in ("check_gate", "ret_posted", "fetch_rss", "post_thumb"):
+        assert example in text

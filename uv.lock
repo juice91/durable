@@ -13,6 +13,13 @@ members = [
     "eap-api",
     "eap-blob-store",
     "eap-db",
+    "eap-iam",
+    "eap-iam-apikey",
+    "eap-iam-cfaccess",
+    "eap-iam-devloopback",
+    "eap-iam-openaccess",
+    "eap-iam-openfga",
+    "eap-iam-zitadel",
     "eap-kb-sources",
     "eap-knowledge",
     "eap-mcp-runtime",
@@ -752,7 +759,7 @@ wheels = [
 
 [[package]]
 name = "eap-agent-runtime"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/agent-runtime" }
 dependencies = [
     { name = "eap-schemas" },
@@ -767,13 +774,14 @@ requires-dist = [
 
 [[package]]
 name = "eap-api"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "apps/api" }
 dependencies = [
     { name = "ag-ui-protocol" },
     { name = "dbos" },
     { name = "eap-blob-store" },
     { name = "eap-db" },
+    { name = "eap-iam" },
     { name = "eap-kb-sources" },
     { name = "eap-knowledge" },
     { name = "eap-mcp-runtime" },
@@ -806,6 +814,7 @@ requires-dist = [
     { name = "dbos", specifier = ">=3.5.0" },
     { name = "eap-blob-store", editable = "packages/blob-store" },
     { name = "eap-db", editable = "packages/db" },
+    { name = "eap-iam", editable = "packages/iam" },
     { name = "eap-kb-sources", editable = "packages/kb-sources" },
     { name = "eap-knowledge", editable = "packages/knowledge" },
     { name = "eap-mcp-runtime", editable = "packages/mcp-runtime" },
@@ -835,7 +844,7 @@ dev = [
 
 [[package]]
 name = "eap-blob-store"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/blob-store" }
 dependencies = [
     { name = "aiobotocore" },
@@ -846,7 +855,7 @@ requires-dist = [{ name = "aiobotocore", specifier = "==3.10.0" }]
 
 [[package]]
 name = "eap-db"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/db" }
 dependencies = [
     { name = "alembic" },
@@ -866,8 +875,111 @@ requires-dist = [
 ]
 
 [[package]]
+name = "eap-iam"
+version = "0.3.0"
+source = { editable = "packages/iam" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2" }]
+
+[[package]]
+name = "eap-iam-apikey"
+version = "0.3.0"
+source = { editable = "plugins/iam-apikey" }
+dependencies = [
+    { name = "eap-iam" },
+    { name = "eap-run-store" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-iam", editable = "packages/iam" },
+    { name = "eap-run-store", editable = "packages/run-store" },
+    { name = "sqlalchemy", specifier = ">=2.0" },
+]
+
+[[package]]
+name = "eap-iam-cfaccess"
+version = "0.3.0"
+source = { editable = "plugins/iam-cfaccess" }
+dependencies = [
+    { name = "eap-iam" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-iam", editable = "packages/iam" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+]
+
+[[package]]
+name = "eap-iam-devloopback"
+version = "0.3.0"
+source = { editable = "plugins/iam-devloopback" }
+dependencies = [
+    { name = "eap-iam" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-iam", editable = "packages/iam" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+]
+
+[[package]]
+name = "eap-iam-openaccess"
+version = "0.3.0"
+source = { editable = "plugins/iam-openaccess" }
+dependencies = [
+    { name = "eap-iam" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "eap-iam", editable = "packages/iam" }]
+
+[[package]]
+name = "eap-iam-openfga"
+version = "0.3.0"
+source = { editable = "plugins/iam-openfga" }
+dependencies = [
+    { name = "eap-iam" },
+    { name = "eap-run-store" },
+    { name = "httpx2" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-iam", editable = "packages/iam" },
+    { name = "eap-run-store", editable = "packages/run-store" },
+    { name = "httpx2", specifier = ">=2.16" },
+]
+
+[[package]]
+name = "eap-iam-zitadel"
+version = "0.3.0"
+source = { editable = "plugins/iam-zitadel" }
+dependencies = [
+    { name = "eap-iam" },
+    { name = "httpx2" },
+    { name = "pyjwt", extra = ["crypto"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eap-iam", editable = "packages/iam" },
+    { name = "httpx2", specifier = ">=2.16" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+]
+
+[[package]]
 name = "eap-kb-sources"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/kb-sources" }
 dependencies = [
     { name = "eap-run-store" },
@@ -884,7 +996,7 @@ requires-dist = [
 
 [[package]]
 name = "eap-knowledge"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/knowledge" }
 dependencies = [
     { name = "cryptography" },
@@ -907,7 +1019,7 @@ requires-dist = [
 
 [[package]]
 name = "eap-mcp-runtime"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/mcp-runtime" }
 dependencies = [
     { name = "lightkube" },
@@ -918,7 +1030,7 @@ requires-dist = [{ name = "lightkube", specifier = "==1.0.2" }]
 
 [[package]]
 name = "eap-observability"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/observability" }
 dependencies = [
     { name = "fastapi" },
@@ -945,7 +1057,7 @@ requires-dist = [
 
 [[package]]
 name = "eap-pricing"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/pricing" }
 dependencies = [
     { name = "genai-prices" },
@@ -960,7 +1072,7 @@ requires-dist = [
 
 [[package]]
 name = "eap-processors"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/processors" }
 dependencies = [
     { name = "eap-schemas" },
@@ -975,7 +1087,7 @@ requires-dist = [
 
 [[package]]
 name = "eap-run-store"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/run-store" }
 dependencies = [
     { name = "eap-pricing" },
@@ -1000,22 +1112,24 @@ requires-dist = [
 
 [[package]]
 name = "eap-schemas"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/shared-schemas" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pydantic" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "jsonschema", specifier = ">=4.20" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [[package]]
 name = "eap-secrets"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "packages/secrets" }
 dependencies = [
     { name = "anyio" },
@@ -1034,7 +1148,7 @@ requires-dist = [
 
 [[package]]
 name = "eap-worker"
-version = "0.1.0"
+version = "0.3.0"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "dbos", extra = ["otel"] },
@@ -2793,7 +2907,7 @@ wheels = [
 
 [[package]]
 name = "pydanticos"
-version = "0.1.0"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "eap-mcp-runtime" },

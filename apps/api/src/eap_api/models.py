@@ -124,6 +124,8 @@ class AgentVersionModel(Base):
         "created_at", DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
     created_by: Mapped[StrAnnotated] = mapped_column("created_by", String, nullable=False)
+    # 0036: the principal who published (or restored) this version; NULL for versions from before (legacy).
+    published_by: Mapped[str | None] = mapped_column("published_by", Text, nullable=True)
     # The version this one was restored from (POST .../versions/{v}/restore); NULL for a publish.
     restored_from: Mapped[int | None] = mapped_column("restored_from", Integer, nullable=True)
     # 0025: `architect:<run_id>` or `architect-page` for a version the Architect made; NULL otherwise.
@@ -144,6 +146,7 @@ class AgentVersionModel(Base):
             "spec_hash": self.spec_hash,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "created_by": self.created_by,
+            "published_by": self.published_by,
             "restored_from": self.restored_from,
             "created_via": self.created_via,
         }

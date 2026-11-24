@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from eap_schemas import AgentSpec, ApprovalPolicy, KnowledgeBaseRef, McpToolRef, MemoryConfig, ModelRef, ModelSettings
 from eap_schemas.output import OutputSpec
 from eap_schemas.tools import ARCHITECT_GATED_TOOL_IDS, ungated_always_gated_tools
-from eap_schemas.workflows import AgentStep, BranchStep, ParallelStep, ToolStep, WorkflowSpec
+from eap_schemas.workflows import MAX_STEPS, AgentStep, BranchStep, ParallelStep, ToolStep, WorkflowSpec
 
 AGENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,47}$")
 STEP_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -76,6 +76,8 @@ ARCHITECT_TOOL_IDS: tuple[str, ...] = (
     "architect.list_created_workflows",
     "architect.list_workflow_versions",
     "architect.list_workflow_step_kinds",
+    "architect.list_capabilities",
+    "architect.get_capability",
     "architect.save_agent",
     "architect.save_workflow",
     "architect.list_eval_suites",
@@ -119,7 +121,6 @@ def ungated_architect_tools(tools: Iterable[str], approval_tools: Iterable[str] 
 
 
 MAX_AGENT_TOOLS = 32
-MAX_STEPS = 40
 END = "end"  # a step's `next` that ends the workflow
 RETURN_TOOL_ID = "workflow.return"
 MAX_BRANCHES = 4
@@ -149,8 +150,14 @@ def is_generic_id(value: str | None) -> bool:
     return value is None or value.strip().lower() in GENERIC_IDS
 
 
+# `workflow.` tools a created workflow's tool step may use. `workflow.return` only shapes a result;
+# `workflow.history` reads the calling workflow's own runs, so a created agent is never granted it.
+WORKFLOW_STEP_TOOL_IDS: tuple[str, ...] = ("workflow.return", "workflow.history")
+WORKFLOW_ONLY_TOOL_IDS: tuple[str, ...] = ("workflow.history",)
+
+
 def is_denied_tool(tool_id: str) -> bool:
-    if tool_id == "workflow.return":  # the one `workflow.` tool a created workflow may use: it only shapes a result
+    if tool_id in WORKFLOW_STEP_TOOL_IDS:
         return False
     return any(tool_id == p or tool_id.startswith(p) for p in ARCHITECT_DENIED_TOOL_PREFIXES)
 
@@ -350,7 +357,7 @@ def compile_agent(spec: ArchitectAgentSpec, allowlist: Allowlist) -> AgentSpec:
     the allowlist marks `requires_approval` and every granted MCP tool."""
     offered = {t.id: t for t in allowlist.tools}
     for tool_id in spec.tools:
-        if is_denied_tool(tool_id) or tool_id not in offered:
+        if is_denied_tool(tool_id) or tool_id in WORKFLOW_ONLY_TOOL_IDS or tool_id not in offered:
             raise ValueError(f"tool_not_allowed: {tool_id}")
     servers = {s.id: s for s in allowlist.mcp_servers}
     for ref in spec.mcp_tools:
@@ -487,8 +494,8 @@ ArchitectStep = Annotated[
 
 
 class ArchitectWorkflowSpec(BaseModel):
-    """The workflow format the Architect may write: 1 to 40 steps of kind agent, tool, branch or parallel (2 to 4
-    agent branches). Steps run in list order unless a step names a `next` (or a branch picks one). No loops or code
+    """The workflow format the Architect may write: 1 up to the platform's step cap (`workflows.MAX_STEPS`; a parallel step and each of its
+    branches count) of kind agent, tool, branch or parallel (2 to 4 agent branches). Steps run in list order unless a step names a `next` (or a branch picks one). No loops or code
     steps. Without `input_schema` the workflow takes `{input: string}` and prompts and tool params may use
     `{{input}}`, `{{previous}}` and `{{steps.<id>}}`; with `input_schema` (an object schema) a step reads
     `input.<field>` through `$ref` / `$template`."""
@@ -502,6 +509,19 @@ class ArchitectWorkflowSpec(BaseModel):
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     steps: tuple[ArchitectStep, ...] = Field(min_length=1, max_length=MAX_STEPS)
+
+    @field_validator("steps", mode="before")
+    @classmethod
+    def _step_count(cls, value: Any) -> Any:
+        """Same rule and message as the platform's WorkflowSpec: a parallel step and each branch count."""
+        if isinstance(value, (list, tuple)) and value:
+            total = 0
+            for item in value:
+                branches = item.get("branches") if isinstance(item, dict) else getattr(item, "branches", None)
+                total += 1 + (len(branches) if isinstance(branches, (list, tuple)) else 0)
+            if total > MAX_STEPS:
+                raise ValueError(f"a workflow has at most {MAX_STEPS} steps, got {total}")
+        return value
 
     @field_validator("id")
     @classmethod
@@ -692,6 +712,8 @@ __all__ = [
     "RESERVED_AGENT_IDS",
     "compile_agent",
     "compile_workflow",
+    "WORKFLOW_ONLY_TOOL_IDS",
+    "WORKFLOW_STEP_TOOL_IDS",
     "is_denied_tool",
     "offer_tool",
     "GENERIC_IDS",

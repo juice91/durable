@@ -47,14 +47,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
         eap_db.SchemaNotAtHead: the database is not at the latest Alembic migration. The API never
             creates or alters tables; `uv run alembic -c packages/db/alembic.ini upgrade head` does.
     """
-    from eap_api.auth import AUTH_MODE_API_KEY, require_auth_configured
-    from eap_api.cors import PathScopedCORSMiddleware, agui_cors_origins_from_env
+    from eap_api.auth import AUTH_MODE_API_KEY
+    from eap_api.cors import PathScopedCORSMiddleware, agui_cors_origins_from_env, loopback_cors_origins_from_env
+    from eap_iam import check_iam
 
-    # EAP_AUTH_MODE must be `dev` (the local bearer everywhere) or `api_key` (tenant API keys on
-    # /api/v1/ag-ui/* are the only credential; every other route is 401). See eap_api.auth (Q2).
-    mode = require_auth_configured()
+    # EAP_AUTH_MODE is `dev` (the loopback dev bearer plus keys), `production` or the deprecated `api_key` (tenant
+    # API keys on /api/v1/ag-ui/* only). Unset, unknown, no identity provider or no single policy engine refuses to
+    # start (eap_iam.require_iam_configured); the plug-ins are built once the database engine exists, below.
+    mode = check_iam().mode
     # A malformed EAP_AGUI_CORS_ORIGINS fails startup here (AGUI.9, D17).
     agui_cors_origins = agui_cors_origins_from_env()
+    loopback_cors_origins = loopback_cors_origins_from_env()  # EAP_CORS_LOOPBACK_ORIGINS: loopback hosts only
 
     # Traces and logs over OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise a no-op. The
     # request span's traceparent is stored on each run so the worker joins the same trace.
@@ -83,9 +86,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
         ),
     )
     
+    # One audit_log row per mutating call (eap_api.audit); inside CORS, so a preflight is never audited.
+    from eap_api.audit import AuditMiddleware
+
+    app.add_middleware(AuditMiddleware)
+
     # CORS: the local Studio dev server, by either loopback name, on every route; on
     # /api/v1/ag-ui/* only, also the EAP_AGUI_CORS_ORIGINS allowlist (eap_api.cors, AGUI.9).
-    app.add_middleware(PathScopedCORSMiddleware, agui_origins=agui_cors_origins)
+    app.add_middleware(PathScopedCORSMiddleware, agui_origins=agui_cors_origins, loopback_origins=loopback_cors_origins)
     
     # Refusals of the shared definition operations (eap_run_store.definitions: publish, restore and
     # archive, also used by the Architect's tools) answer with the status and body the routes always had.
@@ -134,6 +142,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     app.include_router(mcp_catalog_router, prefix="/api/v1")
 
+    from eap_api.routes.capabilities import router as capabilities_router
+
+    app.include_router(capabilities_router, prefix="/api/v1")
+    from eap_api.routes.provenance import router as provenance_router  # system-aware Architect, phase C
+    from eap_api.routes.system_context import router as system_context_router
+
+    app.include_router(system_context_router, prefix="/api/v1")
+    app.include_router(provenance_router, prefix="/api/v1")
     from eap_api.routes.tools import router as tools_router
 
     app.include_router(tools_router, prefix="/api/v1")
@@ -209,6 +225,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.memory import router as memory_router
 
     app.include_router(memory_router, prefix="/api/v1")
+    from eap_api.routes.iam import router as iam_router  # IAM P0a: GET /iam/capabilities
+    from eap_api.routes.audit import router as audit_router  # IAM P0b: GET /audit
+
+    app.include_router(iam_router, prefix="/api/v1")
+    from eap_api.routes.personal_api_keys import router as personal_api_keys_router  # personal API keys
+
+    app.include_router(personal_api_keys_router, prefix="/api/v1")
+    app.include_router(audit_router, prefix="/api/v1")
     from eap_api.routes.api_keys import router as api_keys_router  # AGUI.3
 
     app.include_router(api_keys_router, prefix="/api/v1")
@@ -251,6 +275,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # Store engine in app state for later use
     app.state.database_engine = engine
     app.state.database_url = database_url
+
+    # The IAM plug-ins (identity providers, the policy engine, the membership source), built on the engine. A
+    # plug-in that cannot start (transitional policy in production, half-configured provider) fails startup here.
+    from eap_iam import load_iam
+
+    try:
+        app.state.iam = load_iam(engine)
+    except Exception:
+        engine.dispose()
+        raise
 
     # Attachment bytes live in object storage (eap_blob_store; EAP_BLOB_*), never in Postgres. A bad
     # EAP_BLOB_* setting fails startup here.

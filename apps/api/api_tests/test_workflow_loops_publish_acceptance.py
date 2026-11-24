@@ -31,6 +31,9 @@ def _ref(p: str) -> dict[str, str]:
 
 
 def _tool(sid: str, nxt: str | None = None, tool: str = "clock.now", **inp: Any) -> dict[str, Any]:
+    # clock.now takes no fields, so refs travel in json.query's free-form `data` (publish checks tool inputs).
+    if inp and tool == "clock.now":
+        tool, inp = "json.query", {"data": inp, "expression": "@"}
     return {"id": sid, "type": "tool", "tool_id": tool, "input": inp, "next": nxt}
 
 

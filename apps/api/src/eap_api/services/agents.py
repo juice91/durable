@@ -130,6 +130,7 @@ def version_dict_to_response(version: dict) -> dict:
         "spec_hash": version["spec_hash"],
         "created_at": version["created_at"].isoformat(),
         "created_by": version["created_by"],
+        "published_by": version.get("published_by"),
         "restored_from": version["restored_from"],
         "created_via": version["created_via"],
     }
@@ -143,6 +144,7 @@ def version_to_response(version: AgentVersionModel) -> dict:
         "spec_hash": version.spec_hash,
         "created_at": version.created_at.isoformat(),
         "created_by": version.created_by,
+        "published_by": version.published_by,
         "restored_from": version.restored_from,
         "created_via": version.created_via,
     }

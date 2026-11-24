@@ -19,6 +19,9 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: api}
+      # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
+      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_PLATFORM@@"}
     spec:
       serviceAccountName: pydanticos-mcp-api
       hostAliases:
@@ -72,11 +75,22 @@ spec:
                 secretKeyRef: {name: pydanticos-secrets, key: EAP_LITELLM_API_KEY}
             - name: ANTHROPIC_API_KEY
               valueFrom:
-                secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY}
+                secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY, optional: true}
             # Cloudflare Workers AI (optional): the provider stays off while the key is absent from the Secret.
             - name: CLOUDFLARE_API_TOKEN
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: CLOUDFLARE_API_TOKEN, optional: true}
+            # ZITADEL sign-in and members (optional, from the IAM bootstrap): while the project id and the org map are
+            # absent the zitadel plug-in is dormant; without the machine key the Members page is not offered.
+            - name: EAP_ZITADEL_PROJECT_ID
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_ZITADEL_PROJECT_ID, optional: true}
+            - name: EAP_ZITADEL_ORG_TENANT_MAP
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_ZITADEL_ORG_TENANT_MAP, optional: true}
+            - name: EAP_ZITADEL_MACHINE_KEY
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_ZITADEL_MACHINE_KEY, optional: true}
           resources:
             requests: {cpu: "250m", memory: 512Mi}
             limits: {cpu: "2", memory: 4Gi}

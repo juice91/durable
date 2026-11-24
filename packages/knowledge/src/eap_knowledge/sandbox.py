@@ -28,11 +28,12 @@ file isolation is the gate (see the RAG P1 plan, P1.B1).
 
 Payload::
 
-    {"extractor": "pdf" | "rst" | "yaml" | "json" | "markdown-doxygen",
+    {"extractor": "pdf" | "rst" | "yaml" | "json" | "markdown-doxygen" | "code",
      "content": "<text, or base64 for pdf>",
      "title": "...", "source_url": "..." | null,
      "options": {<chunking.extract>} | null,
-     "max_tokens": 512,
+     "max_tokens": 512, "overlap_tokens": 64,
+     "code": {"language": "python", "path": "pkg/mod.py", "kind": "code"},   (extractor "code" only)
      "limits": {"max_pdf_pages": 2000, "max_structured_bytes": 2097152}}
 
 Result: ``{"ok": true, "document": {...}, "pages"?: N, "image_only_pages"?: [n, ...]}`` or
@@ -96,6 +97,27 @@ _REFUSED_FRESH_LOADS = frozenset({"_posixsubprocess"})
 
 def _refused_fork_exec(*args: Any, **kwargs: Any) -> Any:
     raise PermissionError(errno.EACCES, "refused by the extraction sandbox: fork_exec")
+
+
+def _guard_builtin_loads() -> None:
+    """Refuse a fresh load of a refused module through the built-in importer.
+
+    Where ``_posixsubprocess`` is compiled into the interpreter (python-build-standalone, the
+    ``uv`` Pythons) there is no extension file and ``_imp.create_builtin`` builds a new module
+    with the original ``fork_exec`` WITHOUT an ``import`` audit event, so the hook alone would
+    not see it. The wrapper keeps the original in its closure; ``importlib`` calls it through the
+    ``_imp`` module attribute, so the refusal covers ``module_from_spec`` too."""
+    import _imp
+
+    original = _imp.create_builtin
+
+    def create_builtin(spec: Any) -> Any:
+        top = str(getattr(spec, "name", "")).split(".")[0]
+        if top in _REFUSED_IMPORTS or top in _REFUSED_FRESH_LOADS:
+            raise PermissionError(errno.EACCES, f"refused by the extraction sandbox: import {spec.name}")
+        return original(spec)
+
+    _imp.create_builtin = create_builtin  # type: ignore[attr-defined]
 _DETAIL_CHARS = 200
 
 
@@ -140,6 +162,7 @@ def install_audit_hook() -> None:
 
     _posixsubprocess.fork_exec = _refused_fork_exec
     subprocess._fork_exec = _refused_fork_exec  # type: ignore[attr-defined]
+    _guard_builtin_loads()
     for name in ("mkfifo", "mknod"):  # no audit event in every Python version: remove them
         for module in (os, sys.modules.get("posix")):
             if module is not None and hasattr(module, name):
@@ -221,6 +244,22 @@ def extract_payload(payload: dict[str, Any]) -> dict[str, Any]:
         from eap_knowledge.formats.doxygen import extract_doxygen_markdown
 
         result["document"] = _document_json(extract_doxygen_markdown(content, title=title, source_url=source_url))
+    elif extractor == "code":
+        from eap_knowledge.formats import CODE_LANGUAGES
+        from eap_knowledge.formats.code import extract_code
+
+        info = payload.get("code")
+        language = info.get("language") if isinstance(info, dict) else None
+        path = info.get("path") if isinstance(info, dict) else None
+        if language not in CODE_LANGUAGES or not isinstance(path, str) or not path:
+            raise ExtractionFailed("extract_failed", "code extraction needs a language and a path")
+        kind = info.get("kind") if isinstance(info.get("kind"), str) and info.get("kind") else "code"
+        result["document"] = _document_json(
+            extract_code(
+                content, language, path=path, kind=kind, title=title, source_url=source_url,
+                max_tokens=max_tokens, overlap_tokens=int(payload.get("overlap_tokens") or 0),
+            )
+        )
     else:
         raise ExtractionFailed("extract_failed", "unknown extractor")
     return result
@@ -314,9 +353,16 @@ def _probe_fork_exec_reload(path: Any) -> None:
     import sysconfig
     from pathlib import Path
 
-    so = next((Path(sysconfig.get_path("stdlib")) / "lib-dynload").glob("_posixsubprocess*"))
-    spec = importlib.util.spec_from_file_location("_posixsubprocess", so)
-    importlib.util.module_from_spec(spec)  # a fresh copy would have the original fork_exec
+    # A fresh copy would have the original fork_exec. The module is an extension file on most
+    # Pythons and compiled in (no file at all) on python-build-standalone: probe whichever it is.
+    so = next((Path(sysconfig.get_path("stdlib")) / "lib-dynload").glob("_posixsubprocess*"), None)
+    if so is not None:
+        spec = importlib.util.spec_from_file_location("_posixsubprocess", so)
+    else:
+        import importlib.machinery
+
+        spec = importlib.util.spec_from_loader("_posixsubprocess", importlib.machinery.BuiltinImporter)
+    importlib.util.module_from_spec(spec)
 
 
 def _probe_fs(name: str) -> Any:

@@ -64,6 +64,8 @@ def _env(tmp: Path, bindir: Path, extra: dict[str, str] | None = None) -> dict[s
     env["PYDANTICOS_DATA_DIR"] = str(tmp / "pydanticos-data")
     # The stubs have no helm; the operator install is covered by test_toolhive_script.py.
     env["PYDANTICOS_SKIP_TOOLHIVE"] = "1"
+    # The host-disk preflight is covered by test_host_safety.py with a fake df; here it must not depend on the runner's disk.
+    env["PYDANTICOS_MIN_FREE_GB"] = "0"
     if extra:
         env.update(extra)
     return env

@@ -171,7 +171,7 @@ def _tags(tool: Any) -> set[str]:
 
 def _from_listed(tool: Any) -> ControlTool | None:
     tags = _tags(tool)
-    if "human_only" in tags:
+    if "human_only" in tags or "internal" in tags:  # `internal`: the platform's own calls (provenance.record)
         return None
     schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None) or {}
     return ControlTool(

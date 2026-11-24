@@ -1,0 +1,78 @@
+name: Public release
+
+# Runs in the public repository only (the guard below keeps it inert upstream). The exported tree carries the
+# version and a CHANGELOG.md that the export already sanitised: internal pull requests removed, replacement rules
+# applied, the residual-string scan passed (a hit blocks the export, so nothing unsafe reaches this repository).
+# On manual dispatch, or when a push to main adds a CHANGELOG version that has no tag yet, this tags the commit and
+# creates the Release with that section as its body. Releases are not deploys.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release (default is the newest version in CHANGELOG.md)
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - CHANGELOG.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-public
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'juice91/durable'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    env:
+      # uv provisions the interpreter (the self-hosted macOS runner has no usable python3); the scripts are stdlib only.
+      UV_PYTHON: '3.13'
+    # contents: write creates the tag and the release. Nothing else.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # No Actions cache: a self-hosted Mac keeps uv's own cache, and the release jobs install nothing.
+          enable-cache: false
+      - name: Tag and create the release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ inputs.version }}
+          TARGET: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_INPUT:-$(uv run --no-project python scripts/release/changelog.py latest)}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Refusing: no X.Y.Z version to release.' >&2
+            exit 1
+          fi
+          if git rev-parse --verify --quiet "refs/tags/v${version}" >/dev/null; then
+            echo "The tag v${version} already exists."
+            [[ "$EVENT_NAME" == workflow_dispatch ]] && exit 1
+            exit 0
+          fi
+          uv run --no-project python scripts/release/bump.py --check
+          if [[ "$(uv run --no-project python scripts/release/bump.py --current)" != "$version" ]]; then
+            echo "Refusing: pyproject.toml says $(uv run --no-project python scripts/release/bump.py --current), the release is ${version}." >&2
+            exit 1
+          fi
+          notes="${RUNNER_TEMP}/release-notes.md"
+          uv run --no-project python scripts/release/changelog.py section --version "$version" >"$notes"
+          # Last lock: even if the export gate were bypassed, an internal block or an e-mail address stops the release.
+          if grep -qE '^### Internal' "$notes" || grep -qE '[[:alnum:]._%+-]+@[[:alnum:].-]+\.[a-z]{2,}' "$notes" || grep -q '/Users/' "$notes"; then
+            echo 'BLOCKED: the release notes contain an internal section, an e-mail address or a local path.' >&2
+            exit 1
+          fi
+          gh release create "v${version}" --target "$TARGET" --title "v${version}" --notes-file "$notes"
+          echo "Created the release v${version} at ${TARGET}." | tee -a "$GITHUB_STEP_SUMMARY"

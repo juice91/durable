@@ -58,6 +58,7 @@ from eap_run_store import RevisionMismatch, ScheduleNameConflict, ScheduleStore,
 from eap_run_store.definition_errors import DefinitionError
 from eap_runtime import RunDeps, ToolRegistry, run_side_effect
 from eap_schemas import reserved_tool_name_conflicts
+from eap_schemas.workflows import MAX_STEPS
 from eap_schemas.architect import (
     ARCHITECT_GATED_TOOL_IDS,
     RESERVED_AGENT_IDS,
@@ -73,6 +74,7 @@ from eap_schemas.architect import (
 
 from eap_worker import architect_evals
 from eap_worker.architect_allowlist import approved_for_tenant
+from eap_worker.system_context import snapshot_hash_of
 
 log = logging.getLogger("eap_worker.architect_tools")
 
@@ -84,6 +86,8 @@ TOOL_IDS = (
     "architect.list_created_workflows",
     "architect.list_workflow_versions",
     "architect.list_workflow_step_kinds",
+    "architect.list_capabilities",
+    "architect.get_capability",
     "architect.save_agent",
     "architect.save_workflow",
     "architect.list_eval_suites",
@@ -163,7 +167,7 @@ PLACEHOLDERS = {
     "{{steps.<id>}}": "the answer of an earlier step, or of a branch of an earlier parallel step",
 }
 LIMITS = {
-    "steps": "1 to 40; they run in list order unless a step has next or a branch chooses",
+    "steps": f"1 to {MAX_STEPS}; they run in list order unless a step has next or a branch chooses",
     "branches": "2 to 4 per parallel step",
     "loops_conditions_code": "loops and code steps are not supported; conditions are branch steps",
 }
@@ -172,7 +176,8 @@ INPUT_VALUES = {
     "literal": "any JSON value is passed as it is: 24, true, [\"zh-Hant\"], {\"method\": \"GET\"}",
     "ref": "{\"$ref\": \"steps.feed.output.text\"} passes the referenced value with its type; paths are "
     "input.<field>, steps.<id>.output[.<field>|.<list index>...]. A $ref is allowed only as a whole value (a param or "
-    "input field), never inside a nested object or list: to put references inside one, use $template",
+    "input field) or at any depth inside a nested object or list; a marker is an object with exactly one key, so "
+    "$ref and $template never take sibling keys (a half-marker is refused at publish)",
     "template": "{\"$template\": <json>} is a literal whose strings may hold {{ steps.<id>.output.<field> }} "
     "placeholders; a string that is exactly one placeholder keeps the value's type (an array stays an array), a string "
     "with other text around it concatenates strings, numbers and booleans (\"Bearer {{ steps.session.output.json.token }}\"). "
@@ -497,6 +502,24 @@ async def list_workflow_step_kinds() -> dict[str, Any]:
     }
 
 
+async def record_provenance(
+    tenant_id: str, run_id: str | None, kind: str, definition_id: str, card: str = "draft", version: int | None = None
+) -> None:
+    """Ask the control plane to record what this run based a draft (or a publish card) on. Best effort: the
+    hashes, the principal and the tool-call names are derived on the API side from the run's own events, so
+    nothing here can add tenant text or a secret, and a failure never fails the save."""
+    if not run_id:
+        return
+    from eap_worker import control_bridge
+
+    args: dict[str, Any] = {"kind": kind, "definition_id": definition_id, "card": card}
+    if version is not None:
+        args["version"] = version
+    answer = await control_bridge.call_control(tenant_id, run_id, "provenance.record", args)
+    if "error" in answer:
+        log.warning("architect provenance not recorded run=%s id=%s code=%s", run_id, definition_id, answer["error"].get("code"))
+
+
 async def save_agent(
     engine: Engine, tenant_id: str, spec: ArchitectAgentSpec | dict[str, Any] | str, confirm: bool = False,
     *, allowlist: Allowlist | None = None, run_id: str | None = None,
@@ -520,6 +543,7 @@ async def save_agent(
     if compiled.approvals is not None:
         warnings.append("A person approves each call of: " + ", ".join(compiled.approvals.tools))
     log.info("architect.save_agent tenant=%s run=%s id=%s", tenant_id, run_id, result["id"])
+    await record_provenance(tenant_id, run_id, "agent", result["id"])
     return {**result, "warnings": warnings}
 
 
@@ -543,6 +567,7 @@ async def save_workflow(
     if "error" in result or result.get("status") != "draft":
         return result
     log.info("architect.save_workflow tenant=%s run=%s id=%s", tenant_id, run_id, result["id"])
+    await record_provenance(tenant_id, run_id, "workflow", result["id"])
     return {**result, "warnings": []}
 
 
@@ -1029,6 +1054,54 @@ async def _list_workflow_step_kinds(ctx: RunContext[RunDeps]) -> dict[str, Any]:
     return await list_workflow_step_kinds()
 
 
+def mark_stale(result: dict[str, Any], seen_hash: str | None) -> dict[str, Any]:
+    """`snapshot_stale` on a registry answer: true (with the fresh and the run's hash) when the registry's snapshot
+    differs from the one the run's context was built from; absent when the run has no context to compare."""
+    current = result.get("snapshot_hash")
+    if seen_hash is None or "error" in result or not isinstance(current, str):
+        return result
+    if current == seen_hash:
+        return {**result, "snapshot_stale": False}
+    return {**result, "snapshot_stale": True, "snapshot_hash_now": current, "snapshot_hash_at_run_start": seen_hash}
+
+
+async def list_capabilities(
+    tenant_id: str, run_id: str, kind: str | None = None, status: str | None = None, query: str | None = None,
+    *, seen_hash: str | None = None,
+) -> dict[str, Any]:
+    """The platform's capability registry through the control plane's `capability.list` (the API owns it)."""
+    from eap_worker import control_bridge
+
+    args = {k: v for k, v in (("kind", kind), ("status", status), ("query", query)) if v}
+    return mark_stale(await control_bridge.call_control(tenant_id, run_id, "capability.list", args), seen_hash)
+
+
+async def get_capability(tenant_id: str, run_id: str, id: str, *, seen_hash: str | None = None) -> dict[str, Any]:
+    from eap_worker import control_bridge
+
+    answer = await control_bridge.call_control(tenant_id, run_id, "capability.get", {"capability_id": id})
+    return mark_stale(answer, seen_hash)
+
+
+async def _list_capabilities(
+    ctx: RunContext[RunDeps], kind: str | None = None, status: str | None = None, query: str | None = None
+) -> dict[str, Any]:
+    """What the platform can do right now: each capability's id, kind, status (available, designed_not_built,
+    disabled), requires_approval, limits and whether you can write it (writable_by_architect), plus the known gaps
+    (what is designed but not built, or cannot be written by you). Filter by kind (tool, step, trigger, feature, ...),
+    status or a query word. This is the only source of availability: never claim a capability that is not listed
+    available here, and say so when a request needs one that is a gap."""
+    return await list_capabilities(
+        ctx.deps.tenant_id, str(ctx.deps.run_id), kind, status, query, seen_hash=snapshot_hash_of(ctx.deps)
+    )
+
+
+async def _get_capability(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
+    """One capability by id (for example tool.http.request, step.foreach, trigger.schedule): its schemas, limits,
+    what it needs, its docs reference and the gaps that concern it. An unknown id answers the nearest ids."""
+    return await get_capability(ctx.deps.tenant_id, str(ctx.deps.run_id), id, seen_hash=snapshot_hash_of(ctx.deps))
+
+
 async def _save_agent(
     ctx: RunContext[RunDeps], spec: ArchitectAgentSpec | str, confirm: bool = False
 ) -> dict[str, Any]:
@@ -1045,7 +1118,10 @@ async def _save_workflow(
     return await save_workflow(_engine(), ctx.deps.tenant_id, spec, confirm, run_id=str(ctx.deps.run_id))
 
 
-async def _gated(ctx: RunContext[RunDeps], fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> dict[str, Any]:
+async def _gated(
+    ctx: RunContext[RunDeps], fn: Callable[..., dict[str, Any]], *args: Any, publish_card: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """Run one gated operation once for this tool call: the side-effect store keeps the result under
     the run and tool call id, so a crashed and replayed call returns it instead of repeating the change
     (and an unknown outcome is raised, never guessed)."""
@@ -1057,13 +1133,16 @@ async def _gated(ctx: RunContext[RunDeps], fn: Callable[..., dict[str, Any]], *a
     def call() -> dict[str, Any]:
         return fn(_engine(), tenant_id, *args, run_id=run_id, **kwargs)
 
-    result, _performed = await asyncio.to_thread(run_side_effect, ctx.deps.side_effects, key, call)
+    result, performed = await asyncio.to_thread(run_side_effect, ctx.deps.side_effects, key, call)
+    if performed and publish_card and result.get("status") == "published":
+        # The publish card's provenance row (a replayed, already recorded call writes none).
+        await record_provenance(tenant_id, run_id, publish_card, str(result["id"]), "publish", result.get("version"))
     return result
 
 
 async def _publish_agent(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
     """Publish the draft of an agent you made as its next version (live). A person approves each call."""
-    return await _gated(ctx, publish_agent_sync, id)
+    return await _gated(ctx, publish_agent_sync, id, publish_card="agent")
 
 
 async def _restore_agent_version(
@@ -1081,7 +1160,7 @@ async def _archive_agent(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
 
 async def _publish_workflow(ctx: RunContext[RunDeps], id: str) -> dict[str, Any]:
     """Publish the draft of a workflow you made as its next version (live). A person approves each call."""
-    return await _gated(ctx, publish_workflow_sync, id)
+    return await _gated(ctx, publish_workflow_sync, id, publish_card="workflow")
 
 
 async def _restore_workflow_version(
@@ -1164,6 +1243,8 @@ _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (
     ("architect.list_created_workflows", _list_created_workflows),
     ("architect.list_workflow_versions", _list_workflow_versions),
     ("architect.list_workflow_step_kinds", _list_workflow_step_kinds),
+    ("architect.list_capabilities", _list_capabilities),
+    ("architect.get_capability", _get_capability),
     ("architect.save_agent", _save_agent),
     ("architect.save_workflow", _save_workflow),
     ("architect.list_eval_suites", _list_eval_suites),
@@ -1207,6 +1288,8 @@ __all__ = [
     "archive_agent",
     "archive_workflow",
     "describe_cron",
+    "get_capability",
+    "list_capabilities",
     "publish_agent",
     "publish_workflow",
     "register_architect_tools",

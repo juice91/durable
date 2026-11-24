@@ -56,8 +56,8 @@ def _wf(agent_id: str, refs: list[str], version: int | None = 1) -> dict[str, An
         "steps": [
             {"id": "a", "type": "agent", "agent_id": agent_id, "version": version, "input": {"p": "x"}, "next": "b"},
             {"id": "b", "type": "tool", "tool_id": "tickets.create",
-             "input": {"title": "t", "body": {"$ref": refs[0]}}, "next": "c"},
-            {"id": "c", "type": "branch",
+             "input": {"title": "t", "body": {"$ref": refs[0]}}, "next": "c_gate"},
+            {"id": "c_gate", "type": "branch",
              "cases": [{"when": {"op": "exists", "left": {"$ref": refs[-1]}}, "next": "d"}], "default": "d"},
             {"id": "d", "type": "agent", "agent_id": agent_id, "version": version, "input": {"p": "y"}},
         ],
@@ -98,7 +98,7 @@ def test_bad_ref_in_a_branch_condition_names_the_branch_and_problems_are_joined(
     resp = _publish(client, _wf(agent_id, ["steps.a.output.nope1", "steps.a.output.nope2"]))
     assert resp.status_code == 422
     detail = resp.json()["detail"]
-    assert "step 'b': $ref 'steps.a.output.nope1'" in detail and "; step 'c': $ref 'steps.a.output.nope2'" in detail
+    assert "step 'b': $ref 'steps.a.output.nope1'" in detail and "; step 'c_gate': $ref 'steps.a.output.nope2'" in detail
 
 
 def test_pinned_version_is_checked_against_that_version_not_the_latest(client):
@@ -123,7 +123,7 @@ def test_pinned_version_without_output_warns_and_never_blocks(client):
     # Steps b (tool input) and c (branch condition) both read the field: one warning each.
     assert {w["code"] for w in warnings} == {"text_agent_output_ref"}
     assert [w["path"] for w in warnings] == ["steps[1]", "steps[2]"]
-    assert "step 'b'" in warnings[0]["message"] and "step 'c'" in warnings[1]["message"]
+    assert "step 'b'" in warnings[0]["message"] and "step 'c_gate'" in warnings[1]["message"]
     # Unpinned: the latest (v2) matches, but an unpinned field ref always warns (review fix).
     latest = _publish(client, _wf(agent_id, ["steps.a.output.priority"], version=None))
     assert latest.status_code == 201, latest.text

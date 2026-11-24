@@ -36,10 +36,10 @@ afterEach(() => {
 const page = () => render(<FrameHarness><SettingsPage /></FrameHarness>);
 
 describe("Settings tabs", () => {
-  it("lists the nine tabs in order under one h1, Appearance selected by default", () => {
+  it("lists the eleven tabs in order under one h1, Appearance selected by default", () => {
     page();
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Appearance", "Chat", "Shortcuts", "Providers", "Secrets", "Connections", "API keys", "Browser data", "About"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Profile", "Appearance", "Chat", "Shortcuts", "Providers", "Secrets", "Connections", "API keys", "Audit", "Browser data", "About"]);
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("tab", { name: "Appearance" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByTestId("settings-appearance")).toBeInTheDocument();
@@ -77,7 +77,7 @@ describe("Settings tabs", () => {
   });
 
   it("the route helpers name the tabs", () => {
-    expect(SETTINGS_TABS).toHaveLength(9);
+    expect(SETTINGS_TABS).toHaveLength(12);
     expect(routes.settingsTab("connections")).toBe("/settings?tab=connections");
     expect(routes.settingsProviders()).toBe("/settings?tab=providers");
     expect(routes.settingsApiKeys()).toBe("/settings?tab=api-keys");

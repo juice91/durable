@@ -39,6 +39,17 @@ ALIASES = {
     "application/pdf": "pdf",
     "application/yaml": "yaml", "application/x-yaml": "yaml", "text/yaml": "yaml",
     "application/json": "json",
+    # source code (extractor `code`)
+    "text/x-python": "python", "text/x-script.python": "python", "application/x-python-code": "python",
+    "text/typescript": "typescript", "application/typescript": "typescript", "text/x-typescript": "typescript",
+    "text/tsx": "tsx", "text/x-tsx": "tsx",
+    "text/javascript": "javascript", "application/javascript": "javascript",
+    "application/x-javascript": "javascript", "text/ecmascript": "javascript",
+    "text/x-shellscript": "shell", "application/x-sh": "shell", "text/x-sh": "shell",
+    "application/toml": "toml", "text/x-toml": "toml", "text/toml": "toml",
+    "application/sql": "sql", "text/x-sql": "sql", "text/sql": "sql",
+    "text/x-dockerfile": "dockerfile", "text/dockerfile": "dockerfile",
+    "text/css": "css",
 }
 
 
@@ -84,6 +95,8 @@ def test_site_binary_caps_and_extractors():
         "pdf": ("worker", True, "binary", "pdf"),
         "yaml": ("worker", False, "structured", "yaml"),
         "json": ("worker", False, "structured", "json"),
+        **{lang: ("worker", False, "text", "code") for lang in (
+            "python", "typescript", "tsx", "javascript", "shell", "toml", "sql", "dockerfile", "css")},
     }
     assert format_by_name("pdf").mime_type == "application/pdf"
 

@@ -94,6 +94,8 @@ afterEach(() => cleanup());
 async function renderView(waitForStep = "classify") {
   render(<WorkflowRunView runId="run-1" workflowId="wf-1" />);
   await screen.findByTestId(`workflow-step-${waitForStep}`);
+  // The graph node renders after the step list; expectState and the tests read both synchronously.
+  await screen.findByTestId(`workflow-node-${waitForStep}`);
 }
 
 describe("WorkflowRunView acceptance", () => {

@@ -67,6 +67,11 @@ export interface DataListProps<Row> {
   searchPlaceholder?: string;
   /** Accessible name of the search box; defaults to the placeholder. */
   searchLabel?: string;
+  /**
+   * Pins rows above the sorted rest: a lower rank comes first, `null` is not pinned. Pinned rows keep the
+   * current sort order among equal ranks, and a filter that excludes a row drops it (nothing is forced in).
+   */
+  pinRank?: (row: Row) => number | null;
   /** Client-side filter applied with the debounced query. Without it, rows are not filtered here. */
   filterRow?: (row: Row, query: string) => boolean;
   /** Called with the debounced query (for server-side search). */
@@ -258,6 +263,7 @@ export function DataList<Row>({
   searchPlaceholder,
   searchLabel,
   filterRow,
+  pinRank,
   onSearchChange,
   initialQuery = "",
   searchShortcut = true,
@@ -312,8 +318,16 @@ export function DataList<Row>({
           .map((entry) => entry.row);
       }
     }
+    if (pinRank) {
+      const ranked = result.map((row, index) => ({ row, index, rank: pinRank(row) }));
+      if (ranked.some((entry) => entry.rank !== null)) {
+        result = ranked
+          .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.index - b.index)
+          .map((entry) => entry.row);
+      }
+    }
     return result;
-  }, [columns, filterRow, manualSort, rows, sort, trimmedQuery]);
+  }, [columns, filterRow, manualSort, pinRank, rows, sort, trimmedQuery]);
 
   const visibleKey = useMemo(() => visibleRows.map((row) => getRowId(row)).join("\u0000"), [visibleRows, getRowId]);
   const onVisibleRef = useRef(onVisibleRowIdsChange);

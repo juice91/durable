@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-processors"
-version = "0.1.0"
+version = "0.3.0"
 description = "Deterministic input and output processors (guardrails) for EAP agents, on RE2"
 readme = "README.md"
 requires-python = ">=3.13"

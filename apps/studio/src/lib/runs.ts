@@ -2,6 +2,7 @@
 import { parseSSE } from "./sse";
 
 import { BASE_URL } from "./base-url";
+import { authorizationHeaders } from "./credentials";
 
 export { BASE_URL };
 
@@ -13,9 +14,7 @@ export class ApiError extends Error {
 }
 
 function apiHeaders(extra: HeadersInit = {}): HeadersInit {
-  const token = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
-  if (!token) throw new ApiError(0, "No API credentials configured");
-  return { Authorization: token, ...extra };
+  return { ...authorizationHeaders(), ...extra };
 }
 
 async function apiErrorFromResponse(response: Response): Promise<ApiError> {
@@ -137,9 +136,13 @@ export interface RunEvent {
     // P1.C: the reflector's input was capped (counts only), and the end of a completed turn's
     // post-turn memory steps ({observe, index} status words).
     | "memory_observe_trimmed" | "post_turn_done"
+    // System-aware Architect: provenance and hashes of the context built at run start; never its text.
+    | "system_context_loaded"
     // Agent capabilities (AC.4, AC.6): a rejected structured-output candidate, and tool approvals.
     | "output_retry"
     | "tool_approval_waiting" | "tool_approved" | "tool_denied" | "tool_approval_timed_out"
+    // Agents as tools: the caller's log, keys `agent_tool:{call}:started|completed`; data has the child run id.
+    | "agent_tool_started" | "agent_tool_completed"
     // Eval runs (AC.11): one per case, status and counts only.
     | "eval_case_result"
     // Workflow loops (loops D4, D12): one per iteration (`loop:{S}:started|completed|failed`), and

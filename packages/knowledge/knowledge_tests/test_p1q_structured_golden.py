@@ -143,7 +143,7 @@ TI_V1 = ChunkingConfig(max_tokens=512, min_tokens=64, overlap_tokens=64, chunker
 
 
 def test_versions_bump_yaml_only():
-    assert EXTRACTOR_VERSIONS == {"rst": 1, "pdf": 1, "yaml": 3, "json": 1, "markdown-doxygen": 1}
+    assert EXTRACTOR_VERSIONS == {"rst": 1, "pdf": 1, "yaml": 3, "json": 1, "markdown-doxygen": 1, "code": 1}
 
 
 @pytest.mark.parametrize("config", [TI_V2, TI_V1], ids=["v2", "v1"])

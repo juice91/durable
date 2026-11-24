@@ -141,7 +141,7 @@ stream) is not run twice. Re-sending the latest recorded user message alone unde
 - **Expiry.** An upload that no message has referenced is removed, with its file, 24 hours after it was
   made; send it in a message before then. A sent attachment stays with its conversation.
 - **Deployment.** With `EAP_BLOB_BACKEND=s3` the deployment reads the object-storage credentials from
-  `op://<vault>/<item>/EAP_BLOB_S3_ACCESS_KEY` and `.../EAP_BLOB_S3_SECRET_KEY`; the R2 endpoint is in the ConfigMap.
+  the deploy secrets `EAP_BLOB_S3_ACCESS_KEY` and `EAP_BLOB_S3_SECRET_KEY`; the S3 endpoint is in the ConfigMap.
 - **Feedback.** `PUT|DELETE /api/v1/conversations/{id}/messages/{messageId}/feedback`
   (`{rating: "up"|"down", comment?}`) rates an assistant message (`{runId}-m{n}`), one row per user.
   The thread GET adds `feedback: {messageId: {rating, comment, updated_at}}` for the caller. Feedback is

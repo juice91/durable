@@ -1,5 +1,6 @@
 #!/bin/sh
-# Nightly custom-format dumps for eap_app and eap_dbos.
+# Nightly custom-format dumps for eap_app and eap_dbos, plus zitadel and openfga when their passwords are in the
+# job's environment (the identity services are optional).
 # A new pod often sees "connection refused" because kube-router REJECTs it
 # until that pod's NetworkPolicy is programmed. Postgres can also still be
 # starting. Wait before creating a file, and publish only after pg_restore --list.
@@ -69,7 +70,7 @@ newest_valid() {
   printf '%s\n' "$newest"
 }
 
-# Drop dumps older than BACKUP_RETENTION_DAYS (default 30). Never delete the
+# Drop dumps older than BACKUP_RETENTION_DAYS (default 30; backup.yaml sets it). Never delete the
 # newest dump that pg_restore can list. Partials are not backups.
 retain() {
   days=${BACKUP_RETENTION_DAYS:-30}
@@ -79,10 +80,15 @@ retain() {
       return 1
       ;;
   esac
+  # `find -mtime +N` truncates the age to whole days, so +1 means older than 48 h and the previous night's dump
+  # would survive. Use minutes: N days minus a 2 h tolerance for run-time jitter, so with N=1 the dump of the
+  # night before (about 24 h old) goes at the next run and only the newest remains.
+  cutoff=$((days * 1440 - 120))
+  [ "$cutoff" -ge 0 ] || cutoff=0
   cleanup
-  for db in eap_app eap_dbos; do
+  for db in eap_app eap_dbos zitadel openfga; do
     keep=$(newest_valid "$db")
-    find "$backup_dir" -maxdepth 1 -type f -name "${db}-*.dump" -mtime "+${days}" | while IFS= read -r old; do
+    find "$backup_dir" -maxdepth 1 -type f -name "${db}-*.dump" -mmin "+${cutoff}" | while IFS= read -r old; do
       [ -n "$old" ] || continue
       if [ -n "$keep" ] && [ "$old" = "$keep" ]; then
         continue
@@ -103,6 +109,13 @@ main() {
   wait_for_postgres
   publish_dump eap_app eap_app "$app_password"
   publish_dump eap_dbos eap_dbos "$dbos_password"
+  # Optional: present only when the deploy Secret carries the identity services' database passwords.
+  if [ -n "${ZITADEL_DB_PASSWORD-}" ]; then
+    publish_dump zitadel zitadel "$ZITADEL_DB_PASSWORD"
+  fi
+  if [ -n "${OPENFGA_DB_PASSWORD-}" ]; then
+    publish_dump openfga openfga "$OPENFGA_DB_PASSWORD"
+  fi
   retain
 }
 

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-iam"
+version = "0.3.0"
+description = "Identity and access interfaces: IdentityProvider, PolicyEngine, MembershipSource, the provider chain and plug-in discovery"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2",
+]
+
+[project.entry-points.pytest11]
+eap_iam = "eap_iam.pytest_plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_iam"]

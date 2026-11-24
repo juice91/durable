@@ -1,0 +1,121 @@
+model
+  schema 1.1
+
+type user
+
+type group
+  relations
+    define member: [user, group#member]
+
+type tenant
+  relations
+    define admin: [user, group#member]
+    define editor: [user, group#member] or admin
+    define viewer: [user, group#member] or editor
+    define can_read: viewer
+    define can_create_agent: editor
+    define can_create_workflow: editor
+    define can_create_knowledge_base: editor
+    define can_create_schedule: editor
+    define can_create_secret: admin
+    define can_create_mcp_server: admin
+    define can_create_api_key: admin
+    define can_manage_members: admin
+    define can_read_audit: admin
+    define can_manage_settings: admin
+
+type agent
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define editor: [user, group#member] or owner or editor from tenant
+    define runner: [user, group#member] or editor
+    define approver: [user, group#member] or admin from tenant
+    define viewer: [user, group#member] or runner or approver or viewer from tenant
+    define can_read: viewer
+    define can_run: runner
+    define can_edit: editor
+    define can_publish: editor
+    define can_approve: approver
+    define can_archive: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+    define can_grant_use: runner
+
+type workflow
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define editor: [user, group#member] or owner or editor from tenant
+    define runner: [user, group#member] or editor
+    define approver: [user, group#member] or admin from tenant
+    define viewer: [user, group#member] or runner or approver or viewer from tenant
+    define can_read: viewer
+    define can_run: runner
+    define can_edit: editor
+    define can_publish: editor
+    define can_approve: approver
+    define can_archive: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+    define can_grant_use: runner
+
+type knowledge_base
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define editor: [user, group#member] or owner or editor from tenant
+    define runner: [user, group#member] or editor
+    define viewer: [user, group#member] or runner or viewer from tenant
+    define can_read: viewer
+    define can_run: runner
+    define can_edit: editor
+    define can_archive: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+    define can_grant_use: runner
+
+type secret
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define usable_by: [user, group#member, tenant#editor]
+    define can_read: owner or viewer from tenant
+    define can_edit: owner or admin from tenant
+    define can_archive: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+    define can_grant_use: usable_by or owner or admin from tenant
+
+type schedule
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define editor: [user, group#member] or owner or editor from tenant
+    define viewer: [user, group#member] or editor or viewer from tenant
+    define can_read: viewer
+    define can_run: editor
+    define can_edit: editor
+    define can_archive: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+
+type mcp_server
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define can_read: owner or viewer from tenant
+    define can_edit: owner or admin from tenant
+    define can_archive: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+    define can_grant_use: owner or editor from tenant
+
+type api_key
+  relations
+    define tenant: [tenant]
+    define owner: [user, group#member]
+    define can_read: owner or admin from tenant
+    define can_revoke: owner or admin from tenant
+    define can_manage_access: owner or admin from tenant
+
+type run
+  relations
+    define parent: [agent, workflow]
+    define can_read: can_read from parent
+    define can_approve: can_approve from parent
+    define can_cancel: can_run from parent

@@ -251,8 +251,12 @@ AgentSpec.__init__ = init
 atexit.register(lambda: open(os.environ["AC1_RECORD"], "w").write(json.dumps(rows)))
 '''
 SUITES = ("packages/shared-schemas/tests", "packages/agent-runtime/runtime_tests")
-# test_model_settings.py builds specs with model settings that main (the comparison base) rejects.
-OWN = ("test_ac1_contracts.py", "test_ac1_contracts_acceptance.py", "test_model_settings.py", "test_processors.py")
+# test_model_settings.py builds specs with model settings that main (the comparison base) rejects, and
+# test_agent_tools.py specs with `agent_tools`.
+OWN = (
+    "test_ac1_contracts.py", "test_ac1_contracts_acceptance.py", "test_model_settings.py", "test_processors.py",
+    "test_agent_tools.py",
+)
 
 
 @pytest.fixture(scope="module")

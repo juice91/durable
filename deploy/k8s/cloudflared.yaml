@@ -17,6 +17,9 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: cloudflared}
+      # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
+      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_CLOUDFLARED@@"}
     spec:
       terminationGracePeriodSeconds: 30
       securityContext:
@@ -33,7 +36,7 @@ spec:
           env:
             - name: TUNNEL_TOKEN
               valueFrom:
-                secretKeyRef: {name: pydanticos-secrets, key: CLOUDFLARE_TUNNEL_TOKEN, optional: true}
+                secretKeyRef: {name: cloudflared-secrets, key: CLOUDFLARE_TUNNEL_TOKEN, optional: true}
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532

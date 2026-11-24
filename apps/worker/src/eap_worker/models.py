@@ -42,6 +42,8 @@ Model ids are `"{spec.model.provider}:{spec.model.name}"`:
                  `retrieve` call per query (several calls in one response, like a model's parallel
                  calls), then answers `Sources: [n] <title>: <url>; ...` with every numbered source
                  of every retrieve result of the turn, in order. Proves run-wide source numbers.
+- `test:supervisor` (agents as tools) takes `{"calls": [{"tool": <name>, "input": <text>}, ...]}`: one call per
+                 model response, then `Supervisor: ` and every tool result (`ok: <result JSON>` or `error: <message>`).
 - `test:memory` (RM.12) parses `remember <key>=<value>` (any number, values without spaces; a value
                  that parses as JSON is used as such, e.g. `age=42`) and `forget <key>` from the input
                  and, when `update_working_memory` is offered and there is something to change,
@@ -562,6 +564,44 @@ def _retrieve_multi_model_plan(messages: list[ModelMessage], info: AgentInfo) ->
 
 def scripted_retrieve_multi_model() -> FunctionModel:
     return _planned_model(_retrieve_multi_model_plan, "scripted-retrieve-multi")
+
+
+def _supervisor_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    """`test:supervisor` (agents as tools): the input is JSON `{"calls": [{"tool": <name>, "input": <text>}, ...]}`.
+    Call i is one model response (the agent runs them one after another); after the last it answers
+    `Supervisor: ` and every tool result of the turn (`ok:` the result JSON, or `error:` the message)
+    joined by ` | `. A prompt that is not such JSON is answered `Echo: <prompt>`."""
+    prompt = _last_prompt(messages)
+    try:
+        request = json.loads(prompt)
+    except ValueError:
+        request = None
+    calls = request.get("calls") if isinstance(request, dict) else None
+    if not isinstance(calls, list):
+        return "text", f"Echo: {prompt}"
+    start = 0
+    for i, m in enumerate(messages):
+        if isinstance(m, ModelRequest) and any(isinstance(p, UserPromptPart) for p in m.parts):
+            start = i
+    turn = messages[start:]
+    done = sum(1 for m in turn if isinstance(m, ModelResponse) and any(isinstance(p, ToolCallPart) for p in m.parts))
+    if done < len(calls):
+        call = calls[done]
+        return "tool", (str(call["tool"]), {"input": call.get("input", "")})
+    results = [
+        ("ok: " + json.dumps(r.content, sort_keys=True, default=str)) if r.outcome == "success"
+        else f"error: {r.content}"
+        for r in _tool_returns(turn)
+    ]
+    return "text", "Supervisor: " + " | ".join(results)
+
+
+def _supervisor_model_plan(messages: list[ModelMessage], info: AgentInfo) -> tuple[str, Any]:
+    return _as_output(*_supervisor_plan(messages, info), info)
+
+
+def scripted_supervisor_model() -> FunctionModel:
+    return _planned_model(_supervisor_model_plan, "scripted-supervisor")
 
 
 WORKING_MEMORY_TOOL = "update_working_memory"
@@ -1408,6 +1448,8 @@ def make_resolver(settings_getter: Any, *, fallback: bool = False):
                 return scripted_retrieve_model()
             if name == "retrieve-multi":
                 return scripted_retrieve_multi_model()
+            if name == "supervisor":
+                return scripted_supervisor_model()
             if name == "memory":
                 return scripted_memory_model()
             if name == "observer":

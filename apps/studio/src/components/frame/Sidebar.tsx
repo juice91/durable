@@ -25,6 +25,7 @@ import { usePaletteChordLabel, usePaletteKeyShortcuts } from "@/components/short
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { PRODUCT_NAME } from "./brand";
+import { CurrentUser } from "./CurrentUser";
 import { useFrame } from "./FrameContext";
 
 export const SIDEBAR_ID = "studio-sidebar";
@@ -238,6 +239,7 @@ export function SidebarNav({ rail = false, onNavigate, label = "Main" }: Sidebar
             ))}
           </nav>
         ) : null}
+        <CurrentUser rail={rail} />
         <ThemeMenu rail={rail} />
         {version && !rail ? (
           <p data-testid="studio-version" data-rail-hidden="" className="truncate px-2 pt-1 text-caption text-muted-foreground">

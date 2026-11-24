@@ -6,24 +6,18 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/lib.sh"
 
 SECRETS_ENV=""
-OP_REFS=""
 while (($#)); do
   case "$1" in
     --secrets-env) SECRETS_ENV=${2:?missing path after --secrets-env}; shift 2 ;;
-    --op-refs) OP_REFS=${2:?missing path after --op-refs}; shift 2 ;;
-    *) printf 'Usage: %s [--secrets-env FILE | --op-refs FILE]\n' "$0" >&2; exit 64 ;;
+    *) printf 'Usage: %s [--secrets-env FILE]\n' "$0" >&2; exit 64 ;;
   esac
 done
-if [[ -n "$SECRETS_ENV" && -n "$OP_REFS" ]]; then
-  printf 'Choose only one secrets input.\n' >&2
-  exit 64
-fi
 
 # Refuse a broad, symlinked, or writable-by-others data directory before touching Colima.
 validate_and_prepare_data_dir
 
 tmp_files=()
-secret_file="" rendered_file="" migrate_status_file="" migrate_err_file="" runs_err_file=""
+secret_file="" rendered_file="" migrate_status_file="" migrate_err_file="" runs_err_file="" platform_secret_file="" iam_rendered_file="" cloudflared_secret_file="" zitadel_secret_file="" openfga_secret_file=""
 cleanup() {
   local path
   if ((${#tmp_files[@]})); then
@@ -64,41 +58,49 @@ for command_name in colima docker kubectl git mktemp sed awk realpath stat; do
   require_command "$command_name"
 done
 
-# Resolve the 1Password references before anything else touches Colima, so a missing `op`
-# or token fails fast. Only `op` ever sees the service-account token: it is unset right after.
-op_file=""
-if [[ -n "$OP_REFS" ]]; then
-  require_command op
-  [[ -r "$OP_REFS" ]] || { printf 'The --op-refs file is not readable: %s\n' "$OP_REFS" >&2; exit 1; }
-  [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]] || {
-    printf 'OP_SERVICE_ACCOUNT_TOKEN is not set. Put the 1Password service-account token in runner.env, or export it.\n' >&2
-    exit 1
-  }
-  op whoami >/dev/null || { printf '1Password rejected the service-account token (op whoami failed).\n' >&2; exit 1; }
-  make_tmp op-secrets op_file
-  # --force: mktemp already created the file. The values go only to the mode-600 file.
-  op inject --force --file-mode 0600 -i "$OP_REFS" -o "$op_file" >/dev/null \
-    || { printf 'op inject failed; check the vault, item and field names in %s.\n' "$OP_REFS" >&2; exit 1; }
-  unset OP_SERVICE_ACCOUNT_TOKEN
-  # inject keeps one output line per KEY=ref line. A secret value containing a newline would add
-  # lines, which `--from-env-file` would read as extra variables; refuse without echoing anything.
-  [[ "$(awk '!/^[[:space:]]*(#|$)/ {n++} END {print n + 0}' "$OP_REFS")" == "$(awk '!/^[[:space:]]*(#|$)/ {n++} END {print n + 0}' "$op_file")" ]] || {
-    printf 'A 1Password value contains a newline, so the injected file has a different number of KEY=value lines than %s. Refusing to use it.\n' "$OP_REFS" >&2
-    exit 1
-  }
-fi
 
-# One writable mount. Colima 0.10 treats an empty mounts list as "mount ~"
-# (yaml.go: Mounts != nil && len == 0). Passing this single --mount replaces
-# the built-in home mount; it is not added beside it. Colima also injects its cache
+# Writable mounts: the data directory, plus the backup directory when it lies outside it (a folder on an external volume,
+# PYDANTICOS_BACKUP_DIR). Colima 0.10 treats an empty mounts list as "mount ~" (yaml.go: Mounts != nil && len == 0).
+# Passing --mount replaces the built-in home mount; it is not added beside it. Colima also injects its cache
 # directory unless that path is inside a configured mount, so the cache is
 # placed under the data directory via XDG_CACHE_HOME for this command only.
-mount_arg="${PYDANTICOS_DATA_DIR}:w"
+mount_args=(--mount "${PYDANTICOS_DATA_DIR}:w")
+backup_outside_data=0
+if [[ "${PYDANTICOS_BACKUP_DIR}/" != "${PYDANTICOS_DATA_DIR}/"* ]]; then
+  backup_outside_data=1
+  mount_args+=(--mount "${PYDANTICOS_BACKUP_DIR}:w")
+fi
 cache_home="${PYDANTICOS_DATA_DIR}/xdg-cache"
 colima_config="${COLIMA_HOME:-${HOME}/.colima}/${PROFILE}/colima.yaml"
 
-assert_running_mount_is_only_data_dir() {
-  local found=0 location writable line loc
+# Before anything touches the VM or builds an image: the host volume holding ~/.colima must have room.
+host_disk_preflight
+warn_unpinned_kube_port "$colima_config"
+
+# Broad host locations that must never be mounted into the VM.
+mount_is_broad() { # LOCATION
+  local loc=${1%/} parent
+  [[ -n "$loc" && "$loc" != "${HOME%/}" && "$loc" != /Users && "$loc" != /Users/Shared && "$loc" != "${PYDANTICOS_VOLUMES_DIR:-/Volumes}" ]] || return 0
+  parent=$(dirname -- "$(realpath "$HOME")")
+  while [[ "$parent" != "/" ]]; do
+    [[ "$loc" != "$parent" ]] || return 0
+    parent=$(dirname -- "$parent")
+  done
+  return 1
+}
+
+# True when LOCATION is PATH or one of its parents.
+mount_covers() { # LOCATION PATH
+  local loc=${1%/}
+  [[ "$2" == "$loc" || "$2" == "$loc"/* ]]
+}
+
+# An existing profile's colima.yaml is only read, never rewritten. Its mounts must be exactly what the deployment needs:
+# a writable mount of the data directory, and (backup directory outside it) a writable mount of the backup directory or
+# of a folder or volume that contains it. Anything else, such as the home directory, is refused. A missing one is
+# reported with the YAML to add.
+assert_running_mounts_match() {
+  local line location writable loc ok_data=0 ok_backup=0 extra=() lacking=() yaml=""
   if [[ ! -f "$colima_config" ]]; then
     printf 'Refusing to start: profile %s is already running but %s is missing, so its host mounts cannot be verified. Stop the profile and rerun.\n' "$PROFILE" "$colima_config" >&2
     exit 1
@@ -107,8 +109,14 @@ assert_running_mount_is_only_data_dir() {
     [[ -n "$line" ]] || continue
     location=${line%%|*}
     writable=${line#*|}
-    found=$((found + 1))
-    loc=$location
+    loc=${location%/}
+    if [[ "$loc" == "$PYDANTICOS_DATA_DIR" ]]; then
+      [[ "$writable" == true ]] && ok_data=1
+    elif (( backup_outside_data )) && ! mount_is_broad "$loc" && mount_covers "$loc" "$PYDANTICOS_BACKUP_DIR"; then
+      [[ "$writable" == true ]] && ok_backup=1
+    else
+      extra+=("$location")
+    fi
   done < <(awk '
     /^[[:space:]]*#/ {next}
     /^mounts:/ {inmount=1; next}
@@ -121,8 +129,19 @@ assert_running_mount_is_only_data_dir() {
     }
     inmount && /writable:/ {print loc "|" $2}
   ' "$colima_config")
-  if [[ "$found" -ne 1 || "$loc" != "$PYDANTICOS_DATA_DIR" || "$writable" != "true" ]]; then
-    printf 'Refusing to start: profile %s is running with host mounts other than %s. Stop it and rerun so Colima replaces the home mount with only that directory.\n' "$PROFILE" "$PYDANTICOS_DATA_DIR" >&2
+  if ((${#extra[@]})); then
+    printf 'Refusing to start: profile %s is running with host mounts other than the data directory%s (%s). Stop it and rerun so Colima replaces them with only what is needed.\n' \
+      "$PROFILE" "$( ((backup_outside_data)) && printf ' and the backup directory %s' "$PYDANTICOS_BACKUP_DIR")" "${extra[*]}" >&2
+    exit 1
+  fi
+  (( ok_data )) || { lacking+=("$PYDANTICOS_DATA_DIR"); yaml+=$'  - location: '"${PYDANTICOS_DATA_DIR}"$'\n    writable: true\n'; }
+  if (( backup_outside_data && ! ok_backup )); then
+    lacking+=("$PYDANTICOS_BACKUP_DIR")
+    yaml+=$'  - location: '"${PYDANTICOS_BACKUP_DIR}"$'\n    writable: true\n'
+  fi
+  if ((${#lacking[@]})); then
+    printf 'Refusing to start: profile %s is running but %s has no writable mount for: %s.\nStop the profile (colima stop %s), add the following under "mounts:" in that file (colima.yaml is not rewritten by this script), then rerun:\n\nmounts:\n%s\n' \
+      "$PROFILE" "$colima_config" "${lacking[*]}" "$PROFILE" "$yaml" >&2
     exit 1
   fi
 }
@@ -132,14 +151,18 @@ assert_running_mount_is_only_data_dir() {
 # process: colima, limactl"), which stopped the VM right after the first successful deploy.
 # Starting Colima with RUNNER_TRACKING_ID cleared keeps its host processes out of that cleanup.
 if colima status "$PROFILE" >/dev/null 2>&1; then
-  assert_running_mount_is_only_data_dir
+  assert_running_mounts_match
 # One awk reads all of `colima list`; a `| grep -q` here could SIGPIPE the producer, turn the
 # condition false under pipefail and wrongly create a new profile over an existing one.
 elif colima_profiles=$(colima list 2>/dev/null) \
   && awk -v p="$PROFILE" 'NR > 1 && $1 == p {found = 1} END {exit !found}' <<<"$colima_profiles"; then
-  RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false --mount "$mount_arg"
+  RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false "${mount_args[@]}"
 else
-  RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false --mount "$mount_arg" --kubernetes --runtime docker --cpu 8 --memory 32 --disk 100
+  # A new cluster encrypts Secrets at rest from its first start (--secrets-encryption). Passing --k3s-arg replaces
+  # Colima's built-in --disable=traefik, so that one is repeated. An existing cluster is converted once with
+  # deploy/scripts/k3s-secrets-encryption.sh (deploy/README.md, "Secrets encryption at rest").
+  RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false "${mount_args[@]}" --kubernetes --runtime docker --cpu 8 --memory 32 --disk 100 \
+    --k3s-arg=--disable=traefik --k3s-arg=--secrets-encryption
 fi
 
 guard_contexts
@@ -179,17 +202,20 @@ until colima ssh -p "$PROFILE" -- curl -s -o /dev/null -m 5 https://registry-1.d
   sleep 3
 done
 
-build_image() { # DOCKERFILE TAG
-  local attempt
+build_image() { # DOCKERFILE TAG [docker build args...]
+  local attempt dockerfile=$1 tag=$2
+  shift 2
   for attempt in 1 2; do
-    if docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/$1" -t "$2" "$REPO_ROOT"; then
+    if docker_for_profile build --platform linux/arm64 -f "$REPO_ROOT/deploy/docker/$dockerfile" -t "$tag" "$@" "$REPO_ROOT"; then
       return 0
     fi
-    (( attempt == 2 )) || { printf 'Image build for %s failed; retrying once in 15 seconds.\n' "$1" >&2; sleep 15; }
+    (( attempt == 2 )) || { printf 'Image build for %s failed; retrying once in 15 seconds.\n' "$dockerfile" >&2; sleep 15; }
   done
   return 1
 }
-build_image python.Dockerfile "$python_image"
+# The image's platform_version is <project version>+<this sha>; the deploy workflow passes the commit it deploys.
+build_sha=${EAP_BUILD_SHA:-$git_sha}
+build_image python.Dockerfile "$python_image" --build-arg "EAP_BUILD_SHA=${build_sha:0:12}"
 build_image studio.Dockerfile "$studio_image"
 # The runner Dockerfiles need no repo files; a small context keeps the builds fast.
 build_runner_image() { # DOCKERFILE TAG
@@ -205,14 +231,69 @@ build_runner_image() { # DOCKERFILE TAG
 build_runner_image mcp-runner-node.Dockerfile "$runner_node_image"
 build_runner_image mcp-runner-python.Dockerfile "$runner_python_image"
 
+# Keep the VM's build cache bounded: it reached 61 GB and filled the host disk (2026-11-23). Cache used in the last
+# PYDANTICOS_BUILDER_PRUNE_AGE (default 24h) stays, so the layers just built and the next rebuild are warm.
+builder_prune_age=${PYDANTICOS_BUILDER_PRUNE_AGE:-24h}
+if [[ "$builder_prune_age" =~ ^[0-9]+[hm]$ ]]; then
+  docker_for_profile builder prune --all --force --filter "until=${builder_prune_age}" \
+    || printf 'Warning: pruning the build cache in the VM failed; the deploy carries on.\n' >&2
+else
+  printf 'Warning: PYDANTICOS_BUILDER_PRUNE_AGE must look like 24h or 90m; not pruning the build cache.\n' >&2
+fi
+
 kubectl_for_profile apply -f "$REPO_ROOT/deploy/k8s/namespace.yaml"
+kubectl_for_profile apply -f "$REPO_ROOT/deploy/k8s/iam/namespace.yaml"
+
+gateway_line=$(colima ssh -p "$PROFILE" -- awk '/host\.lima\.internal/ {print; exit}' /etc/hosts)
+IFS=$' \t' read -r host_gateway _ <<<"$gateway_line"
+if [[ ! "$host_gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  printf 'Refusing to continue: could not read the Lima host gateway (host.lima.internal) from inside the VM.\n' >&2
+  exit 1
+fi
+
+# The API server addresses NetworkPolicies see (after Service NAT): the `kubernetes` Service ClusterIP
+# and its endpoint, read from the cluster rather than assumed. networkpolicy.yaml and configmap.yaml
+# carry the k3s/colima defaults (10.43.0.1, 192.168.5.3), replaced here via tokens so one value
+# cannot be rewritten by another's substitution. Exported for anything run from this script.
+api_service_ip=$(kubectl_for_profile --namespace=default get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+api_endpoint_ips=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+ipv4_re='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+[[ "$api_service_ip" =~ $ipv4_re ]] || {
+  printf 'Refusing to continue: could not read the kubernetes Service address (kubectl get svc kubernetes).\n' >&2
+  exit 1
+}
+read -r -a api_endpoint_list <<<"$api_endpoint_ips"
+if [[ ${#api_endpoint_list[@]} -ne 1 || ! "${api_endpoint_list[0]}" =~ $ipv4_re ]]; then
+  printf 'Refusing to continue: expected exactly one kubernetes endpoint address (kubectl get endpoints kubernetes), got: %s\n' "${api_endpoint_ips:-none}" >&2
+  exit 1
+fi
+api_endpoint_ip=${api_endpoint_list[0]}
+# Policies see the endpoint port after Service NAT: 6443 on stock Kubernetes, 57345 on colima's k3s.
+api_endpoint_port=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null || true)
+[[ "$api_endpoint_port" =~ ^[0-9]{1,5}$ ]] || {
+  printf 'Refusing to continue: could not read the kubernetes endpoint port (kubectl get endpoints kubernetes).\n' >&2
+  exit 1
+}
+export EAP_MCP_API_SERVER_CIDRS="${api_service_ip}/32,${api_endpoint_ip}/32"
+export EAP_MCP_API_SERVER_PORTS="443,${api_endpoint_port}"
+
+# Substitutions shared by every manifest set rendered below (platform, iam): the Lima gateway and the API server
+# addresses read above replace the committed k3s/colima defaults. Tokens first, so one value cannot be rewritten by
+# another's substitution.
+cluster_sed=(
+  -e "s|10\.43\.0\.1/32|@@API_SERVICE_CIDR@@|g"
+  -e "s|192\.168\.5\.3/32|@@API_ENDPOINT_CIDR@@|g"
+  -e "s|192.168.5.2|${host_gateway}|g"
+  -e "s|@@API_SERVICE_CIDR@@|${api_service_ip}/32|g"
+  -e "s|@@API_ENDPOINT_CIDR@@|${api_endpoint_ip}/32|g"
+  -e "s|port: 6443$|port: ${api_endpoint_port}|g"
+)
+
 
 # Collect the secrets into one mode-600 file (never the operator's own file, which is only read).
 source_file=""
 make_tmp secrets secret_file
-if [[ -n "$op_file" ]]; then
-  source_file=$op_file
-elif [[ -n "$SECRETS_ENV" ]]; then
+if [[ -n "$SECRETS_ENV" ]]; then
   [[ -r "$SECRETS_ENV" ]] || { printf 'Secrets input is not readable.\n' >&2; exit 1; }
   source_file=$SECRETS_ENV
 else
@@ -235,13 +316,13 @@ for key in "${base_keys[@]}"; do
     esac
     exit 1
   fi
-  # An unreplaced op-bootstrap placeholder must never reach the cluster.
-  [[ "$value" != CHANGE_ME* ]] || { printf 'Secret %s is still a placeholder; run litellm-deploy-key.sh.\n' "$key" >&2; exit 1; }
+  # An unreplaced placeholder must never reach the cluster.
+  [[ "$value" != CHANGE_ME* ]] || { printf 'Secret %s is still a placeholder.\n' "$key" >&2; exit 1; }
 done
 
 # EAP_DATABASE_URL / EAP_DBOS_URL follow from the roles in deploy/k8s/configmap.yaml (eap_app,
 # eap_dbos), their databases, and the in-cluster Postgres service. They are derived unless a
-# non-empty value was supplied, so 1Password stores only the passwords.
+# non-empty value was supplied, so the secrets file needs only the passwords.
 derive_url() {
   local key=$1 scheme=$2 role=$3 password_key=$4 database=$5 password
   [[ -z "$(dotenv_get "$secret_file" "$key")" ]] || return 0
@@ -256,8 +337,79 @@ derive_url() {
 derive_url EAP_DATABASE_URL postgresql+psycopg eap_app EAP_APP_DATABASE_PASSWORD eap_app
 derive_url EAP_DBOS_URL postgresql eap_dbos EAP_DBOS_DATABASE_PASSWORD eap_dbos
 
-kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
-  --from-env-file="$secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
+# Identity (ZITADEL) and authorization (OpenFGA), namespace iam. Each service is optional and independent: with none of
+# its fields the deploy still succeeds and it stays at 0 replicas; with only some of them the deploy stops (a
+# half-configured identity service must not start). Values are never printed, only field names.
+zitadel_keys=(ZITADEL_MASTERKEY ZITADEL_DB_PASSWORD ZITADEL_ADMIN_USERNAME ZITADEL_ADMIN_PASSWORD)
+openfga_keys=(OPENFGA_DB_PASSWORD OPENFGA_PRESHARED_KEY)
+iam_service_state() { # KEY... -> prints on, off; exits 1 when only some of the fields are set
+  local key set=0 missing=""
+  for key in "$@"; do
+    if [[ -n "$(dotenv_get "$secret_file" "$key")" ]]; then set=$((set + 1)); else missing+="${missing:+, }$key"; fi
+  done
+  if ((set == 0)); then printf 'off\n'; return 0; fi
+  if ((set == $#)); then printf 'on\n'; return 0; fi
+  printf 'Incomplete identity configuration: set all of %s or none; missing or empty: %s.\n' "$*" "$missing" >&2
+  return 1
+}
+require_url_safe() { # KEY MIN_LENGTH
+  local value
+  value=$(dotenv_get "$secret_file" "$1")
+  [[ "$value" =~ ^[A-Za-z0-9._~-]+$ && ${#value} -ge $2 ]] || {
+    printf '%s may only contain letters, digits and ._~- and must have at least %s characters.\n' "$1" "$2" >&2
+    exit 1
+  }
+}
+zitadel_state=$(iam_service_state "${zitadel_keys[@]}") || exit 1
+openfga_state=$(iam_service_state "${openfga_keys[@]}") || exit 1
+if [[ "$zitadel_state" == on ]]; then
+  [[ "$(dotenv_get "$secret_file" ZITADEL_MASTERKEY | tr -d '\n' | wc -c | tr -d ' ')" == 32 ]] || {
+    printf 'ZITADEL_MASTERKEY must be exactly 32 characters.\n' >&2
+    exit 1
+  }
+  require_url_safe ZITADEL_DB_PASSWORD 16
+fi
+if [[ "$openfga_state" == on ]]; then
+  require_url_safe OPENFGA_DB_PASSWORD 16
+  require_url_safe OPENFGA_PRESHARED_KEY 16
+fi
+
+# One Secret per component, the same split a secret manager would produce. The platform Secret
+# never carries the identity secrets, except the two database passwords the backup job needs; the tunnel token has its own.
+  make_tmp platform-secrets platform_secret_file
+  grep -v -E '^(CLOUDFLARE_TUNNEL_TOKEN|ZITADEL_MASTERKEY|ZITADEL_ADMIN_USERNAME|ZITADEL_ADMIN_PASSWORD|OPENFGA_PRESHARED_KEY)=' "$secret_file" >"$platform_secret_file" || true
+  make_tmp cloudflared-secrets cloudflared_secret_file
+  grep -E '^CLOUDFLARE_TUNNEL_TOKEN=.' "$secret_file" >"$cloudflared_secret_file" || true
+  make_tmp zitadel-secrets zitadel_secret_file
+  grep -E '^ZITADEL_[A-Z_]+=.' "$secret_file" >"$zitadel_secret_file" || true
+  make_tmp openfga-secrets openfga_secret_file
+  grep -E '^OPENFGA_[A-Z_]+=.' "$secret_file" >"$openfga_secret_file" || true
+
+  kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
+    --from-env-file="$platform_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
+  kubectl_for_profile -n "$NAMESPACE" create secret generic cloudflared-secrets \
+    --from-env-file="$cloudflared_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
+  kubectl_for_profile -n iam create secret generic zitadel-secrets \
+    --from-env-file="$zitadel_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
+  kubectl_for_profile -n iam create secret generic openfga-secrets \
+    --from-env-file="$openfga_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
+  # iam-secrets held both services' fields before the split; nothing reads it any more.
+  kubectl_for_profile -n iam delete secret iam-secrets --ignore-not-found >/dev/null
+
+# A hash of the values each workload reads, stamped on its pod template (@@CHECKSUM_*@@ in the manifests): a rotated
+# value changes the pod spec, so the next deploy restarts exactly the workloads that read it, under the drain above
+# them. Postgres is left out on purpose: it reads its role passwords only when its volume is first initialised, so a
+# restart would only cause an outage. Only a truncated SHA-256 of the values is used; no value is printed.
+secrets_checksum() { # KEY...
+  local key
+  for key in "$@"; do printf '%s=%s\n' "$key" "$(dotenv_get "$secret_file" "$key")"; done | shasum -a 256 | cut -c1-16
+}
+checksum_platform=$(secrets_checksum EAP_DATABASE_URL EAP_DBOS_URL EAP_SECRETS_KEY EAP_AUDIT_HASH_SALT EAP_BLOB_S3_ACCESS_KEY EAP_BLOB_S3_SECRET_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN EAP_ZITADEL_MACHINE_KEY EAP_ZITADEL_PROJECT_ID EAP_ZITADEL_ORG_TENANT_MAP EAP_ZITADEL_STUDIO_CLIENT_ID)
+# Studio reads only its two OIDC values from the Secret (the switch and the issuer come from the ConfigMap).
+checksum_studio=$(secrets_checksum EAP_ZITADEL_STUDIO_CLIENT_ID EAP_ZITADEL_PROJECT_ID)
+checksum_cloudflared=$(secrets_checksum CLOUDFLARE_TUNNEL_TOKEN)
+checksum_zitadel=$(secrets_checksum "${zitadel_keys[@]}")
+checksum_openfga=$(secrets_checksum "${openfga_keys[@]}")
 
 # Drain before applying a new worker template. See apps/worker/README.md ("drain, keep m1").
 # Not counted, because they do not block a deploy:
@@ -391,52 +543,16 @@ if kubectl_for_profile -n "$NAMESPACE" get statefulset/worker >/dev/null 2>&1; t
   done
 fi
 
-gateway_line=$(colima ssh -p "$PROFILE" -- awk '/host\.lima\.internal/ {print; exit}' /etc/hosts)
-IFS=$' \t' read -r host_gateway _ <<<"$gateway_line"
-if [[ ! "$host_gateway" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-  printf 'Refusing to continue: could not read the Lima host gateway (host.lima.internal) from inside the VM.\n' >&2
-  exit 1
-fi
-
-# The API server addresses NetworkPolicies see (after Service NAT): the `kubernetes` Service ClusterIP
-# and its endpoint, read from the cluster rather than assumed. networkpolicy.yaml and configmap.yaml
-# carry the k3s/colima defaults (10.43.0.1, 192.168.5.3), replaced here via tokens so one value
-# cannot be rewritten by another's substitution. Exported for anything run from this script.
-api_service_ip=$(kubectl_for_profile --namespace=default get svc kubernetes -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
-api_endpoint_ips=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
-ipv4_re='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-[[ "$api_service_ip" =~ $ipv4_re ]] || {
-  printf 'Refusing to continue: could not read the kubernetes Service address (kubectl get svc kubernetes).\n' >&2
-  exit 1
-}
-read -r -a api_endpoint_list <<<"$api_endpoint_ips"
-if [[ ${#api_endpoint_list[@]} -ne 1 || ! "${api_endpoint_list[0]}" =~ $ipv4_re ]]; then
-  printf 'Refusing to continue: expected exactly one kubernetes endpoint address (kubectl get endpoints kubernetes), got: %s\n' "${api_endpoint_ips:-none}" >&2
-  exit 1
-fi
-api_endpoint_ip=${api_endpoint_list[0]}
-# Policies see the endpoint port after Service NAT: 6443 on stock Kubernetes, 57345 on colima's k3s.
-api_endpoint_port=$(kubectl_for_profile --namespace=default get endpoints kubernetes -o jsonpath='{.subsets[0].ports[0].port}' 2>/dev/null || true)
-[[ "$api_endpoint_port" =~ ^[0-9]{1,5}$ ]] || {
-  printf 'Refusing to continue: could not read the kubernetes endpoint port (kubectl get endpoints kubernetes).\n' >&2
-  exit 1
-}
-export EAP_MCP_API_SERVER_CIDRS="${api_service_ip}/32,${api_endpoint_ip}/32"
-export EAP_MCP_API_SERVER_PORTS="443,${api_endpoint_port}"
-
 make_tmp rendered rendered_file
 kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
-  | sed \
+  | sed "${cluster_sed[@]}" \
     -e "s|pydanticos-python:dev|${python_image}|g" \
     -e "s|pydanticos-studio:dev|${studio_image}|g" \
-    -e "s|/var/lib/pydanticos-backups|${PYDANTICOS_BACKUP_DIR}|g" \
-    -e "s|10\.43\.0\.1/32|@@API_SERVICE_CIDR@@|g" \
-    -e "s|192\.168\.5\.3/32|@@API_ENDPOINT_CIDR@@|g" \
-    -e "s|192.168.5.2|${host_gateway}|g" \
-    -e "s|@@API_SERVICE_CIDR@@|${api_service_ip}/32|g" \
-    -e "s|@@API_ENDPOINT_CIDR@@|${api_endpoint_ip}/32|g" \
-    -e "s|port: 6443$|port: ${api_endpoint_port}|g" \
+    -e "s|/var/lib/pydanticos-backup-dir|${PYDANTICOS_BACKUP_DIR}|g" \
     -e "s|EAP_MCP_API_SERVER_PORTS: 443,6443|EAP_MCP_API_SERVER_PORTS: 443,${api_endpoint_port}|g" \
+    -e "s|@@CHECKSUM_PLATFORM@@|${checksum_platform}|g" \
+    -e "s|@@CHECKSUM_CLOUDFLARED@@|${checksum_cloudflared}|g" \
+    -e "s|@@CHECKSUM_STUDIO@@|${checksum_studio}|g" \
   >"$rendered_file"
 if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
   cp "$rendered_file" "$PYDANTICOS_RENDER_OUT"
@@ -516,6 +632,53 @@ if [[ -n "$(dotenv_get "$secret_file" CLOUDFLARE_TUNNEL_TOKEN)" ]]; then
 else
   kubectl_for_profile -n "$NAMESPACE" scale deployment/cloudflared --replicas=0
   printf 'No CLOUDFLARE_TUNNEL_TOKEN in the deploy secrets: the Cloudflare Tunnel connector stays at 0 replicas.\n'
+fi
+
+# Identity (ZITADEL) and authorization (OpenFGA): deploy/k8s/iam, namespace iam. The manifests are always applied (both
+# Deployments at 0 replicas, plus the policies); a service is scaled up only when its deploy secrets are complete.
+# The database and role of each service are created here, idempotently and with the password from stdin (never on a
+# command line), because Postgres runs its init script only on a fresh data volume. The role keeps CONNECT on its own
+# database only. ZITADEL's role may create databases: `zitadel init` insists on it, and nothing else can connect to
+# the databases it creates because CONNECT is revoked from PUBLIC.
+create_iam_database() { # ROLE PASSWORD_KEY CREATEDB|NOCREATEDB
+  local role=$1 password_key=$2 createdb=$3
+  # Single quotes are deliberate: the postgres container expands its own password.
+  # shellcheck disable=SC2016
+  {
+    dotenv_get "$secret_file" "$password_key"
+    cat <<SQL
+SELECT format('CREATE ROLE %I WITH LOGIN PASSWORD %L', '${role}', :'pw')
+  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') \\gexec
+SELECT format('ALTER ROLE %I WITH LOGIN ${createdb} PASSWORD %L', '${role}', :'pw') \\gexec
+SELECT 'CREATE DATABASE ${role} OWNER ${role}'
+  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${role}') \\gexec
+REVOKE CONNECT ON DATABASE ${role} FROM PUBLIC;
+GRANT CONNECT ON DATABASE ${role} TO ${role};
+SQL
+  } | kubectl_for_profile -n "$NAMESPACE" exec -i postgres-0 -- \
+    sh -c 'IFS= read -r pw; PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 --set=pw="$pw" -f - >/dev/null'
+}
+
+make_tmp iam-rendered iam_rendered_file
+kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s/iam" \
+  | sed "${cluster_sed[@]}" -e "s|@@CHECKSUM_ZITADEL@@|${checksum_zitadel}|g" -e "s|@@CHECKSUM_OPENFGA@@|${checksum_openfga}|g" >"$iam_rendered_file"
+kubectl_for_profile apply -f "$iam_rendered_file"
+
+if [[ "$openfga_state" == on ]]; then
+  create_iam_database openfga OPENFGA_DB_PASSWORD NOCREATEDB
+  kubectl_for_profile -n iam scale deployment/openfga --replicas=1
+  kubectl_for_profile -n iam rollout status deployment/openfga --timeout=5m
+else
+  kubectl_for_profile -n iam scale deployment/openfga --replicas=0
+  printf 'No OpenFGA fields in the deploy secrets: OpenFGA stays at 0 replicas.\n'
+fi
+if [[ "$zitadel_state" == on ]]; then
+  create_iam_database zitadel ZITADEL_DB_PASSWORD CREATEDB
+  kubectl_for_profile -n iam scale deployment/zitadel --replicas=1
+  kubectl_for_profile -n iam rollout status deployment/zitadel --timeout=10m
+else
+  kubectl_for_profile -n iam scale deployment/zitadel --replicas=0
+  printf 'No ZITADEL fields in the deploy secrets: ZITADEL stays at 0 replicas.\n'
 fi
 
 printf 'Deployed %s and %s to %s.\n' "$python_image" "$studio_image" "$EXPECTED_CONTEXT"

@@ -1,3 +1,4 @@
+import { subjectLabel } from "@/lib/subjects";
 import React from "react";
 import { CopyableText } from "@/components/ui/CopyableText";
 import { SafeMarkdown } from "@/components/markdown/SafeMarkdown";
@@ -300,7 +301,8 @@ const TOOL_DECISION_TITLES: Record<string, string> = {
 };
 
 function ToolDecisionLine({ event }: { event: RunEvent }) {
-  const by = factText(event.data.decided_by);
+  const decidedBy = factText(event.data.decided_by);
+  const by = decidedBy === null ? null : subjectLabel(decidedBy);
   const comment = factText(event.data.comment);
   return (
     <div className="text-sm" data-testid="event-tool-decision" data-decision={event.type}>
@@ -312,6 +314,49 @@ function ToolDecisionLine({ event }: { event: RunEvent }) {
       </span>
       {comment ? <span className="mt-1 block whitespace-pre-wrap text-xs text-muted-foreground">{comment}</span> : null}
     </div>
+  );
+}
+
+// ------------------------------------------------------------- agents as tools
+
+const AGENT_TOOL_STATUS_TITLES: Record<string, string> = {
+  completed: "Agent call completed",
+  refused: "Agent call refused",
+  timeout: "Agent call timed out",
+  failed: "Agent call failed",
+};
+
+/** `agent_tool_started` / `agent_tool_completed`: ids, version, depth and outcome, never text. The child
+ * run's trace opens from the generic "Open child run trace" link under every event with a `child_run_id`. */
+function AgentToolLine({ event }: { event: RunEvent }) {
+  const data = event.data;
+  if (event.type === "agent_tool_started") {
+    return (
+      <Facts
+        testId="event-agent-tool-started"
+        title="Agent call started"
+        facts={[
+          ["tool", factText(data.tool_name)],
+          ["version", factNumber(data.version)],
+          ["depth", factNumber(data.depth)],
+          ["timeout", data.timeout_seconds !== undefined ? `${factNumber(data.timeout_seconds)} s` : null],
+        ]}
+      />
+    );
+  }
+  const status = factText(data.status);
+  const ok = status === "completed";
+  return (
+    <Facts
+      testId="event-agent-tool-completed"
+      title={(status && AGENT_TOOL_STATUS_TITLES[status]) || "Agent call ended"}
+      tone={ok ? "normal" : "error"}
+      facts={[
+        ["tool", factText(data.tool_name)],
+        ["error", factText(data.error_code)],
+        ["output truncated", data.truncated === true ? "yes" : null],
+      ]}
+    />
   );
 }
 
@@ -525,6 +570,9 @@ function EventItem({ event }: EventItemProps) {
       case "tool_denied":
       case "tool_approval_timed_out":
         return <ToolDecisionLine event={event} />;
+      case "agent_tool_started":
+      case "agent_tool_completed":
+        return <AgentToolLine event={event} />;
       case "processor_result":
         return <ProcessorLine data={event.data} />;
       case "embedding":

@@ -1,15 +1,31 @@
-"""Authentication dependency for the API."""
+"""Authentication dependencies for the API. Every call goes through the IAM identity chain (`eap_iam`).
 
-import os
+`current_principal` (people routes), `agui_principal` (`/api/v1/ag-ui/*`) and `otlp_principal` build a `RequestView`,
+ask the chain configured by EAP_IAM_IDENTITY (plug-ins `apikey`, `devloopback`, ...) and adapt the core `Principal` to
+the two compatibility shapes the routes and services were written against: `Principal(tenant_id, user_id)` and
+`AgUiPrincipal`. The credential code lives in the plug-ins; nothing here knows what a key or a dev bearer is.
+"""
+
 import re
 from typing import Annotated, Any, Literal
 
+from eap_iam import (
+    ACTION_INGEST_OTLP,
+    ACTION_RUN_AGUI,
+    AuthError,
+    IamConfigError,
+    RequestView,
+    require_iam_configured,
+)
+from eap_iam import Principal as IamPrincipal
+from eap_iam.config import AUTH_CONFIGURATION_ERROR, MODE_API_KEY, MODE_DEV, MODES, auth_mode as _auth_mode
+from eap_iam.messages import DEV_AUTH_DISABLED_DETAIL, INVALID_API_KEY_DETAIL, ORIGIN_NOT_ALLOWED_DETAIL
 from eap_observability import bind_log_context
-from eap_run_store import looks_like_api_key, normalize_origin
-from eap_api.deps import get_api_key_store
+from eap_run_store import RunActor, bind_actor, normalize_origin
 from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
+
+from eap_api.deps import iam_of
 
 
 class Principal(BaseModel):
@@ -19,109 +35,133 @@ class Principal(BaseModel):
     user_id: str
 
 
-# Regex for tenant/user: non-empty, [A-Za-z0-9_-]+
+# Regex for tenant/user of the dev bearer: non-empty, [A-Za-z0-9_-]+ (enforced by the devloopback plug-in).
 TENANT_USER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-AUTH_CONFIGURATION_ERROR = (
-    "no production authentication is configured; set EAP_AUTH_MODE=dev for local development only, "
-    "or EAP_AUTH_MODE=api_key to serve only the AG-UI routes (/api/v1/ag-ui/*) to tenant API keys"
-)
-# One answer, wherever the dev bearer is refused because dev mode is off.
-DEV_AUTH_DISABLED_DETAIL = "dev bearer authentication is not enabled"
+AUTH_MODE_DEV = MODE_DEV
+AUTH_MODE_API_KEY = MODE_API_KEY
+AUTH_MODES = MODES
 
-# EAP_AUTH_MODE (Q2 of the AG-UI plan, AGUI.9). Exact, case-sensitive values; anything else
-# (unset included) refuses to start, so a misconfigured deploy never comes up half-open.
-#   dev      the forgeable local bearer `dev:<tenant>:<user>` on every route, plus API keys on
-#            /api/v1/ag-ui/* (Studio, tests, local development);
-#   api_key  production for third-party frontends: tenant API keys on /api/v1/ag-ui/* are the only
-#            credential. Every other route answers 401 (the dev bearer is off, and a key is never
-#            accepted outside /ag-ui/*). Key management (/api/v1/api-keys) stays dev-only until
-#            enterprise auth, so keys are created by a dev-mode API on the same database.
-AUTH_MODE_DEV = "dev"
-AUTH_MODE_API_KEY = "api_key"
-AUTH_MODES = (AUTH_MODE_DEV, AUTH_MODE_API_KEY)
+__all__ = [
+    "AUTH_CONFIGURATION_ERROR",
+    "DEV_AUTH_DISABLED_DETAIL",
+    "INVALID_API_KEY_DETAIL",
+    "ORIGIN_NOT_ALLOWED_DETAIL",
+    "IamConfigError",
+    "require_iam_configured",
+]
 
 
 def auth_mode() -> str | None:
     """The configured EAP_AUTH_MODE when it is one of AUTH_MODES, else None."""
-    mode = os.environ.get("EAP_AUTH_MODE")
-    return mode if mode in AUTH_MODES else None
+    import os
+
+    return _auth_mode(os.environ)
 
 
-def dev_auth_enabled() -> bool:
-    return os.environ.get("EAP_AUTH_MODE") == AUTH_MODE_DEV
+def _view(request: Request, accepts: frozenset[str], action: str | None) -> RequestView:
+    client = request.client  # the TCP peer as the ASGI server reports it; no proxy header is ever consulted here
+    return RequestView(
+        headers={name.lower(): value for name, value in request.headers.items()},
+        peer_host=client.host if client else None,
+        accepts=accepts,
+        action=action,
+    )
 
 
-def require_auth_configured() -> str:
-    """create_app's check: start only with an explicit auth mode (RuntimeError otherwise)."""
-    mode = auth_mode()
-    if mode is None:
-        raise RuntimeError(AUTH_CONFIGURATION_ERROR)
-    return mode
+def refusal(exc: AuthError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.status,
+        detail=exc.detail,
+        headers={"WWW-Authenticate": "Bearer"} if exc.www_authenticate and exc.status == status.HTTP_401_UNAUTHORIZED else None,
+    )
+
+
+async def authenticate_request(
+    request: Request, accepts: frozenset[str], action: str | None = None
+) -> IamPrincipal:
+    """Run the identity chain for `request`: the principal, or the HTTPException the refusal maps to. The log
+    context for the rest of the request carries eap.tenant_id (the logs API filters on it)."""
+    try:
+        principal = await iam_of(request.app).chain.authenticate(_view(request, accepts, action))
+    except AuthError as exc:
+        raise refusal(exc) from None
+    bind_log_context(tenant_id=principal.tenant_id)
+    request.state.iam_principal = principal  # read by the audit middleware (eap_api.audit)
+    bind_actor(run_actor(principal))
+    return principal
+
+
+def run_actor(principal: IamPrincipal) -> RunActor:
+    """Who a run started by this request acts as (design 4.1): the user, the key (for its creator), or a run."""
+    owner = principal.extra.get("owner") if principal.kind == "api_key" else None
+    if owner:  # a personal API key: the run is the owner's
+        return RunActor(kind="user", subject=str(owner), on_behalf_of=str(owner))
+    on_behalf_of = principal.subject if principal.kind == "user" else principal.on_behalf_of
+    return RunActor(kind=principal.kind, subject=principal.subject, on_behalf_of=on_behalf_of)
+
+
+def bind_agui_actor(principal: "AgUiPrincipal") -> None:
+    """The same binding for the compatibility shape (the MCP control endpoint authenticates to it): a run a tool call
+    starts names who started it."""
+    if principal.kind == "api_key" and principal.owner_subject:
+        actor = RunActor(kind="user", subject=principal.owner_subject, on_behalf_of=principal.owner_subject)
+    elif principal.kind == "api_key":
+        actor = RunActor(kind="api_key", subject=str(principal.key_id))
+    elif principal.kind == "architect_run":
+        actor = RunActor(kind="run", subject=str(principal.user_id))
+    else:
+        actor = RunActor(kind="user", subject=str(principal.user_id), on_behalf_of=str(principal.user_id))
+    bind_actor(actor)
+
+
+# --- people routes: the dev bearer (and, later, user identity providers) ---------------------------
+
+USER_KINDS = frozenset({"user"})
+
+
+PEOPLE_KINDS = frozenset({"user", "service"})
+
+
+async def iam_principal(request: Request) -> IamPrincipal:
+    """The core principal of a people route (a user or a service identity, never an API key or a run token): the
+    dependency of `GET /api/v1/iam/capabilities`. Keys stay refused outside their own routes."""
+    return await authenticate_request(request, PEOPLE_KINDS, None)
+
+
+CorePrincipalDep = Annotated[IamPrincipal, Depends(iam_principal)]
+
+_IN_PROCESS_CHAIN: Any = None
+
+
+async def _in_process_principal(authorization: str | None) -> IamPrincipal:
+    """A direct Python call with no HTTP request (a test, a script): there is no network peer, so the call is as
+    local as a loopback one. HTTP never reaches this: FastAPI always injects the request."""
+    global _IN_PROCESS_CHAIN
+    if _IN_PROCESS_CHAIN is None:
+        from eap_iam import load_iam
+
+        _IN_PROCESS_CHAIN = load_iam().chain
+    headers = {"authorization": authorization} if authorization is not None else {}
+    try:
+        principal = await _IN_PROCESS_CHAIN.authenticate(RequestView(headers=headers, peer_host="127.0.0.1", accepts=USER_KINDS))
+    except AuthError as exc:
+        raise refusal(exc) from None
+    bind_log_context(tenant_id=principal.tenant_id)
+    bind_actor(run_actor(principal))
+    return principal
 
 
 async def current_principal(
-    authorization: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,  # kept for the OpenAPI contract; the chain reads the request
+    request: Request = None,  # type: ignore[assignment]
 ) -> Principal:
-    """
-    Parse Authorization header: Bearer dev:<tenant>:<user>.
-    
-    Returns Principal with tenant_id and user_id.
-    Raises 401 if missing or malformed, and 401 `dev bearer authentication is not enabled` when
-    EAP_AUTH_MODE is not dev (the api_key mode: no route outside /ag-ui/* has a credential).
-    """
-    if not dev_auth_enabled():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=DEV_AUTH_DISABLED_DETAIL,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    if authorization is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing Authorization header",
-        )
-    
-    # Parse "Bearer dev:<tenant>:<user>"
-    parts = authorization.split(":")
-    if len(parts) != 3 or parts[0] != "Bearer dev":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header format",
-        )
-    
-    tenant_id, user_id = parts[1], parts[2]
-    
-    if not tenant_id or not tenant_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Tenant ID cannot be empty",
-        )
-    
-    if not user_id or not user_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User ID cannot be empty",
-        )
-    
-    # Validate tenant_id and user_id match pattern
-    if not TENANT_USER_PATTERN.match(tenant_id):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid tenant ID format",
-        )
-    
-    if not TENANT_USER_PATTERN.match(user_id):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid user ID format",
-        )
-    
-    principal = Principal(tenant_id=tenant_id.strip(), user_id=user_id.strip())
-    # Log records for the rest of this request carry eap.tenant_id (the logs API filters on it). An
-    # async dependency runs in the request's own task, so the binding ends with the request.
-    bind_log_context(tenant_id=principal.tenant_id)
-    return principal
+    """The user behind a people route: tenant_id and user_id from a `kind="user"` identity provider (the dev bearer
+    over loopback today). Raises 401 when no provider recognises the request; API keys are never accepted here."""
+    if request is None:
+        principal = await _in_process_principal(authorization)
+    else:
+        principal = await authenticate_request(request, USER_KINDS, None)
+    return Principal(tenant_id=principal.tenant_id, user_id=principal.subject)
 
 
 def feedback_viewer(principal: Any) -> str | None:
@@ -134,13 +174,14 @@ def feedback_viewer(principal: Any) -> str | None:
 
 # --- AG-UI principals: a tenant API key or the dev bearer (AGUI.3; D16 of the AG-UI plan) -------
 
-# One answer for a malformed, unknown, wrong-secret, revoked or expired key.
-INVALID_API_KEY_DETAIL = "Invalid API key"
-ORIGIN_NOT_ALLOWED_DETAIL = "Origin not allowed for this API key"
 AGUI_RUN_SCOPE = "agui:run"
 MISSING_SCOPE_DETAIL = f"API key lacks the {AGUI_RUN_SCOPE} scope"
 AGENT_NOT_FOUND_DETAIL = "Agent not found"
 WORKFLOW_NOT_FOUND_DETAIL = "Workflow not found"
+OTLP_SCOPE = "otlp"
+MISSING_OTLP_SCOPE_DETAIL = f"API key lacks the {OTLP_SCOPE} scope"
+KEY_ROUTE_KINDS = frozenset({"user", "api_key"})
+MCP_ROUTE_KINDS = frozenset({"user", "api_key", "run"})
 
 
 class AgUiPrincipal(BaseModel):
@@ -160,6 +201,9 @@ class AgUiPrincipal(BaseModel):
     agent_ids: tuple[str, ...] | None = None
     workflow_ids: tuple[str, ...] | None = None
     allowed_origins: tuple[str, ...] | None = None
+    # A personal API key: the person it acts for and the key's prefix (`pos_<id>_`). None for a tenant key.
+    owner_subject: str | None = None
+    via_api_key: str | None = None
 
     @property
     def is_api_key(self) -> bool:
@@ -200,92 +244,50 @@ class AgUiPrincipal(BaseModel):
         return self.workflow_ids is not None and str(workflow_id) in self.workflow_ids
 
 
-def _unauthorized(detail: str) -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED, detail=detail, headers={"WWW-Authenticate": "Bearer"}
-    )
-
-
-async def agui_principal(
-    request: Request,
-    authorization: Annotated[str | None, Header()] = None,
-) -> AgUiPrincipal:
-    """The principal of an AG-UI route (`/api/v1/ag-ui/*` only; every other route keeps
-    `current_principal`, so a key is refused there).
-
-    `Authorization: Bearer pos_<id>_<secret>` is an API key: it works whatever EAP_AUTH_MODE is.
-    A malformed, unknown, wrong-secret, revoked or expired key is 401 `Invalid API key`; a key
-    without the `agui:run` scope is 403. Anything else is parsed as the dev bearer, which needs
-    EAP_AUTH_MODE=dev (else 401 `dev bearer authentication is not enabled`). The key itself is
-    never logged."""
-    if authorization is None:
-        raise _unauthorized("Missing Authorization header")
-
-    scheme, _, credential = authorization.partition(" ")
-    credential = credential.strip()
-    if scheme.lower() == "bearer" and looks_like_api_key(credential):
-        store = get_api_key_store(request)
-        # last_used_at is recorded only once the request passes the scope and origin checks, so a
-        # copied key that a foreign page keeps using (always 403) does not look recently used.
-        record = await run_in_threadpool(store.authenticate, credential, touch=False)
-        if record is None:
-            raise _unauthorized(INVALID_API_KEY_DETAIL)
-        if AGUI_RUN_SCOPE not in record.scopes:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MISSING_SCOPE_DETAIL)
-        require_allowed_origin(record.allowed_origins, request.headers.get("origin"))
-        await run_in_threadpool(store.touch_last_used, record.id)
-        bind_log_context(tenant_id=record.tenant_id)
+def to_agui_principal(principal: IamPrincipal, dev_scopes: tuple[str, ...] = ()) -> AgUiPrincipal:
+    """The compatibility shape of a core principal: a key, a live Architect run or a user (the dev bearer)."""
+    if principal.kind == "api_key":
+        order = principal.extra.get("scope_order")
         return AgUiPrincipal(
-            tenant_id=record.tenant_id,
+            tenant_id=principal.tenant_id,
             kind="api_key",
-            key_id=record.id,
-            scopes=record.scopes,
-            agent_ids=record.agent_ids,
-            workflow_ids=record.workflow_ids,
-            allowed_origins=record.allowed_origins,
+            key_id=principal.subject,
+            scopes=tuple(order) if order is not None else tuple(sorted(principal.scopes)),
+            agent_ids=principal.agent_ids,
+            workflow_ids=principal.workflow_ids,
+            allowed_origins=principal.allowed_origins,
+            owner_subject=principal.extra.get("owner"),
+            via_api_key=principal.extra.get("via_api_key"),
         )
-    if not dev_auth_enabled():
-        raise _unauthorized(DEV_AUTH_DISABLED_DETAIL)
-    dev = await current_principal(authorization)
-    return AgUiPrincipal(tenant_id=dev.tenant_id, kind="dev", user_id=dev.user_id, scopes=(AGUI_RUN_SCOPE,))
-
-
-OTLP_SCOPE = "otlp"
-MISSING_OTLP_SCOPE_DETAIL = f"API key lacks the {OTLP_SCOPE} scope"
-
-
-async def otlp_principal(
-    request: Request,
-    authorization: Annotated[str | None, Header()] = None,
-) -> AgUiPrincipal:
-    """The principal of `POST /api/v1/otlp/v1/traces`: a tenant API key with the `otlp` scope, or the
-    dev bearer (EAP_AUTH_MODE=dev). Unknown, revoked or expired key: 401 `Invalid API key`; a key
-    without the scope: 403. The tenant is the key's, never anything the payload says. An `Origin`
-    header (a browser exporter) must be one the key allows; exporters outside a browser send none."""
-    if authorization is None:
-        raise _unauthorized("Missing Authorization header")
-    scheme, _, credential = authorization.partition(" ")
-    credential = credential.strip()
-    if scheme.lower() == "bearer" and looks_like_api_key(credential):
-        store = get_api_key_store(request)
-        record = await run_in_threadpool(store.authenticate, credential, touch=False)
-        if record is None:
-            raise _unauthorized(INVALID_API_KEY_DETAIL)
-        if OTLP_SCOPE not in record.scopes:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=MISSING_OTLP_SCOPE_DETAIL)
-        origin = request.headers.get("origin")
-        if origin is not None:
-            require_allowed_origin(record.allowed_origins, origin)
-        await run_in_threadpool(store.touch_last_used, record.id)
-        bind_log_context(tenant_id=record.tenant_id)
+    if principal.kind == "run":
         return AgUiPrincipal(
-            tenant_id=record.tenant_id, kind="api_key", key_id=record.id, scopes=record.scopes,
-            agent_ids=record.agent_ids, workflow_ids=record.workflow_ids, allowed_origins=record.allowed_origins,
+            tenant_id=principal.tenant_id,
+            kind="architect_run",
+            user_id=principal.subject,
+            scopes=tuple(sorted(principal.scopes, reverse=True)),
         )
-    if not dev_auth_enabled():
-        raise _unauthorized(DEV_AUTH_DISABLED_DETAIL)
-    dev = await current_principal(authorization)
-    return AgUiPrincipal(tenant_id=dev.tenant_id, kind="dev", user_id=dev.user_id, scopes=(OTLP_SCOPE,))
+    return AgUiPrincipal(tenant_id=principal.tenant_id, kind="dev", user_id=principal.subject, scopes=dev_scopes)
+
+
+async def agui_principal(request: Request, authorization: Annotated[str | None, Header()] = None) -> AgUiPrincipal:  # noqa: ARG001
+    """The principal of an AG-UI route (`/api/v1/ag-ui/*` only; every other route keeps `current_principal`, so a
+    key is refused there).
+
+    `Authorization: Bearer pos_<id>_<secret>` is an API key: it works whatever EAP_AUTH_MODE is. A malformed,
+    unknown, wrong-secret, revoked or expired key is 401 `Invalid API key`; a key without the `agui:run` scope is 403.
+    Anything else is the dev bearer, which needs EAP_AUTH_MODE=dev (else 401 `dev bearer authentication is not
+    enabled`). The key itself is never logged."""
+    principal = await authenticate_request(request, KEY_ROUTE_KINDS, ACTION_RUN_AGUI)
+    return to_agui_principal(principal, (AGUI_RUN_SCOPE,))
+
+
+async def otlp_principal(request: Request, authorization: Annotated[str | None, Header()] = None) -> AgUiPrincipal:  # noqa: ARG001
+    """The principal of `POST /api/v1/otlp/v1/traces`: a tenant API key with the `otlp` scope, or the dev bearer
+    (EAP_AUTH_MODE=dev). Unknown, revoked or expired key: 401 `Invalid API key`; a key without the scope: 403. The
+    tenant is the key's, never anything the payload says. An `Origin` header (a browser exporter) must be one the key
+    allows; exporters outside a browser send none."""
+    principal = await authenticate_request(request, KEY_ROUTE_KINDS, ACTION_INGEST_OTLP)
+    return to_agui_principal(principal, (OTLP_SCOPE,))
 
 
 def _normalized_origins(origins: tuple[str, ...]) -> set[str]:
@@ -301,11 +303,10 @@ def _normalized_origins(origins: tuple[str, ...]) -> set[str]:
 
 
 def require_allowed_origin(allowed_origins: tuple[str, ...] | None, origin: str | None) -> None:
-    """The per-key origin check (D17; the AGUI.3 review obligation), after authentication and
-    before any stream, on every /ag-ui/* request: a present `Origin` not in a non-NULL
-    `allowed_origins` (both sides normalized by `eap_run_store.normalize_origin`) is 403. No
-    `Origin` header (a server-side caller) passes, and a NULL list allows any origin. An `Origin`
-    that is not an http(s) origin (`null`, from a sandboxed frame or a file) never matches."""
+    """The per-key origin check (D17; the AGUI.3 review obligation): a present `Origin` not in a non-NULL
+    `allowed_origins` (both sides normalized by `eap_run_store.normalize_origin`) is 403. No `Origin` header (a
+    server-side caller) passes, and a NULL list allows any origin. An `Origin` that is not an http(s) origin (`null`,
+    from a sandboxed frame or a file) never matches. The `apikey` plug-in applies the same rule inside the chain."""
     if allowed_origins is None or origin is None:
         return
     try:

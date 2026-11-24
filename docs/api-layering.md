@@ -36,8 +36,11 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
   re-exports it in an import the linter sees. Request bodies and response shapes that the REST routes and the
   MCP tools share live in `eap_api.bodies` and `eap_api.views`, not in a route module.
 - MCP control tools call services only, through `call_service` / `call_service_async`
-  (`eap_api/mcp_control/routing.py`); they never import `eap_api.routes`. Authentication lookups (API key,
-  Architect run token) go through `AuthLookupService` (`services/auth_lookup.py`).
+  (`eap_api/mcp_control/routing.py`); they never import `eap_api.routes`. Authentication (API key, Architect run
+  token, dev bearer) goes through the IAM identity chain (`eap_iam`; `eap_api/auth.py` builds the request view and
+  adapts the principal), never a store: the credential code lives in the `eap-iam-*` plug-ins.
+- Authorisation that is not HTTP-specific: `services/authz.py` (`AuthzService`) is the only caller of the policy
+  engine; entry points never ask the engine themselves (`service_deps/iam.py` builds the service).
 
 ## Enforcing checks
 
@@ -57,6 +60,9 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
     `.pathredact` must not import fastapi, starlette or `eap_observability.http`. A service imports what it needs
     from those submodules directly (`from eap_observability.redaction import log_failure, redact`,
     `from eap_observability.context import current_trace_context`), never the package root or `.http`.
+- IAM contracts: the core (every root package, `eap_iam` included) never imports an `eap_iam_*` plug-in; plug-ins
+  never import `eap_api`, `eap_worker`, a web framework or each other; `eap_iam` imports no web framework, database
+  library, `eap_run_store` or `eap_api`.
 - `apps/api/api_tests/test_architecture_app_state.py` parses every module under `eap_api` and fails on any
   `app.state` access outside `app.py` and `deps.py`.
 

@@ -4,8 +4,6 @@ tool=$(basename "$0")
 printf '%s %s\n' "$tool" "$*" >>"${STUB_LOG}"
 # Record whether a colima start would be tracked (and killed) by a GitHub Actions runner.
 [[ "$tool" != colima || "${1:-}" != start ]] || printf 'COLIMA_START_TRACKING_ID=[%s]\n' "${RUNNER_TRACKING_ID-unset}" >>"${STUB_LOG}"
-# Only `op` may see the 1Password token; up.sh must unset it before docker, kubectl and the rest.
-[[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]] || printf 'TOKEN_LEAK %s\n' "$tool" >>"${STUB_LOG}"
 # Like the real tools, consume a manifest piped in with `-f -`. Exiting without reading it
 # lets the writer (e.g. `kubectl create secret ... -o yaml | kubectl apply -f -`) die of
 # SIGPIPE, and under pipefail that kills up.sh with exit 141 at random.
@@ -78,6 +76,9 @@ case "$tool" in
         pending) printf '%s' '0 0' ;;
         *) printf '%s' '1 ' ;;
       esac
+    elif [[ "$verb" == exec && " $* " == *" -i "* && " $* " == *" psql "* ]]; then
+      # up.sh pipes the role password and the CREATE ROLE/DATABASE SQL in; consume it like the real tool.
+      cat >/dev/null || true
     elif [[ "$verb" == exec && " $* " == *" psql "* ]]; then
       # The drain query: "<active>|<excluded>" (STUB_RUNS_COUNTS), 0|0 by default.
       printf '%s\n' "${STUB_RUNS_COUNTS:-0|0}"

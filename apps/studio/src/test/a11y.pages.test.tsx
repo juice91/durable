@@ -197,6 +197,8 @@ function respond(url: URL): unknown {
   if (p === "/conversations/c1") return { id: "c1", agent_id: "a1", title: "Refund question", turn_count: 1, created_at: T0, updated_at: T1, runs: [run("r1", { conversation_id: "c1", turn: 1 })] };
   if (p === "/models") return { items: modelsFixture };
   if (p === "/providers") return { items: [{ id: "litellm", label: "LiteLLM gateway", configured: true, env_var: "EAP_LITELLM_API_KEY", base_url_host: "gateway.example.test", status: "ok", model_count: 3, checked_at: T0, error: null }] };
+  if (p === "/iam/capabilities") return { mode: "dev", identity: [], policy: { name: "p", transitional: true, features: [] }, membership: null, actions: [], me: { subject: "zitadel:u1", email: "zed@example.test", tenant_id: "acme", kind: "user", roles: ["editor"], provider: "cf-access" } };
+  if (p === "/audit") return { items: [{ id: "au1", at: T1, actor_kind: "user", actor_subject: "zitadel:u1", on_behalf_of: null, action: "create_agent", resource_kind: "agents", resource_id: "a1", outcome: "success", request_id: null, run_id: null, detail: null }], next_cursor: null, retention_days: 400 };
   if (p === "/processors") return processorCatalogFixture;
   if (p === "/processor-results") return PROCESSOR_RESULTS;
   if (p === "/tools") return TOOLS;
@@ -323,6 +325,7 @@ const PAGES: PageCase[] = [
   { name: "scorers", path: "/scorers", load: () => import("@/app/scorers/page"), h1: "Scorers", shows: "#scorer-row" },
   { name: "experiments", path: "/experiments", load: () => import("@/app/experiments/page"), h1: "Experiments", shows: "#experiment-row" },
   { name: "settings", path: "/settings", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Appearance" },
+  { name: "settings profile", path: "/settings", search: "tab=profile", load: () => import("@/app/settings/page"), h1: "Settings", shows: "My recent activity" },
   { name: "settings providers", path: "/settings", search: "tab=providers", load: () => import("@/app/settings/page"), h1: "Settings", shows: "LiteLLM gateway" },
   { name: "settings connections", path: "/settings", search: "tab=connections", load: () => import("@/app/settings/page"), h1: "Settings", shows: "catalogue-prod" },
   { name: "settings browser data", path: "/settings", search: "tab=browser-data", load: () => import("@/app/settings/page"), h1: "Settings", shows: "Data in this browser" },
@@ -335,12 +338,13 @@ describe("PAGES covers every page route in app/", () => {
     const dir = path.dirname(path.relative(APP, file)).split(path.sep).join("/");
     return dir === "." ? "/" : `/${dir.replace(/\[(\w+)\]/g, ":$1")}`;
   };
+  // /auth/callback renders nothing: the AuthGate in the root layout completes the OIDC sign-in there.
   const live: string[] = [];
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.name === "page.tsx" && !/\bredirect\(/.test(fs.readFileSync(full, "utf8"))) live.push(patternOf(full));
+      else if (entry.name === "page.tsx" && !/\bredirect\(/.test(fs.readFileSync(full, "utf8")) && patternOf(full) !== "/auth/callback") live.push(patternOf(full));
     }
   };
   walk(APP);

@@ -504,6 +504,31 @@ def get_workflow(engine: Engine, tenant_id: str, workflow_ref: str) -> dict[str,
     }
 
 
+_RECENT = {
+    "agents": text(
+        "SELECT id, name FROM agents WHERE tenant_id = :t AND NOT COALESCE(archived, false) AND NOT COALESCE(builtin, false) "
+        "ORDER BY updated_at DESC NULLS LAST, id LIMIT :n"
+    ),
+    "workflows": text(
+        "SELECT id, name FROM workflows WHERE tenant_id = :t AND NOT COALESCE(archived, false) "
+        "ORDER BY updated_at DESC NULLS LAST, id LIMIT :n"
+    ),
+}
+_RECENT_COUNT = {
+    "agents": text("SELECT count(*) FROM agents WHERE tenant_id = :t AND NOT COALESCE(archived, false) AND NOT COALESCE(builtin, false)"),
+    "workflows": text("SELECT count(*) FROM workflows WHERE tenant_id = :t AND NOT COALESCE(archived, false)"),
+}
+
+
+def recent_definitions(engine: Engine, tenant_id: str, kind: str, limit: int = 200) -> dict[str, Any]:
+    """The tenant's live agents (`kind="agents"`, built-ins left out) or workflows, most recently changed first:
+    `{total, items: [{id, name}]}` with at most `limit` items (the system context caps and filters them)."""
+    with engine.connect() as conn:
+        rows = conn.execute(_RECENT[kind], {"t": tenant_id, "n": max(1, min(int(limit), 200))}).mappings().all()
+        total = conn.execute(_RECENT_COUNT[kind], {"t": tenant_id}).scalar_one()
+    return {"total": int(total), "items": [{"id": str(r["id"]), "name": clip_text(r["name"])} for r in rows]}
+
+
 def list_agents(engine: Engine, tenant_id: str, limit: int = MAX_LIMIT, include_archived: bool = False) -> dict[str, Any]:
     """The tenant's agents (the Architect's own drafter helpers left out): id, name, published version, model."""
     with engine.connect() as conn:
@@ -733,24 +758,18 @@ def list_runs_with_previews(
     with engine.connect() as conn:
         rows = conn.execute(_RUNS, params).mappings().all()
 
+    from eap_run_store import RunStore
+
+    rs = RunStore(engine)
     items = []
     for r in rows:
-        # Get output_preview from the run row
         run_id = str(r["id"])
-        try:
-            rs = RunStore(engine)
-            events = rs.list_root_events(tenant_id, _uuid(run_id))
-            output_preview = None
-            for ord_ev in events:
-                ev = ord_ev.event
-                if ev.type == "end" and ev.data:
-                    output = ev.data.get("output")
-                    if output is not None:
-                        preview = _render_run_input_output(output)
-                        output_preview = clip_text(preview, 120)
-                        break
-        except Exception:
-            output_preview = None
+        # output_preview comes from the run row's output (as get_run reads it), masked and cut to 120 graphemes.
+        output_preview = None
+        stored = rs.get_run(tenant_id, _uuid(run_id))
+        output = stored.get("output") if stored else None
+        if output is not None:
+            output_preview = clip_text(_render_run_input_output(_mask_run_data(output)), 120)
 
         items.append({
             "run_id": run_id, "kind": r["kind"], "status": r["status"],

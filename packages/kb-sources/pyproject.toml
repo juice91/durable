@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-kb-sources"
-version = "0.1.0"
+version = "0.3.0"
 description = "Knowledge-base source adapters: the provider-neutral adapter protocol, budgets and a fake adapter"
 readme = "README.md"
 requires-python = ">=3.13"

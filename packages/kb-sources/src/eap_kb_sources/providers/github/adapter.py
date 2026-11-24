@@ -9,7 +9,7 @@ Source config (validated by `validate_config`; the connection's config merges un
 | `include` | globs over repository paths (>= 1, required); `exclude`: globs (optional) |
 | `map` | ordered rules `[{match: <glob>, metadata: {...}}]`, first match wins (see mapping.py) |
 | `max_bytes` | per-file cap (default 5 MiB for text, 25 MiB for PDF; never above those) |
-| `document_policy` | `{types: [md, rst, html, txt, yaml, yml, json, pdf], delete_missing: bool}` |
+| `document_policy` | `{types: [md, rst, html, txt, yaml, yml, json, pdf], delete_missing: bool}`; the default `types` are these. Opt-in code types: `py ts tsx js jsx mjs cjs sh toml sql dockerfile css` (`dockerfile` by file name). Code documents get `kind: code` and `language` metadata (a map rule may override `kind`, e.g. `test`) |
 | `key_prefix` | document-key prefix (default `source:<source_id>:`); the key is the prefix + the path with `/` as `~` |
 
 Connection (kind `api_token`): optional secret ref `token` (a public repository works without one under
@@ -108,8 +108,21 @@ EXTENSION_MIME = {
     "md": "text/markdown", "markdown": "text/markdown", "rst": "text/x-rst", "html": "text/html",
     "htm": "text/html", "txt": "text/plain", "yaml": "application/yaml", "yml": "application/yaml",
     "json": "application/json", "pdf": "application/pdf",
+    # Source code (extractor `code`), opt-in through `document_policy.types`; never in DEFAULT_TYPES.
+    "py": "text/x-python", "ts": "text/typescript", "tsx": "text/tsx", "js": "text/javascript",
+    "jsx": "text/javascript", "mjs": "text/javascript", "cjs": "text/javascript", "sh": "text/x-shellscript",
+    "toml": "application/toml", "sql": "application/sql", "dockerfile": "text/x-dockerfile", "css": "text/css",
 }
 DEFAULT_TYPES = ("md", "rst", "html", "txt", "yaml", "yml", "json", "pdf")
+# Document type -> language, for the types that are source code. `dockerfile` is recognised by the
+# file name (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`), the others by extension.
+CODE_LANGUAGE = {
+    "py": "python", "ts": "typescript", "tsx": "tsx", "js": "javascript", "jsx": "javascript",
+    "mjs": "javascript", "cjs": "javascript", "sh": "shell", "toml": "toml", "sql": "sql",
+    "dockerfile": "dockerfile", "css": "css",
+}
+CODE_TYPES = tuple(CODE_LANGUAGE)
+MAX_DOCUMENT_METADATA_KEYS = 16  # leaves room for the hand-off's own keys (source, source_id, ...)
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
 _HOST = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 _PATH_TARGET = re.compile(r"^[A-Za-z0-9._/-]{1,128}$")
@@ -148,6 +161,14 @@ def extension(path: str) -> str:
     return posixpath.splitext(path)[1][1:].lower()
 
 
+def doc_type(path: str) -> str:
+    """The document type of a path: its extension, or `dockerfile` for a Dockerfile by name."""
+    name = posixpath.basename(path).lower()
+    if name == "dockerfile" or name.startswith("dockerfile.") or name.endswith(".dockerfile"):
+        return "dockerfile"
+    return extension(path)
+
+
 class _Config:
     """The source's config, parsed. `validate` is the ValueError path of `validate_config`."""
 
@@ -172,7 +193,9 @@ class _Config:
         policy = policy or {}
         types = policy.get("types", list(DEFAULT_TYPES))
         if not isinstance(types, list) or not types or not all(isinstance(t, str) and t in EXTENSION_MIME for t in types):
-            raise ValueError(f"document_policy.types must be a non-empty list of {', '.join(DEFAULT_TYPES)}")
+            raise ValueError(
+                f"document_policy.types must be a non-empty list of {', '.join(DEFAULT_TYPES)} (or the code types {', '.join(CODE_TYPES)})"
+            )
         self.types = frozenset(types)
         delete_missing = policy.get("delete_missing", False)
         if not isinstance(delete_missing, bool):
@@ -192,7 +215,7 @@ class _Config:
         return min(base, self.max_bytes) if self.max_bytes else base
 
     def admits(self, path: str) -> bool:
-        return self.include.matches(path) and not self.exclude.matches(path) and extension(path) in self.types
+        return self.include.matches(path) and not self.exclude.matches(path) and doc_type(path) in self.types
 
     def fingerprint(self) -> str:
         body = json.dumps(
@@ -213,7 +236,15 @@ class _Config:
         return key
 
     def metadata(self, path: str) -> dict[str, Any]:
-        return {**self.map.lookup(path), "path": path[:256]}
+        meta = {**self.map.lookup(path), "path": path[:256]}
+        language = CODE_LANGUAGE.get(doc_type(path))
+        if language is not None:
+            # Source code: `kind` and `language` are filterable defaults a map rule may override
+            # (tests: `kind: test`); skipped when the map already fills the document's key budget.
+            for key, value in (("kind", "code"), ("language", language)):
+                if key not in meta and len(meta) < MAX_DOCUMENT_METADATA_KEYS - 4:
+                    meta[key] = value
+        return meta
 
 
 class _Tree:
@@ -517,7 +548,7 @@ class _Walk:
         the attention codes and `_Capacity` only."""
         cfg, store, counters = self.cfg, self.store, self.counters
         entity = self.entity
-        ext = extension(path)
+        ext = doc_type(path)
         metadata = cfg.metadata(path)
         meta_hash = hashlib.sha1(json.dumps(metadata, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:8]
         key = cfg.key(path)
@@ -569,7 +600,7 @@ class _Walk:
         if size is not None and size > INLINE_BYTES:
             raw = await self.http.get(
                 f"https://{RAW_HOST}/{self.cfg.repository}/{self.head}/{quoted}", accept="application/octet-stream",
-                max_bytes=self.cfg.cap(extension(path)),
+                max_bytes=self.cfg.cap(doc_type(path)),
             )
             return raw.body, expected or "", len(raw.body)
         meta = await self.http.get_json(self.repo_url(f"contents/{quoted}?ref={self.head}"))
@@ -581,7 +612,7 @@ class _Walk:
         sha, real_size = meta.get("sha"), meta.get("size")
         if not isinstance(sha, str) or not isinstance(real_size, int):
             raise SourceError(CONNECTION_RESPONSE_INVALID, "the contents response is not valid")
-        if real_size > self.cfg.cap(extension(path)):
+        if real_size > self.cfg.cap(doc_type(path)):
             raise SourceError(RESPONSE_TOO_LARGE, "the file is over the byte cap")
         if real_size > INLINE_BYTES:
             if expected is None:

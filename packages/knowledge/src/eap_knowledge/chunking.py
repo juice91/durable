@@ -53,7 +53,11 @@ def chunk(document: Document, config: ChunkingConfigLike = DEFAULT_CHUNKING) -> 
     max_chars = max_tokens * CHARS_PER_TOKEN
     doc_title = _clip(document.title, MAX_HEADING_CHARS)
     groups: list[tuple[Section, str]]
-    if version == 1:
+    if document.format == "code":
+        # Source code: the extractor already cut one section per symbol or line window, sized for
+        # max_tokens; merging neighbours would blur their line ranges.
+        groups = [(section, "") for section in document.sections if section.text.strip()]
+    elif version == 1:
         # A section with no body is dropped, unless its heading was clipped: then its full heading
         # line is the body, so the clipped-away text still reaches the chunks.
         sections = [s for s in document.sections if _has_body(s)]
@@ -83,6 +87,7 @@ def chunk(document: Document, config: ChunkingConfigLike = DEFAULT_CHUNKING) -> 
                     page=section.page,
                     page_end=section.page_end,
                     condition=section.condition,
+                    code=section.code,
                 )
             )
     return chunks

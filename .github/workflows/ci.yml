@@ -58,9 +58,11 @@ jobs:
               - 'scripts/ci/**'
               - '.github/workflows/ci.yml'
               - 'packages/**'
+              - 'plugins/**'
               - 'apps/api/**'
               - 'apps/worker/**'
               - 'config/**'
+              - 'docs/platform/**'
             studio:
               - 'package.json'
               - 'pnpm-lock.yaml'
@@ -73,6 +75,17 @@ jobs:
               - 'deploy/**'
               - 'tests/deploy/**'
               - 'scripts/ci/**'
+              # Versioning and release notes: the version files must agree (bump.py --check below).
+              - 'scripts/release/**'
+              - 'tests/fixtures/release/**'
+              - 'CHANGELOG*.md'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'apps/*/pyproject.toml'
+              - 'packages/*/pyproject.toml'
+              - 'plugins/*/pyproject.toml'
+              - 'plugins/iam-openfga/model/**'
+              - 'apps/studio/package.json'
 
   python:
     needs: changes
@@ -124,7 +137,8 @@ jobs:
           packages/observability/tests
           packages/pricing/pricing_tests
           packages/processors/processors_tests
-          packages/secrets/secrets_tests"
+          packages/secrets/secrets_tests
+          plugins/iam-openfga/iam_openfga_tests"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         # Hosted runners only: on the self-hosted macOS runners the toolcache build wants /Users/runner, and
         # uv provisions the interpreter from pyproject's requires-python, as ci-heavy.yml does.
@@ -139,6 +153,16 @@ jobs:
           cache-dependency-glob: uv.lock
       - run: uv sync --all-packages --frozen
       - run: uv run lint-imports
+      - name: No undefined names
+        # pyflakes exits non-zero on unused imports too, which the tree still has; only an undefined name is a
+        # NameError waiting to happen, so only those fail. Needs no database and runs in a few seconds.
+        run: |
+          out=$(uvx pyflakes==3.2.0 apps/*/src packages/*/src plugins/*/src || true)
+          bad=$(grep 'undefined name' <<<"$out" || true)
+          if [ -n "$bad" ]; then echo "$bad"; exit 1; fi
+      - name: System manifest is in step with the code
+        # Pure Python, no database; it runs whatever the affected-test selection chose (scripts/ci/system_manifest.py).
+        run: uv run python scripts/ci/system_manifest.py --check
       - name: DB-free unit tests
         if: steps.select.outputs.unit_run == 'true'
         env:
@@ -173,6 +197,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -C apps/studio lint
       - run: pnpm -C apps/studio exec tsc --noEmit
+      # IAM design 7.1: no credential is baked into the bundle (the public host uses the Access cookie, the loopback page a runtime value).
+      - run: pnpm -C apps/studio build
+      - run: node apps/studio/scripts/check-bundle.mjs apps/studio/.next
 
   studio-test:
     needs: changes
@@ -243,6 +270,8 @@ jobs:
     env:
       KUBECONFORM_VERSION: v0.7.0
       ACTIONLINT_VERSION: v1.7.7
+      # The OpenFGA CLI, for the model tests. `go install` of a tagged module is checked against the Go checksum database.
+      FGA_CLI_VERSION: v0.9.0
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -264,14 +293,26 @@ jobs:
         run: |
           go install github.com/yannh/kubeconform/cmd/kubeconform@"${KUBECONFORM_VERSION}"
           go install github.com/rhysd/actionlint/cmd/actionlint@"${ACTIONLINT_VERSION}"
+          go install github.com/openfga/cli/cmd/fga@"${FGA_CLI_VERSION}"
           # go install writes to $(go env GOPATH)/bin, which is not on the runner's PATH.
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Validate rendered manifests
-        run: kubectl kustomize deploy/k8s | kubeconform -strict -summary
+        run: |
+          kubectl kustomize deploy/k8s | kubeconform -strict -summary
+          kubectl kustomize deploy/k8s/iam | kubeconform -strict -summary
+      - name: OpenFGA model tests
+        # The model (plugins/iam-openfga/model/durable.fga) validates, its tests pass (the IAM design's role matrix, grants,
+        # usable_by, run inheritance), and the plug-in's own DSL transformer produces what the CLI does.
+        run: |
+          fga model validate --file plugins/iam-openfga/model/durable.fga
+          fga model test --tests plugins/iam-openfga/model/durable.fga.yaml
+          uv run pytest -p no:eap_db -q plugins/iam-openfga/iam_openfga_tests/test_model.py
       - name: Shellcheck deployment scripts
         run: shellcheck deploy/scripts/*.sh scripts/ci/*.sh
       - name: Validate Actions workflows
         run: actionlint
+      - name: Every pyproject, studio and the lock carry the platform version
+        run: python3 scripts/release/bump.py --check
       - name: Deployment tests without image builds
         env:
           PYTEST_ADDOPTS: --ignore=tests/deploy/test_images.py

@@ -280,7 +280,7 @@ def test_list_is_newest_first_with_status_and_no_secret_fields(c, tenant):
     for item in items:
         assert set(item) == {"id", "name", "prefix", "status", "scopes", "agent_ids", "workflow_ids",
                              "allowed_origins", "created_by", "created_at", "expires_at", "revoked_at",
-                             "last_used_at"}
+                             "last_used_at", "owner_subject", "owner_email"}
 
 
 def test_management_routes_refuse_a_key_and_a_missing_header(c, tenant):

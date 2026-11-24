@@ -448,3 +448,77 @@ spec:
               app.kubernetes.io/name: cloudflared
       ports:
         - {protocol: TCP, port: 8000}
+---
+# Identity and authorization (iam/): ZITADEL and OpenFGA, in namespace iam, use the platform's Postgres with their own
+# roles and databases. The iam namespace's own default-deny, ingress and egress policies are in iam/networkpolicy.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress-iam
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: iam
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [zitadel, openfga]
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+# The Cloudflare Tunnel connector forwards auth.example-org.ai to ZITADEL; the API and the worker verify tokens against
+# ZITADEL and ask OpenFGA for decisions. Each pod reaches only the iam pods it needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iam-egress-zitadel
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [cloudflared, api, worker]
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: iam
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: zitadel
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: iam-egress-openfga
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [api, worker]
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: iam
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openfga
+      ports:
+        - {protocol: TCP, port: 8080}
+        - {protocol: TCP, port: 8081}

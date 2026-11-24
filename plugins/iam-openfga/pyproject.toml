@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-iam-openfga"
+version = "0.3.0"
+description = "IAM policy plug-in (enterprise): OpenFGA as the policy engine, the authorization model, bootstrap, reconcile and backfill"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "eap-iam",
+    "eap-run-store",
+    "httpx2>=2.16",
+]
+
+[project.entry-points."eap.iam.policy"]
+openfga = "eap_iam_openfga:create"
+
+[tool.uv.sources]
+eap-iam = { workspace = true }
+eap-run-store = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_iam_openfga"]
+
+# The model ships inside the wheel so the bootstrap finds it on an installed (non-editable) deployment; in a checkout it
+# is read from plugins/iam-openfga/model/ (see eap_iam_openfga.model).
+[tool.hatch.build.targets.wheel.force-include]
+"model/durable.fga" = "eap_iam_openfga/durable.fga"

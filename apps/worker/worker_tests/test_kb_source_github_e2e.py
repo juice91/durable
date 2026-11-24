@@ -69,7 +69,7 @@ class GhStack(Stack):
         created = self.call("POST", "/workflows", expect=201, json={"spec": EXAMPLE}).json()
         self.workflow_id = created["id"]
         published = self.call("POST", f"/workflows/{self.workflow_id}/versions", expect=201).json()
-        assert published["warnings"] == []
+        assert [w for w in published["warnings"] if w["code"] != "step_id_convention"] == []  # the system template keeps its ids (PR 147)
 
     def chunk_metadata(self) -> list[dict[str, Any]]:
         return [r.metadata for r in self.rows("SELECT metadata FROM kb_chunks WHERE tenant_id = :t")]

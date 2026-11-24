@@ -177,7 +177,7 @@ async def _list_runs(
 ) -> dict[str, Any]:
     """The last runs, newest first: kind, status, start, end, the error's first line, output_preview (120 graphemes),
     and the workflow or agent name. Filter by workflow_id, agent_id, kind or status. Never returns a run's input or output."""
-    return await list_runs_with_previews(_engine(), ctx.deps.tenant_id, limit, workflow_id, agent_id, kind, status)
+    return await list_runs(_engine(), ctx.deps.tenant_id, limit, workflow_id, agent_id, kind, status)
 
 
 _TOOLS: tuple[tuple[str, Callable[..., Any]], ...] = (

@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, field_validator, model_serializer
 from pydantic.functional_validators import model_validator
 
+from eap_schemas.agent_tools import AgentToolRef, check_agent_tool_refs
 from eap_schemas.approvals import ApprovalPolicy
 from eap_schemas.embedding_policy import (
     EmbeddingDimensionMismatch,
@@ -47,6 +48,7 @@ from eap_schemas.memory import (
     validate_working_memory_schema,
 )
 from eap_schemas.model_ref import ModelRef
+from eap_schemas.permissions import Permissions
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid, OutputSpec
 from eap_schemas.processors import (
     MAX_PROCESSORS_PER_PHASE,
@@ -87,6 +89,7 @@ from eap_schemas.tools import (
 
 __all__ = (
     "AgentSpec",
+    "AgentToolRef",
     "AgentVersion",
     "ApprovalPolicy",
     "MAX_FALLBACK_MODELS",
@@ -248,6 +251,12 @@ class AgentSpec(BaseModel):
     approvals: ApprovalPolicy | None = None
     limits: UsageLimitsSpec | None = None
     fallback_models: Tuple[ModelRef, ...] = Field(default=(), max_length=MAX_FALLBACK_MODELS)
+    # Agents as tools (eap_schemas.agent_tools): published agents of the tenant the model may call.
+    # Same rule: left out of every dump while empty.
+    agent_tools: Tuple[AgentToolRef, ...] = ()
+    # What the spec may use (eap_schemas.permissions, IAM P0b): schema only, nothing enforces it yet. Left out of the
+    # dump while absent (an empty-but-present block is kept), so every stored spec keeps its JSON and hash.
+    permissions: Permissions | None = None
 
     @model_serializer(mode="wrap")
     def _omit_empty_optional_fields(self, handler):
@@ -318,6 +327,20 @@ class AgentSpec(BaseModel):
             if key in seen:
                 raise ValueError(f"fallback_models[{i}]: duplicate fallback model: {ref.provider}:{ref.name}")
             seen.add(key)
+        return self
+
+    @model_validator(mode="after")
+    def check_agent_tools(self):
+        """Agent tool refs: unique agents and explicit names, and no explicit name equal to the model-facing
+        name of a built-in tool, an MCP tool or a reserved platform tool. A DERIVED name (no `name`)
+        depends on the target agent, so publish checks it (eap_run_store.agent_checks)."""
+        check_agent_tool_refs(self.agent_tools)
+        taken = {builtin_tool_name(tool_id) for tool_id in self.tools}
+        taken |= {mcp_tool_name(ref.server, ref.tool) for ref in self.mcp_tools}
+        taken |= RESERVED_TOOL_NAMES
+        for ref in self.agent_tools:
+            if ref.name is not None and ref.name in taken:
+                raise ValueError(f"agent tool name {ref.name!r} is already used by another tool")
         return self
 
     @model_validator(mode="after")
@@ -411,6 +434,7 @@ class AgentSpec(BaseModel):
 # AgentSpec fields added after specs were first stored: omitted from dumps (and so from the hash)
 # while empty.
 _OMIT_WHEN_EMPTY = (
+    "permissions",
     "mcp_tools",
     "input_processors",
     "output_processors",
@@ -423,6 +447,7 @@ _OMIT_WHEN_EMPTY = (
     "approvals",
     "limits",
     "fallback_models",
+    "agent_tools",
 )
 
 
@@ -568,6 +593,15 @@ RunEventType = Literal[
     # Message feedback (W2.4): legacy, no longer written. Feedback is per user, so it lives only in
     # `message_feedback` rows and is replayed to its own author; a shared run event would leak it.
     "message_feedback",
+    # Agents as tools: the caller's log, keys `agent_tool:{tool_call_id}:started|completed`. Data carries
+    # ids, names, counts and codes, never the input or output text (those are in the tool_call and
+    # tool_result events).
+    "agent_tool_started",  # {tool_call_id, tool_name, agent_id, version, child_run_id, depth}
+    "agent_tool_completed",  # {tool_call_id, tool_name, child_run_id, status, error_code?}
+    # System-aware Architect: the built-in Architect's context was built at run start, key `system_context`.
+    # Data carries provenance and hashes (versions, manifest and registry hashes, the principal summary,
+    # truncated and degraded layer names, estimated sizes), never the context's text.
+    "system_context_loaded",
 ]
 
 

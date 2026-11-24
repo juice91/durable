@@ -16,6 +16,20 @@ def sha256_hex(text: str) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class CodeRef:
+    """Where a source-code chunk comes from (the ``code`` extractor): the language, the repository
+    path, the qualified symbol when known, the 1-based inclusive line range, and the kind (``code``,
+    or what the document's metadata says, e.g. ``test``). Carried to ``metadata.eap``."""
+
+    language: str
+    path: str
+    start_line: int
+    end_line: int
+    symbol: str | None = None
+    kind: str = "code"
+
+
+@dataclass(frozen=True, slots=True)
 class Section:
     """A heading and the text under it, up to the next heading.
 
@@ -38,6 +52,7 @@ class Section:
     page: int | None = None
     page_end: int | None = None
     condition: str | None = None
+    code: CodeRef | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +61,7 @@ class Document:
     so a caller can fail "non-empty input, empty extraction".
 
     ``format`` is ``markdown``, ``html`` or ``text`` from ``extract()``, and the extractor id
-    (``rst``, ``yaml``, ``json``, ``markdown-doxygen``, ``pdf``) from a worker extractor.
+    (``rst``, ``yaml``, ``json``, ``markdown-doxygen``, ``pdf``, ``code``) from a worker extractor.
     ``warnings`` are stable codes for content an extractor dropped or could not honour (one entry
     per occurrence, e.g. ``include_dropped``); the ``extracted`` event counts them.
     """
@@ -82,3 +97,4 @@ class Chunk:
     page: int | None = None
     page_end: int | None = None
     condition: str | None = None
+    code: CodeRef | None = None

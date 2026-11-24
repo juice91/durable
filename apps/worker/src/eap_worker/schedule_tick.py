@@ -48,7 +48,7 @@ from dbos import DBOS, SetWorkflowID
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
-from eap_run_store import ScheduleStore
+from eap_run_store import RunActor, ScheduleStore
 from eap_worker.cancel_reconcile import valid_cron
 from eap_worker.runtime import get_runtime
 from eap_worker.workflow_run import workflow_run
@@ -172,7 +172,10 @@ def _fire(session: Any, store: ScheduleStore, schedule: dict[str, Any], now: dat
         return None
     input_json = json.dumps(schedule["input"], sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     run_id = run_id_for(sid, fire_at)
-    rt.run_store.create_workflow_run(tenant, workflow_id, version.version, input_json, run_id, schedule_id=sid)
+    rt.run_store.create_workflow_run(
+        tenant, workflow_id, version.version, input_json, run_id, schedule_id=sid,
+        actor=RunActor(kind="service", subject=str(sid)),  # a schedule acts as its own service identity (design 4.4)
+    )
     return {"run_id": str(run_id), "tenant_id": tenant, "version_id": str(version.id), "input_json": input_json,
             "fire_at": fire_at, "cron": schedule["cron"], "timezone": schedule["timezone"], "id": sid}
 

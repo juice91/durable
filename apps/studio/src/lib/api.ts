@@ -1,4 +1,5 @@
 import { BASE_URL, resolveBaseUrl } from "./base-url";
+import { authorizationHeaders } from "./credentials";
 import { rememberRevision, revisionFromEtag, revisionKey, track, trackAll, writeResource } from "./revisions";
 
 /** An MCP tool an agent may call: `server` is the tenant MCP server's NAME, `tool` the tool's name on it. */
@@ -88,12 +89,10 @@ export class ApiError extends Error {
 
 export { BASE_URL, resolveBaseUrl };
 
+/** Request headers: the runtime credential when there is one (the loopback page's dev bearer), none on the public
+ * host, where the Access cookie and the JWT cloudflared adds identify the user (see credentials.ts). */
 export function apiHeaders(extra: HeadersInit = {}): HeadersInit {
-  const token = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
-  if (!token) {
-    throw new ApiError(0, "No API credentials configured");
-  }
-  return { Authorization: token, ...extra };
+  return { ...authorizationHeaders(), ...extra };
 }
 
 export async function apiErrorFromResponse(response: Response): Promise<ApiError> {

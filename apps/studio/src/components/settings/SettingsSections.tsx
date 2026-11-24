@@ -12,6 +12,10 @@ import type { ThemePreference } from "@/lib/theme";
 import { studioVersion } from "@/components/frame/Sidebar";
 import { ShortcutTable } from "@/components/shortcuts/ShortcutTable";
 import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
+import { AuditSection } from "@/components/audit/AuditSection";
+import { MembersSection } from "./MembersSection";
+import { ProfileSection } from "./ProfileSection";
+import { hasMembers, loadCapabilities, type IamCapabilities } from "@/lib/iam";
 import { SecretsSection } from "./SecretsSection";
 import { ConnectionsSection } from "./ConnectionsSection";
 import { ProvidersSettings } from "./ProvidersSettings";
@@ -220,6 +224,7 @@ function AboutSection() {
 }
 
 const TAB_LABELS: Record<SettingsTab, string> = {
+  profile: "Profile",
   appearance: "Appearance",
   chat: "Chat",
   shortcuts: "Shortcuts",
@@ -227,6 +232,8 @@ const TAB_LABELS: Record<SettingsTab, string> = {
   secrets: "Secrets",
   connections: "Connections",
   "api-keys": "API keys",
+  members: "Members",
+  audit: "Audit",
   "browser-data": "Browser data",
   about: "About",
 };
@@ -240,6 +247,7 @@ function ShortcutsSection() {
 }
 
 const TAB_CONTENT: Record<SettingsTab, () => React.ReactNode> = {
+  profile: () => <ProfileSection />,
   appearance: () => <AppearanceSection />,
   chat: () => <ChatSection />,
   shortcuts: () => <ShortcutsSection />,
@@ -247,6 +255,8 @@ const TAB_CONTENT: Record<SettingsTab, () => React.ReactNode> = {
   secrets: () => <SecretsSection />,
   connections: () => <ConnectionsSection />,
   "api-keys": () => <ApiKeysSection />,
+  members: () => <MembersSection />,
+  audit: () => <AuditSection />,
   "browser-data": () => <BrowserDataSection />,
   about: () => <AboutSection />,
 };
@@ -258,18 +268,29 @@ function parseTab(value: string | null): SettingsTab {
 /** The Settings page body: one section per tab; the selected tab lives in the URL (`/settings?tab=secrets`). */
 export function SettingsSections() {
   const router = useRouter();
-  const tab = parseTab(useSearchParams().get("tab"));
+  const requested = parseTab(useSearchParams().get("tab"));
+  // The Members tab exists only when the API reports a membership source (design 7.2); the server refuses the calls anyway.
+  const [caps, setCaps] = useState<IamCapabilities | null>(null);
+  useEffect(() => {
+    let live = true;
+    loadCapabilities().then((c) => live && setCaps(c)).catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+  const visible = SETTINGS_TABS.filter((id) => id !== "members" || hasMembers(caps));
+  const tab: SettingsTab = visible.includes(requested) ? requested : "appearance";
   return (
     <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-4 py-6">
       <Tabs value={tab} onValueChange={(next) => router.push(routes.settingsTab(parseTab(next)), { scroll: false })}>
         <TabsList aria-label="Settings sections">
-          {SETTINGS_TABS.map((id) => (
+          {visible.map((id) => (
             <TabsTrigger key={id} value={id} data-testid={`settings-tab-${id}`}>
               {TAB_LABELS[id]}
             </TabsTrigger>
           ))}
         </TabsList>
-        {SETTINGS_TABS.map((id) => (
+        {visible.map((id) => (
           <TabsContent key={id} value={id} className="pt-4">
             {TAB_CONTENT[id]()}
           </TabsContent>

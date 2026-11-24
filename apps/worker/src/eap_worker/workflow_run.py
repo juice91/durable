@@ -235,6 +235,7 @@ from eap_schemas.workflow_scope import (
     status_for_end,
 )
 from eap_schemas.workflows import (
+    DEFAULT_MAX_STEP_OUTPUT_BYTES,
     LOOP_STEP_TYPES,
     PAUSE_STEP_SUFFIX,
     AgentStep,
@@ -344,7 +345,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def max_step_output_bytes() -> int:
-    return _env_int("EAP_WORKFLOW_MAX_STEP_OUTPUT_BYTES", 32 * 1024)
+    return _env_int("EAP_WORKFLOW_MAX_STEP_OUTPUT_BYTES", DEFAULT_MAX_STEP_OUTPUT_BYTES)
 
 
 def max_context_bytes() -> int:

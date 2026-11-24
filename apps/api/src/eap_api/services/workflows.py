@@ -75,6 +75,7 @@ def _version_json(version: dict[str, Any]) -> dict[str, Any]:
         "spec_hash": version["spec_hash"],
         "created_at": version["created_at"].isoformat(),
         "created_by": version["created_by"],
+        "published_by": version.get("published_by"),
         "created_via": version["created_via"],
     }
 
@@ -87,6 +88,7 @@ def _version_row_json(version: WorkflowVersionModel) -> dict[str, Any]:
         "spec_hash": version.spec_hash,
         "created_at": version.created_at.isoformat(),
         "created_by": version.created_by,
+        "published_by": version.published_by,
         "created_via": version.created_via,
     }
 

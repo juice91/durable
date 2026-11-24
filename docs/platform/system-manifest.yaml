@@ -1,0 +1,491 @@
+# The versioned system manifest: what the platform is, for the Architect (and for people).
+#
+# Two kinds of section:
+#   - hand-written (everything above `generated:`): roles and rules in prose. Bump manifest_version when their
+#     meaning changes. They never repeat a generated number or id: write {{limits.workflow.max_steps}} or list the
+#     capability under a pattern's `needs`.
+#   - generated (between the markers): produced from code constants and the capability registry. Never edit by
+#     hand: run `uv run python scripts/ci/system_manifest.py --write`. CI runs `--check` and fails on any drift.
+# Design: docs/superpowers/specs/2026-11-22-architect-system-context-design.md (section 3).
+manifest_version: 2
+platform:
+  name: pydanticos
+  purpose: >-
+    A durable platform for building and running AI agents and workflows. A person describes what they want, the
+    platform stores it as a versioned definition, and a worker runs it as a durable, replayable workflow whose
+    steps, tool calls and approvals are recorded.
+components:
+  - id: api
+    role: Control plane. Validates and stores definitions, authorises callers, and hands runs to the worker.
+  - id: worker
+    role: Runs agents and workflows as durable workflows; a run survives a restart and replays from its recorded steps.
+  - id: studio
+    role: Web interface for people. It talks only to the API.
+  - id: run-store
+    role: All SQL. Every query is scoped to one tenant.
+  - id: knowledge
+    role: Knowledge bases, their connected sources, syncs and retrieval.
+  - id: mcp-runtime
+    role: Runs and connects MCP servers whose tools an agent may be granted.
+  - id: eval
+    role: Test suites, cases and scorers that check an agent or workflow against a published version.
+  - id: scheduler
+    role: Starts a published workflow on a cron schedule in a timezone.
+  - id: postgres
+    role: The database. Holds the run store and the worker's durable state.
+relationships:
+  - {source: studio, target: api, via: "HTTP, and a live event stream for runs"}
+  - {source: api, target: worker, via: "a durable queue; the API never runs an agent itself"}
+  - {source: worker, target: postgres, via: "durable workflow state and the run store"}
+  - {source: api, target: run-store, via: "every read and write of a definition, a run or an approval"}
+  - {source: scheduler, target: worker, via: "each fire starts a run of the latest published version"}
+  - {source: worker, target: knowledge, via: "retrieval for agents and the ingest of source syncs"}
+  - {source: worker, target: mcp-runtime, via: "tool calls to MCP servers"}
+  - {source: eval, target: worker, via: "each case is a run of a published version"}
+lifecycle:
+  agent: [draft, publish, version, archive]
+  workflow: [draft, publish, version, archive, schedule]
+  rules:
+    - A draft changes nothing that is running; publishing creates an immutable version.
+    - Publishing, restoring a version, archiving and schedule changes go live, so a person approves each of them.
+    - A schedule starts the latest published version of its workflow at each fire.
+    - A long wait for a person belongs in an approval step, not in a loop.
+    - A run that is interrupted resumes from its recorded steps; it does not start again.
+    - Step ids follow one convention so workflows read the same everywhere. A branch step is named <subject>_gate (check_gate, login_gate, richtext_gate).
+    - A step that ends the run with a result is named ret_<reason> (ret_posted, ret_dry, ret_check_failed).
+    - Every other step is a snake_case noun or verb that says what it does (fetch_rss, pick, write, check, post_thumb). No step id is longer than 40 characters; publishing warns about each id that breaks the convention and suggests the name.
+patterns:
+  - id: pattern.scheduled_report
+    summary: Collect on a schedule, let an agent write the result, post it with a web call.
+    needs: [trigger.schedule, step.tool, step.agent, tool.http.request]
+  - id: pattern.rag_agent
+    summary: An agent that answers from the tenant's knowledge bases.
+    needs: [feature.kb.retrieve]
+  - id: pattern.feed_digest
+    summary: Read feeds, filter and shape the items, let an agent summarise, check the text before posting.
+    needs: [tool.http.request, tool.feed.parse, tool.text.check, step.branch]
+  - id: pattern.approval_gate
+    summary: A person approves a step before the workflow continues.
+    needs: [step.approval, feature.approvals]
+  - id: pattern.eval_suite
+    summary: Test a published agent or workflow with cases and scorers.
+    needs: [feature.evals]
+generated:
+  # BEGIN GENERATED (scripts/ci/system_manifest.py)
+  architect_gated_tools:
+  - architect.add_eval_case
+  - architect.archive_agent
+  - architect.archive_workflow
+  - architect.attach_scorer
+  - architect.create_eval_suite
+  - architect.publish_agent
+  - architect.publish_workflow
+  - architect.restore_agent_version
+  - architect.restore_workflow_version
+  - architect.set_workflow_schedule
+  - architect.start_eval_run
+  context_budget:
+    capability: 1100
+    design: 0
+    known_gaps: 350
+    operational: 350
+    platform: 700
+    tenant: 600
+  denied_tool_prefixes:
+  - admin.
+  - architect.
+  - bash.
+  - exec.
+  - file.
+  - files.
+  - final_result
+  - fs.
+  - host.
+  - kb.
+  - knowledge.
+  - knowledge_search
+  - platform.
+  - process.
+  - retrieve
+  - sandbox.
+  - settings.
+  - shell.
+  - update_working_memory
+  - workflow.
+  known_gaps:
+  - alternatives:
+    - feature.agent_tools
+    designed_in: pr:100
+    entry_ids:
+    - step.a2a_agent
+    id: gap.a2a_agent
+    status: designed_not_built
+  - alternatives: []
+    designed_in: null
+    entry_ids:
+    - step.approval
+    - step.input
+    - step.foreach
+    - step.loop
+    - step.evaluate
+    id: gap.architect_foreach_loop
+    status: architect_format
+  - alternatives:
+    - trigger.schedule
+    designed_in: null
+    entry_ids: []
+    id: gap.event_triggers_other
+    status: not_planned
+  - alternatives: []
+    designed_in: docs/iam.md
+    entry_ids:
+    - feature.iam_per_user
+    id: gap.iam_per_user
+    status: designed_not_built
+  - alternatives:
+    - trigger.schedule
+    designed_in: pr:111
+    entry_ids:
+    - trigger.webhook
+    id: gap.inbound_webhook
+    status: designed_not_built
+  - alternatives: []
+    designed_in: null
+    entry_ids: []
+    id: gap.kb_usage_analytics
+    status: not_planned
+  - alternatives:
+    - tool.http.request
+    designed_in: null
+    entry_ids: []
+    id: gap.push_notifications
+    status: not_planned
+  - alternatives: []
+    designed_in: null
+    entry_ids: []
+    id: gap.run_code
+    status: not_planned
+  - alternatives:
+    - step.approval
+    designed_in: pr:111
+    entry_ids:
+    - step.wait_event
+    id: gap.wait_event_step
+    status: designed_not_built
+  limits:
+    agent_tools:
+      default_max_calls_per_run: 5
+      max_calls_per_run: 20
+      max_per_agent: 8
+      max_timeout_seconds: 3600
+    architect:
+      max_agent_tools: 32
+      max_branches: 4
+    http:
+      max_reduced_response_bytes: 1048576
+      max_response_bytes: 262144
+    run:
+      max_cost_usd: '1000'
+      max_requests: 200
+      max_tokens: 10000000
+      max_tool_calls: 500
+    workflow:
+      max_foreach_concurrency: 8
+      max_literal_depth: 32
+      max_loop_depth: 2
+      max_loop_iterations: 1000
+      max_spec_bytes: 65536
+      max_spec_depth: 64
+      max_steps: 50
+      max_template_placeholders: 64
+      step_output_bytes: 32768
+  providers:
+  - anthropic
+  - cloudflare
+  - litellm
+  - openai
+  step_kinds:
+    architect_writable:
+    - agent
+    - parallel
+    - tool
+    - branch
+    platform:
+    - agent
+    - tool
+    - branch
+    - parallel
+    - approval
+    - input
+    - foreach
+    - loop
+    - evaluate
+  tools:
+  - id: architect.add_eval_case
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.archive_agent
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.archive_workflow
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.attach_scorer
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.create_eval_suite
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.get_capability
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.get_eval_run
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_agent_versions
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_approved_tools
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_capabilities
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_created_agents
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_created_workflows
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_eval_suites
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_workflow_step_kinds
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.list_workflow_versions
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.publish_agent
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.publish_workflow
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.restore_agent_version
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.restore_workflow_version
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.save_agent
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.save_workflow
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: architect.set_workflow_schedule
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: architect.start_eval_run
+    requires_approval: true
+    scope: architect_only
+    side_effect: true
+    writable_by_architect: false
+  - id: atproto.richtext
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: clock.now
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: clock.sleep
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: feed.parse
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: html.extract
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: http.request
+    requires_approval: true
+    scope: agent
+    side_effect: true
+    writable_by_architect: true
+  - id: json.query
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: kb.source.get
+    requires_approval: false
+    scope: platform_only
+    side_effect: false
+    writable_by_architect: false
+  - id: kb.source.sync
+    requires_approval: true
+    scope: platform_only
+    side_effect: true
+    writable_by_architect: false
+  - id: knowledge.search
+    requires_approval: false
+    scope: platform_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.get_knowledge_base
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.get_run
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.get_workflow
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_agents
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_capabilities
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_knowledge_bases
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_recent_runs
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_runs
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_schedules
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_source_syncs
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: platform.list_workflows
+    requires_approval: false
+    scope: architect_only
+    side_effect: false
+    writable_by_architect: false
+  - id: secrets.request
+    requires_approval: true
+    scope: agent
+    side_effect: true
+    writable_by_architect: true
+  - id: settings.connection.check
+    requires_approval: false
+    scope: platform_only
+    side_effect: false
+    writable_by_architect: false
+  - id: text.check
+    requires_approval: false
+    scope: agent
+    side_effect: false
+    writable_by_architect: true
+  - id: tickets.create
+    requires_approval: true
+    scope: agent
+    side_effect: true
+    writable_by_architect: true
+  - id: workflow.history
+    requires_approval: false
+    scope: workflow_only
+    side_effect: false
+    writable_by_architect: true
+  - id: workflow.return
+    requires_approval: false
+    scope: workflow
+    side_effect: false
+    writable_by_architect: true
+  - id: workflow.run.result
+    requires_approval: false
+    scope: platform_only
+    side_effect: false
+    writable_by_architect: false
+  - id: workflow.run.wait
+    requires_approval: false
+    scope: platform_only
+    side_effect: false
+    writable_by_architect: false
+  triggers:
+  - id: trigger.api_run
+    status: available
+  - id: trigger.schedule
+    status: available
+  - id: trigger.webhook
+    status: designed_not_built
+  # END GENERATED

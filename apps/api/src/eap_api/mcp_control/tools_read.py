@@ -210,6 +210,70 @@ def register_tools(tool: Any) -> None:
             ctx, lambda _db: build_connection_service(ctx.engine),
             lambda s: s.check(tenant_id=ctx.tenant_id, connection_id=cid))
 
+    def _capability_service(ctx: Any) -> Any:
+        from eap_api.mcp_servers.managed import get_mcp_runtime
+        from eap_api.service_deps.capabilities import build_capability_service
+        from eap_api.service_deps.connections import get_outbound_policy
+
+        return lambda db: build_capability_service(db, ctx.engine, get_outbound_policy(), get_mcp_runtime())
+
+    def _viewer(ctx: Any) -> Any:
+        from eap_api.services.capabilities import Viewer
+
+        return Viewer(ctx.tenant_id, ctx.principal.kind, ctx.principal.user_id or ctx.principal.key_id)
+
+    @tool("capability.list")
+    async def capability_list(
+        kind: str | None = None, status: str | None = None, query: str | None = None, include_schemas: bool = False,
+    ) -> dict[str, Any]:
+        """What the platform can do now (the capability registry): entries with kind, status (available,
+        designed_not_built, disabled), approval and limits, the known gaps, and the snapshot hash. Filter by
+        kind, status or a query; include_schemas adds each tool's input and result schema. Availability comes
+        from here, never from a document."""
+        ctx = current_ctx()
+        return await call_service_async(
+            ctx, _capability_service(ctx),
+            lambda s: s.list(_viewer(ctx), kind=kind, status=status, query=query, include_schemas=include_schemas))
+
+    @tool("capability.get")
+    async def capability_get(capability_id: str) -> dict[str, Any]:
+        """One capability with its schemas, limits, needs and docs reference, and the gaps that concern it
+        (for example tool.http.request, step.foreach, trigger.schedule). unknown_capability lists the nearest ids."""
+        ctx = current_ctx()
+        return await call_service_async(ctx, _capability_service(ctx), lambda s: s.get(_viewer(ctx), capability_id))
+
+    @tool("system.context")
+    async def system_context() -> dict[str, Any]:
+        """The system context for the caller, as the Architect's run start reads it: the capability lines, the
+        known gaps (what is designed or cannot be written), the tenant's resource NAMES and counts (secrets by
+        name only), operational facts (always-gated tools, recent failures, runtime) and the principal. A layer
+        that could not be built is missing and named in degraded. Availability still comes from capability.list."""
+        from eap_api.deps import iam_of
+        from eap_api.mcp_servers.managed import get_mcp_runtime
+        from eap_api.service_deps.connections import get_outbound_policy
+        from eap_api.service_deps.system_context import build_system_context_service
+        from eap_api.services.authz import AuthzService
+
+        ctx = current_ctx()
+        authz = AuthzService(iam_of(ctx.app).policy)
+        return await call_service_async(
+            ctx, lambda db: build_system_context_service(db, ctx.engine, get_outbound_policy(), get_mcp_runtime(), authz),
+            lambda s: s.context(_viewer(ctx)))
+
+    @tool("provenance.get")
+    async def provenance_get(kind: Literal["agent", "workflow"], definition_id: str, spec_hash: str | None = None) -> dict[str, Any]:
+        """What a draft or publish card of an agent or workflow was based on: platform version, manifest and
+        capability hashes, the principal summary and the Architect run's tool-call names (never arguments), plus
+        the capabilities the draft uses that changed since it was drafted."""
+        from eap_api.mcp_servers.managed import get_mcp_runtime
+        from eap_api.service_deps.connections import get_outbound_policy
+        from eap_api.service_deps.system_context import build_provenance_service
+
+        ctx = current_ctx()
+        return await call_service_async(
+            ctx, lambda db: build_provenance_service(db, ctx.engine, get_outbound_policy(), get_mcp_runtime()),
+            lambda s: s.get(_viewer(ctx), kind=kind, definition_id=definition_id, spec_hash=spec_hash))
+
     @tool("mcp.server.list")
     async def mcp_server_list(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, Any]:
         """The MCP servers registered for the tenant's agents (header and env variable names only, never values)."""

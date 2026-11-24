@@ -36,6 +36,11 @@
   the step's result is checkpointed. Recovery re-runs the step, finds the row and reuses ITS
   version (never re-resolving 'latest'). Filtered by `EAP_CRASH_EVENT_KEY` against
   `step:{step_id}:child`.
+- `after_agent_tool_start` / `after_agent_tool_result` (agents as tools, eap_worker.agent_tools): in the
+  caller's workflow, right after the child agent run's workflow was started / right after its result
+  was awaited, and before the caller records `agent_tool_completed`. Filtered by `EAP_CRASH_EVENT_KEY`
+  against `agent_tool:{tool_call_id}:started`. Recovery resumes both workflows: one child run, one
+  completion event, one tool result.
 - `foreach_refill` (LP.10): in a foreach step, right after the parent recorded the start of the
   item that refills the window (item i+c, after awaiting item i) and before it awaits the next
   item. Filtered by `EAP_CRASH_EVENT_KEY` against `loop:{S}:refill` (S: the refilled item's
@@ -100,6 +105,14 @@
   `update_working_memory` uses `after_tool_call`: right after its write, event and ledger row
   committed; recovery is answered from the ledger.)
 
+- `load_system_context` (system-aware Architect): inside `eap.load_system_context`, right after the context was
+  built and rendered and before the step checkpoint. Recovery builds it again (a registry that changed in between
+  is seen), and every later replay of the recorded output renders the same bytes.
+
+- `after_system_context`: in the workflow, right after `eap.load_system_context` and its `system_context_loaded`
+  event were recorded. Recovery must not build the context again: the recorded output renders the same bytes,
+  even if the registry changed in between.
+
 - `observer_request` (RM.13): inside the observer's model request step
   (`eap-observer__model.request`), right after the observer model answered and before the step
   checkpoint (the run is already completed). Recovery calls the observer again; the observation,
@@ -155,6 +168,8 @@ CRASH_POINTS = frozenset(
         "workflow_waiting",
         "foreach_refill",
         "after_child_run_insert",
+        "after_agent_tool_start",
+        "after_agent_tool_result",
         "input_processors",
         "output_processors",
         "moderation_request",
@@ -167,6 +182,8 @@ CRASH_POINTS = frozenset(
         "kb_before_finalize",
         "kb_finalize",
         "load_memory",
+        "load_system_context",
+        "after_system_context",
         "observer_request",
         "after_observation_write",
         "recall_embedding",

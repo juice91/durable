@@ -82,6 +82,10 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 | `settings.connection.list` | – | connections; `credential_refs` are `secret:<name>` references only |
 | `settings.connection.check` | `connection_id` | `{ok, checked_at, error_code}` |
 | `mcp.server.list` | `limit?`, `offset?` | registered MCP servers (header and variable names only) |
+| `capability.list` | `kind?`, `status?`, `query?`, `include_schemas?` | what the platform can do now (the capability registry): entries with status `available`, `designed_not_built` or `disabled`, approval and limits, the known gaps and a snapshot hash |
+| `capability.get` | `capability_id` | one capability with its schemas, limits and the gaps that concern it; an unknown id answers the nearest ids |
+| `system.context` | none | the system context for the caller: capability lines, known gaps, the tenant's resource names and counts (secrets by name only), operational facts and the principal; a layer that could not be built is missing and named in `degraded` |
+| `provenance.get` | `kind`, `definition_id`, `spec_hash?` | what a draft or publish card of an agent or workflow was based on (hashes, principal summary, tool-call names) and the capabilities it uses that changed since |
 | `mcp.catalog.search` | `query?`, `limit?`, `after?`, `source?` | mirrored registry entries |
 | `approvals.list` | `status?`, `kind?`, `agent_id?`, `limit?`, `cursor?` | gated tool calls and workflow approval steps |
 | `scorer.list` | `limit?`, `offset?` | reusable scorers with the agents each is attached to |

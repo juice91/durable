@@ -8,6 +8,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { cn } from "@/lib/cn";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import type { CreatedItem } from "@/lib/architect";
+import { ProvenanceFooter } from "./ProvenanceFooter";
 
 export const ARCHITECT_SHOW_ARCHIVED_KEY = "studio.architect.show-archived";
 
@@ -29,7 +30,7 @@ export interface CreatedListProps {
   onSelectAgent: (item: CreatedItem) => void;
 }
 
-function Row({ item, selected, onSelect }: { item: CreatedItem; selected: boolean; onSelect?: () => void }) {
+function Row({ item, kind, selected, onSelect }: { item: CreatedItem; kind: "agent" | "workflow"; selected: boolean; onSelect?: () => void }) {
   const content = (
     <>
       <span className="min-w-0 flex-1">
@@ -50,12 +51,14 @@ function Row({ item, selected, onSelect }: { item: CreatedItem; selected: boolea
       ) : (
         <div className={rowClass}>{content}</div>
       )}
+      {item.draft && !item.archived ? <ProvenanceFooter kind={kind} definitionId={item.id} card="draft" /> : null}
     </li>
   );
 }
 
-function Group({ heading, headingId, items, showArchived, onToggle, selectedId, onSelect }: {
+function Group({ heading, headingId, kind, items, showArchived, onToggle, selectedId, onSelect }: {
   heading: string;
+  kind: "agent" | "workflow";
   headingId: string;
   items: readonly CreatedItem[];
   showArchived: boolean;
@@ -73,7 +76,7 @@ function Group({ heading, headingId, items, showArchived, onToggle, selectedId, 
       ) : (
         <ul className="space-y-0.5">
           {visible.map((item) => (
-            <Row key={item.id} item={item} selected={item.id === selectedId} onSelect={onSelect ? () => onSelect(item) : undefined} />
+            <Row key={item.id} item={item} kind={kind} selected={item.id === selectedId} onSelect={onSelect ? () => onSelect(item) : undefined} />
           ))}
         </ul>
       )}
@@ -113,8 +116,8 @@ export function CreatedList({ agents, workflows, selectedAgentId, onNew, onSelec
           <DropdownMenuItem data-testid="architect-new-workflow" onSelect={() => onNew("workflow")}>Workflow</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Group heading="Agents" headingId="architect-created-agents" items={agents} showArchived={showArchived} onToggle={toggle} selectedId={selectedAgentId} onSelect={onSelectAgent} />
-      <Group heading="Workflows" headingId="architect-created-workflows" items={workflows} showArchived={showArchived} onToggle={toggle} selectedId={null} />
+      <Group heading="Agents" headingId="architect-created-agents" kind="agent" items={agents} showArchived={showArchived} onToggle={toggle} selectedId={selectedAgentId} onSelect={onSelectAgent} />
+      <Group heading="Workflows" headingId="architect-created-workflows" kind="workflow" items={workflows} showArchived={showArchived} onToggle={toggle} selectedId={null} />
     </div>
   );
 }

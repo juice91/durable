@@ -4,7 +4,7 @@ set -eu
 usage() {
   cat <<'EOF'
 Usage: eap-entrypoint {api|worker|migrate} [arguments]
-  api      Run the API on 0.0.0.0:8000
+  api      Run the API on 0.0.0.0:8000 (no proxy headers: the dev bearer trusts the TCP peer only)
   worker   Run the durable worker
   migrate  Upgrade the application database to the Alembic head
 EOF
@@ -20,7 +20,7 @@ fi
 
 case "$command_name" in
   api)
-    exec uvicorn eap_api.app:create_app --factory --host 0.0.0.0 --port 8000 --no-access-log "$@"
+    exec uvicorn eap_api.app:create_app --factory --host 0.0.0.0 --port 8000 --no-access-log --no-proxy-headers "$@"
     ;;
   worker)
     exec python -m eap_worker "$@"
@@ -46,8 +46,10 @@ case "$command_name" in
         delay=$((delay * 2))
       fi
     done
-    # Alembic is deliberately executed once: migration failures must fail the Job.
-    exec alembic -c packages/db/alembic.ini upgrade head "$@"
+    # Alembic is deliberately executed once: migration failures must fail the Job. Core first, then the branch of every
+    # installed IAM plug-in that owns tables and is listed in EAP_IAM_* (none today: a no-op).
+    alembic -c packages/db/alembic.ini upgrade head "$@"
+    exec eap-db plugins upgrade
     ;;
   help|--help|-h)
     usage
