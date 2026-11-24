@@ -79,11 +79,19 @@ OTHER_EXAMPLES = {
     "kb-source-sync.json",  # KB Source Synchronization (test_kb_source_workflow_acceptance.py)
     "bluesky-post.json",  # Bluesky post (test_bluesky_post_workflow_acceptance.py)
     "best-effort-fetch.json",  # on_error: continue (test_best_effort_fetch_example_loads)
+    "skip-rejected.json",  # workflow.history (test_skip_rejected_example_loads)
 }
 
 
 def test_the_examples_directory_holds_exactly_the_three_loop_examples():
     assert sorted(p.name for p in EXAMPLES_DIR.glob("*.json") if p.name not in OTHER_EXAMPLES) == sorted(EXAMPLES)
+
+
+def test_skip_rejected_example_loads():
+    example = load_example("skip-rejected.json")
+    spec = WorkflowSpec.model_validate(example["spec"])
+    history = next(step for step in spec.steps if step.id == "rejected")
+    assert history.tool_id == "workflow.history" and history.input["select"] == "url"
 
 
 def test_best_effort_fetch_example_loads():
@@ -251,11 +259,11 @@ def test_foreach_triage_runs_every_ticket_and_escalates_only_the_p1(stack):
     assert triage == {"urgency": "normal", "summary": "x"}
     # Kleene: ticket 1 has no priority, so `any(false, unknown)` is unknown and records a warning;
     # ticket 2's "p3" is plain false, with no warning
-    route1 = events["loop:each.1:step:route:completed"][1]
+    route1 = events["loop:each.1:step:route_gate:completed"][1]
     assert route1["output"]["case"] is None
     assert [w["code"] for w in route1.get("warnings", [])] == ["condition_unknown"]
-    assert "warnings" not in events["loop:each.2:step:route:completed"][1]
-    assert "warnings" not in events["loop:each.0:step:route:completed"][1]
+    assert "warnings" not in events["loop:each.2:step:route_gate:completed"][1]
+    assert "warnings" not in events["loop:each.0:step:route_gate:completed"][1]
     with stack.engine.connect() as conn:
         titles = [r[0] for r in conn.execute(
             text("SELECT title FROM fake_external_tickets WHERE tenant_id = :t AND title = 'Checkout is down'"),
@@ -276,7 +284,7 @@ def test_until_polling_checks_three_times_then_escalates(stack):
     assert events["loop:poll.0:step:check:started"][1]["input"]["previous"] == "unknown"
     assert events["loop:poll.1:step:check:started"][1]["input"]["previous"] == "running"
     assert events["loop:poll.2:step:check:started"][1]["input"]["attempt"] == 2
-    assert events["step:outcome:completed"][1]["output"]["next"] == "escalate"
+    assert events["step:outcome_gate:completed"][1]["output"]["next"] == "escalate"
     assert "step:escalate:completed" in events and "step:finished:started" not in events
 
 

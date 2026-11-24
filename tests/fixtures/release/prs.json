@@ -1,0 +1,176 @@
+[
+ {
+  "number": 21,
+  "title": "feat(studio): Settings as tabs",
+  "labels": [
+   {
+    "name": "feature"
+   }
+  ],
+  "mergedAt": "2026-11-16T10:00:00Z",
+  "mergeCommit": {
+   "oid": "0000000000000000000000000000000000000015"
+  }
+ },
+ {
+  "number": 7,
+  "title": "Agents as tools: a supervisor calls published agents",
+  "labels": [
+   {
+    "name": "feature"
+   }
+  ],
+  "mergedAt": "2026-11-17T10:00:00Z",
+  "mergeCommit": {
+   "oid": "0000000000000000000000000000000000000007"
+  }
+ },
+ {
+  "number": 12,
+  "title": "fix(api): eval run double submit is idempotent",
+  "labels": [
+   {
+    "name": "fix"
+   }
+  ],
+  "mergedAt": "2026-11-22T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000000c"
+  }
+ },
+ {
+  "number": 15,
+  "title": "Fix vulnerable JS dependencies (CVE-2026-0001)",
+  "labels": [
+   {
+    "name": "security"
+   }
+  ],
+  "mergedAt": "2026-11-10T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000000f"
+  }
+ },
+ {
+  "number": 9,
+  "title": "docs: pluggable IAM design",
+  "labels": [
+   {
+    "name": "docs"
+   }
+  ],
+  "mergedAt": "2026-11-19T10:00:00Z",
+  "mergeCommit": {
+   "oid": "0000000000000000000000000000000000000009"
+  }
+ },
+ {
+  "number": 30,
+  "title": "ci: skip docs-only heavy runs",
+  "labels": [
+   {
+    "name": "infra"
+   }
+  ],
+  "mergedAt": "2026-11-10T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000001e"
+  }
+ },
+ {
+  "number": 31,
+  "title": "test: timing caps tolerate a loaded runner",
+  "labels": [
+   {
+    "name": "internal"
+   }
+  ],
+  "mergedAt": "2026-11-11T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000001f"
+  }
+ },
+ {
+  "number": 40,
+  "title": "API layering: runs routes go through services",
+  "labels": [
+   {
+    "name": "internal"
+   },
+   {
+    "name": "ci:full"
+   }
+  ],
+  "mergedAt": "2026-11-20T10:00:00Z",
+  "mergeCommit": {
+   "oid": "0000000000000000000000000000000000000028"
+  }
+ },
+ {
+  "number": 41,
+  "title": "feat(workflows): a run can end as skipped",
+  "labels": [],
+  "mergedAt": "2026-11-21T10:00:00Z",
+  "mergeCommit": {
+   "oid": "0000000000000000000000000000000000000029"
+  }
+ },
+ {
+  "number": 42,
+  "title": "fix(studio): dropdowns accept mouse selection",
+  "labels": [],
+  "mergedAt": "2026-11-22T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000002a"
+  }
+ },
+ {
+  "number": 43,
+  "title": "deploy(k8s): project the provider token into the pods",
+  "labels": [],
+  "mergedAt": "2026-11-23T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000002b"
+  }
+ },
+ {
+  "number": 44,
+  "title": "Tidy things that no rule classifies",
+  "labels": [],
+  "mergedAt": "2026-11-24T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000002c"
+  }
+ },
+ {
+  "number": 45,
+  "title": "chore(export): tooling lives in its own directory",
+  "labels": [],
+  "mergedAt": "2026-11-10T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000002d"
+  }
+ },
+ {
+  "number": 46,
+  "title": "release: v0.1.1",
+  "labels": [],
+  "mergedAt": "2026-11-11T10:00:00Z",
+  "mergeCommit": {
+   "oid": "000000000000000000000000000000000000002e"
+  }
+ },
+ {
+  "number": 5,
+  "title": "Fix  the   spacing   in a title",
+  "labels": [
+   {
+    "name": "fix"
+   }
+  ],
+  "mergedAt": "2026-11-15T10:00:00Z",
+  "mergeCommit": {
+   "oid": "0000000000000000000000000000000000000005"
+  }
+ }
+]

@@ -1,0 +1,27 @@
+# Categories for GitHub's generated release notes (gh release create --generate-notes, "Generate release notes").
+# A pull request lands in the first section whose label it carries. The labeler workflow sets the label from the
+# title prefix or the changed paths; docs/releasing.md has the table. `internal` is left out of public notes.
+changelog:
+  exclude:
+    labels:
+      - internal
+      - skip-changelog
+  categories:
+    - title: Features
+      labels:
+        - feature
+    - title: Fixes
+      labels:
+        - fix
+    - title: Security
+      labels:
+        - security
+    - title: Docs
+      labels:
+        - docs
+    - title: Infra and CI
+      labels:
+        - infra
+    - title: Other changes
+      labels:
+        - "*"

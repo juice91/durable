@@ -11,7 +11,10 @@ from eap_run_store.kb_sources import (
     SourceStore,
     SyncStore,
 )
+from eap_run_store.actor import RunActor, bind_actor, current_actor
 from eap_run_store.secrets import SecretStore
+from eap_run_store.audit import AuditEntry, AuditLogModel, AuditStore  # noqa: F401  0036: registers audit_log
+from eap_run_store.provenance import CapabilitySnapshotModel, DefinitionProvenanceModel, ProvenanceStore  # noqa: F401  0037, 0038: registers the tables
 from eap_run_store.revisions import RevisionMismatch
 from eap_run_store.schedules import ScheduleNameConflict, ScheduleStore
 from eap_run_store.cursor import ConversationCursor, InvalidRunCursor, RunCursor

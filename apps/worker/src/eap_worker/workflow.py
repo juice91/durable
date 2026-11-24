@@ -417,6 +417,7 @@ from eap_worker.scoring import score_run_step
 from eap_worker.spans_step import record_spans
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.step_processors import StepProcessorCapability
+from eap_worker.agent_tools import AgentToolsCapability, agent_toolset_for_run
 from eap_worker.control_bridge import control_toolset_for_run
 from eap_worker.platform_tools import RetrieveNumbering, check_no_hidden_tools, platform_toolset_for_run
 from eap_worker.models import PLACEHOLDER_MODEL, fallback_chain, make_resolver, model_id_for
@@ -443,6 +444,15 @@ from eap_worker.processors import (
     strip_thinking,
 )
 from eap_worker.runtime import WorkerDeps, declared_context, get_runtime
+from eap_worker.system_context import (
+    EVENT_KEY as SYSTEM_CONTEXT_EVENT_KEY,
+    EVENT_TYPE as SYSTEM_CONTEXT_EVENT_TYPE,
+    instructions_with_system_context,
+    load_system_context_step,
+    strip_system_context_messages,
+    wants_system_context,
+    with_system_context,
+)
 from eap_worker.workflow_eval import canonical_json, non_finite_path
 
 log = logging.getLogger("eap_worker")
@@ -464,7 +474,9 @@ def _instructions(ctx: RunContext[WorkerDeps]) -> str:
     else:
         base = render_instructions(spec.instructions, ctx.deps.request_context, spec.context_fields)
     memory = memory_of(ctx.deps)
-    return base if memory is None else instructions_with_memory(base, memory)
+    text = base if memory is None else instructions_with_memory(base, memory)
+    # The built-in Architect's recorded platform-facts block (eap_worker.system_context); other runs have none.
+    return instructions_with_system_context(text, ctx.deps)
 
 
 def _knowledge_store() -> KnowledgeStore:
@@ -499,9 +511,11 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     # The Architect's bridge to the MCP control plane (`control__*`): only a spec that lists
     # `platform.list_capabilities`, which only a built-in agent may (eap_worker.control_bridge).
     control = control_toolset_for_run(spec)
-    if mcp is None and platform is None and client is None and control is None:
+    # Agents as tools: other published agents the model may call as child runs (eap_worker.agent_tools).
+    agents = agent_toolset_for_run(spec)
+    if mcp is None and platform is None and client is None and control is None and agents is None:
         return builtin
-    return RunToolset(builtin, mcp, platform, client, control)
+    return RunToolset(builtin, mcp, platform, client, control, agents)
 
 
 def _text_of(event: Any) -> str | None:
@@ -790,6 +804,9 @@ agent: Agent[WorkerDeps, str] = Agent(
         # AGUI.7: the schema check of client tool arguments (workflow-side, no step; a no-op without
         # client tools).
         ClientToolsCapability(),
+        # Agents as tools: an agent-tool call is a child agent run started and awaited workflow-side
+        # (a pass-through for every other tool; steps only for a spec with `agent_tools`).
+        AgentToolsCapability(),
         DBOSDurability(
             parallel_execution_mode="sequential",
             event_stream_handler=_publish_deltas,
@@ -882,9 +899,17 @@ async def start_run_step(
         approval_deny_reason = None
         if run.get("parent_run_id") is not None:
             parent = rt.run_store.get_run(tenant_id, UUID(str(run["parent_run_id"]))) or {}
+            # An agent-tool child (its parent is an agent run) never waits for a person where its
+            # caller would not: the mode of the nearest ancestor that is not an agent run applies.
+            owner_step_id = run.get("parent_step_id")
+            for _ in range(16):
+                if parent.get("kind") != "agent" or parent.get("parent_run_id") is None:
+                    break
+                owner_step_id = parent.get("parent_step_id")
+                parent = rt.run_store.get_run(tenant_id, UUID(str(parent["parent_run_id"]))) or {}
             if parent.get("kind") == "eval":
                 approval_mode = "deny"
-            elif parent.get("kind") == "workflow" and "/" in str(run.get("parent_step_id") or ""):
+            elif parent.get("kind") == "workflow" and "/" in str(owner_step_id or ""):
                 # Loops D8a: the agent step sits in a loop body (its parent_step_id is the scoped
                 # `{S}/{step_id}`; a top-level step id never contains `/`). It never waits.
                 approval_mode = "deny"
@@ -1900,6 +1925,8 @@ async def _drive_agent(
                 scrub_failed_attempts(ModelMessagesTypeAdapter.dump_python(run.result.new_messages(), mode="json")),
                 memory,
             )
+            if deps.system_context is not None:  # the platform-facts block is rebuilt each run, never stored
+                new_messages = strip_system_context_messages(new_messages)
             # The stored messages keep the logged arguments too; what the tool really ran with (the
             # capability's decision on the validated arguments) wins over the pre-run recomputation.
             new_messages = _patch_logged_args(new_messages, logged_all, deps.step_decisions)
@@ -2088,6 +2115,15 @@ async def _run_body(
                     input_text, loaded,
                 )
             deps = with_memory(deps, memory_context(spec, agent_id, link["conversation_id"], loaded, recall))
+        if wants_system_context(spec, builtin):
+            # System-aware Architect: the platform-facts block, built once (recorded) and fixed for the run.
+            context = await load_system_context_step(run_id, tenant_id)
+            await append_event_step(
+                run_id, tenant_id, SYSTEM_CONTEXT_EVENT_KEY, SYSTEM_CONTEXT_EVENT_TYPE, context["provenance"]
+            )
+            deps = with_system_context(deps, context)
+            # Crash-injection tests: the context step and its event are recorded; recovery must reuse them.
+            crash_point("after_system_context")
         # AGUI.7: this turn's client tools, and the previous turn's pending client calls answered.
         client = client_tools_from_link(link)
         resume = client_resume(link)

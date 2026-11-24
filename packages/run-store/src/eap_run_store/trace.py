@@ -199,6 +199,7 @@ MAX_EVENTS_PER_RUN = 10_000
 # span, so this bounds what is loaded before MAX_SPANS and the payload budget apply.
 MAX_TRACE_EVENTS = 4 * MAX_SPANS
 MAX_CHILD_RUNS = 500
+MAX_AGENT_TOOL_LEVELS = 8  # levels of agent-tool child runs read below a child run
 FIELD_MAX_BYTES = 8 * 1024
 PAYLOAD_BUDGET_BYTES = 2 * 1024 * 1024
 # The preview size once the payload budget is spent.
@@ -469,6 +470,32 @@ class TraceReader:
             child_rows = conn.execute(children_query).all()
             children_truncated = len(child_rows) > MAX_CHILD_RUNS
             child_rows = child_rows[:MAX_CHILD_RUNS]
+            # Agents as tools: an agent run's children are the runs of the agents it called, which may call
+            # others. Walk down through agent runs, within the same child budget.
+            frontier = [r for r in child_rows if r[0].kind == "agent"]
+            for _level in range(MAX_AGENT_TOOL_LEVELS):
+                room = MAX_CHILD_RUNS - len(child_rows)
+                if not frontier or room <= 0:
+                    children_truncated = children_truncated or bool(frontier)
+                    break
+                deeper = conn.execute(
+                    _run_select()
+                    .where(RunModel.tenant_id == tenant_id, RunModel.parent_run_id.in_([r[0].id for r in frontier]))
+                    .order_by(RunModel.created_at, RunModel.id)
+                    .limit(room + 1)
+                ).all()
+                if len(deeper) > room:
+                    children_truncated = True
+                    deeper = deeper[:room]
+                child_rows = child_rows + deeper
+                frontier = [r for r in deeper if r[0].kind == "agent"]
+            else:
+                if frontier and conn.execute(  # the level limit: runs below the last level are not read
+                    _run_select()
+                    .where(RunModel.tenant_id == tenant_id, RunModel.parent_run_id.in_([r[0].id for r in frontier]))
+                    .limit(1)
+                ).first() is not None:
+                    children_truncated = True
             runs = [root_run] + [_run_dict(r[0], bool(r[1])) for r in child_rows]
             ids = [r["id"] for r in runs]
             requests: dict[str, dict[str, dict[str, Any]]] = {i: {} for i in ids}
@@ -668,7 +695,10 @@ OBSERVER_ATTRIBUTES = (
 )
 # `post_turn_done` (P1.C1): shown as the run span's `post_turn` attribute (no span of its own).
 POST_TURN_ATTRIBUTES = ("observe", "index")
-_MARKER_EVENTS = frozenset({"post_turn_done", "memory_observe_trimmed", "score"})
+_MARKER_EVENTS = frozenset(
+    {"post_turn_done", "memory_observe_trimmed", "score", "agent_tool_started", "agent_tool_completed"}
+)
+AGENT_TOOL_ATTRIBUTES = ("agent_id", "version", "child_run_id", "depth", "timeout_seconds")
 WORKING_MEMORY_ATTRIBUTES = ("tool_call_id", "scope", "format", "version", "changed_keys", "other_changed_keys", "redacted")
 _EMBED_STAGE_KINDS = {"recall": "memory_recall", "index": "memory_index"}
 
@@ -684,8 +714,15 @@ class _Builder:
         self.spans_truncated = False
         self.parents = step_parents(data.workflow_spec)
         self.children_by_step: dict[str, list[RunData]] = {}
+        # Agents as tools: the runs an agent run started with its tool calls, by (parent run, tool call id).
+        self.children_by_call: dict[tuple[str, str], list[RunData]] = {}
+        root_id = data.root.run["id"]
         for child in data.children:
-            self.children_by_step.setdefault(child.run.get("parent_step_id") or "", []).append(child)
+            if child.run.get("parent_run_id") == root_id:
+                self.children_by_step.setdefault(child.run.get("parent_step_id") or "", []).append(child)
+            self.children_by_call.setdefault(
+                (str(child.run.get("parent_run_id")), child.run.get("parent_step_id") or ""), []
+            ).append(child)
         self.placed_children: set[str] = set()
         # LP.9: scoped spans (iterations, body steps) seen before their parent span, retried after
         # the run's events are walked; those whose parent never appears are dropped.
@@ -878,13 +915,22 @@ class _Builder:
                         if rdata.get(k) is not None:
                             attrs[k] = rdata[k]
                 span_kind = "tool_call"
+                started_call = by_key.get(f"agent_tool:{call_id}:started")
+                completed_call = by_key.get(f"agent_tool:{call_id}:completed")
+                if started_call is not None or completed_call is not None:  # a refused call has no start
+                    attrs.update(self._agent_tool_attributes(started_call, completed_call))
                 if data.get("tool_name") == RETRIEVE_TOOL or data.get("tool_id") == KNOWLEDGE_SEARCH_TOOL:
                     span_kind = "retrieve"
                     attrs.update(self._retrieve_attributes(rd, data, rdata))
-                self.add(
+                tool_span = self.add(
                     f"{rid}:tool:{call_id}", run_span, span_kind, str(data.get("tool_name") or call_id),
                     event["ts"], (result or {}).get("ts"), status, attrs, data.get("args"), out,
                 )
+                if tool_span is not None:  # agents as tools: the child runs nest under their call
+                    for child in self.children_by_call.get((str(rid), str(call_id)), ()):
+                        if child.run["id"] not in self.placed_children:
+                            self.placed_children.add(child.run["id"])
+                            self.run(child, tool_span["id"], "child_run")
             elif etype == "tool_result":
                 last_tool_results.append(
                     {k: data.get(k) for k in ("tool_call_id", "tool_name", "status", "content") if k in data}
@@ -935,6 +981,22 @@ class _Builder:
                     if self._child_scoped(child):
                         continue  # LP.9: a body step's child run never hangs off the run root
                     self.run(child, run_span, "child_run")
+
+    @staticmethod
+    def _agent_tool_attributes(started: dict[str, Any] | None, completed: dict[str, Any] | None) -> dict[str, Any]:
+        """Attributes of an agent-tool call's `tool_call` span, from its `agent_tool_started` and
+        `agent_tool_completed` events: ids, version, depth and the outcome code, never text."""
+        attrs: dict[str, Any] = {"agent_tool": True}
+        sdata = (started or {}).get("data") or {}
+        for k in AGENT_TOOL_ATTRIBUTES:
+            if k in sdata:
+                attrs[f"agent_tool_{k}" if k in ("version", "depth", "timeout_seconds") else k] = sdata[k]
+        if completed is not None:
+            cdata = completed.get("data") or {}
+            attrs["agent_tool_status"] = cdata.get("status")
+            if cdata.get("error_code") is not None:
+                attrs["agent_tool_error_code"] = cdata["error_code"]
+        return attrs
 
     def _processor(self, rd: RunData, event: dict[str, Any], run_span: str) -> None:
         """One `processor_result` event (`processor:{phase}:{i}` or `processor:output:{i}:model:{n}`)

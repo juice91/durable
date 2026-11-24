@@ -30,6 +30,7 @@ EXTRACTOR_VERSIONS: dict[str, int] = {
     # changes a stored document: the API always passes a title, so only the preamble move counts.)
     "json": 1,  # 1 still: JSON output only differs in the title fallback, which API uploads never reach
     "markdown-doxygen": 1,
+    "code": 1,  # source code: AST / declaration / line-window chunks with line ranges
 }  # keys: eap_schemas.knowledge.EXTRACTOR_IDS, in the same order (a contract test checks it)
 
 # How far into a file the PDF signature may start (the decisions' "within its first 1,024 bytes").
@@ -75,10 +76,30 @@ FORMAT_SPECS: tuple[FormatSpec, ...] = (
     FormatSpec("pdf", "application/pdf", (), (".pdf",), "worker", True, "binary", "pdf"),
     FormatSpec("yaml", "application/yaml", ("application/x-yaml", "text/yaml"), (".yaml", ".yml"), "worker", False, "structured", "yaml"),
     FormatSpec("json", "application/json", (), (".json",), "worker", False, "structured", "json"),
+    # Source code (extractor `code`): one format per language, all extracted by the same extractor.
+    FormatSpec("python", "text/x-python", ("text/x-script.python", "application/x-python-code"), (".py",), "worker", False, "text", "code"),
+    FormatSpec("typescript", "text/typescript", ("application/typescript", "text/x-typescript"), (".ts", ".mts", ".cts"), "worker", False, "text", "code"),
+    FormatSpec("tsx", "text/tsx", ("text/x-tsx",), (".tsx",), "worker", False, "text", "code"),
+    FormatSpec("javascript", "text/javascript", ("application/javascript", "application/x-javascript", "text/ecmascript"), (".js", ".mjs", ".cjs", ".jsx"), "worker", False, "text", "code"),
+    FormatSpec("shell", "text/x-shellscript", ("application/x-sh", "text/x-sh"), (".sh", ".bash"), "worker", False, "text", "code"),
+    FormatSpec("toml", "application/toml", ("text/x-toml", "text/toml"), (".toml",), "worker", False, "text", "code"),
+    FormatSpec("sql", "application/sql", ("text/x-sql", "text/sql"), (".sql",), "worker", False, "text", "code"),
+    FormatSpec("dockerfile", "text/x-dockerfile", ("text/dockerfile",), (".dockerfile",), "worker", False, "text", "code"),
+    FormatSpec("css", "text/css", (), (".css",), "worker", False, "text", "code"),
 )
 
+# The formats the `code` extractor handles (registry format names, which are the language names).
+CODE_LANGUAGES: frozenset[str] = frozenset(s.format for s in FORMAT_SPECS if s.extractor == "code")
+
 _BY_MIME: dict[str, FormatSpec] = {m: spec for spec in FORMAT_SPECS for m in spec.mime_types}
-_BY_EXTENSION: dict[str, FormatSpec] = {ext: spec for spec in FORMAT_SPECS for ext in spec.extensions}
+# Extension lookups are split: documents (the importers and Studio map files with them) and source code
+# (opt-in: the GitHub source's `document_policy.types`), so a directory import never picks up `.py` or `.css`.
+_BY_EXTENSION: dict[str, FormatSpec] = {
+    ext: spec for spec in FORMAT_SPECS if spec.extractor != "code" for ext in spec.extensions
+}
+_CODE_BY_EXTENSION: dict[str, FormatSpec] = {
+    ext: spec for spec in FORMAT_SPECS if spec.extractor == "code" for ext in spec.extensions
+}
 _BY_FORMAT: dict[str, FormatSpec] = {spec.format: spec for spec in FORMAT_SPECS}
 
 # Canonical types first, in registry order, then aliases: the 415/422 messages list these.
@@ -111,12 +132,25 @@ def format_by_name(name: str) -> FormatSpec:
     return _BY_FORMAT[name]
 
 
-def format_for_filename(filename: str) -> FormatSpec | None:
-    """The format of a file by its (case-insensitive) extension, or None when it is not supported."""
+def is_dockerfile_name(filename: str) -> bool:
+    """``Dockerfile``, ``Dockerfile.<suffix>`` or ``<name>.dockerfile`` (case-insensitive, base name)."""
+    name = filename.rsplit("/", 1)[-1].lower()
+    return name == "dockerfile" or name.startswith("dockerfile.") or name.endswith(".dockerfile")
+
+
+def format_for_filename(filename: str, *, include_code: bool = False) -> FormatSpec | None:
+    """The format of a file by its (case-insensitive) extension, or None when it is not supported.
+
+    Source code (Python, TypeScript, shell, ...; a Dockerfile by its name) is recognised only with
+    ``include_code=True``: the importers' extension map is the document formats, unchanged."""
+    if include_code and is_dockerfile_name(filename):
+        return _BY_FORMAT["dockerfile"]
     dot = filename.rfind(".")
     if dot < 0 or "/" in filename[dot:]:
         return None
-    return _BY_EXTENSION.get(filename[dot:].lower())
+    ext = filename[dot:].lower()
+    spec = _BY_EXTENSION.get(ext)
+    return spec if spec is not None or not include_code else _CODE_BY_EXTENSION.get(ext)
 
 
 def site_for(mime_type: str, extract: ExtractConfig | None = None) -> ExtractionSite:
@@ -166,6 +200,7 @@ def has_pdf_signature(data: bytes) -> bool:
 
 __all__ = [
     "CANONICAL_MIME_TYPES",
+    "CODE_LANGUAGES",
     "EXTRACTOR_VERSIONS",
     "FORMAT_SPECS",
     "PDF_SIGNATURE_WINDOW",
@@ -180,6 +215,7 @@ __all__ = [
     "format_for_filename",
     "format_for_mime",
     "has_pdf_signature",
+    "is_dockerfile_name",
     "is_worker_extracted",
     "site_for",
 ]

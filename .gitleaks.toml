@@ -53,3 +53,11 @@ paths = [
   '''packages/blob-store/src/eap_blob_store/__init__\.py''',
   '''packages/blob-store/tests/test_contract\.py''',
 ]
+
+[[allowlists]]
+description = "Fake keys in tests: an idempotency key (test_side_effects.py) and a made-up 'pos_abcd1234_' plus filler API key used to test masking (test_system_context.py)."
+targetRules = ["generic-api-key"]
+paths = [
+  '''packages/agent-runtime/runtime_tests/test_side_effects\.py''',
+  '''packages/shared-schemas/tests/test_system_context\.py''',
+]

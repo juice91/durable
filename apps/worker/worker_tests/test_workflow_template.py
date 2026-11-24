@@ -60,3 +60,48 @@ def test_recorded_input_masks_sensitive_headers_only():
     plain = {"headers": {"Accept": "*/*"}, "x": 1}
     assert mask_recorded_input(plain) is plain
     assert mask_recorded_input({"x": 1}) == {"x": 1} and mask_recorded_input({"headers": "str"}) == {"headers": "str"}
+
+
+NESTED_CONTEXT = {"input": {"u": "https://x.example", "n": 3}, "steps": {"s": {"output": {"result": ["a", "b"], "token": "t"}}}}
+
+
+def test_nested_markers_resolve_at_depth_two_three_and_in_lists():
+    out = resolve_template({
+        "label": "x",
+        "exclude_urls": {"$template": "{{ steps.s.output.result }}"},
+        "d2": {"a": {"$ref": "input.u"}},
+        "d3": {"a": {"b": {"$template": {"k": "{{input.u}}/{{input.n}}"}}}},
+        "lst": [{"$ref": "input.n"}, {"k": [{"$template": "Bearer {{steps.s.output.token}}"}, 1, "lit"]}],
+    }, NESTED_CONTEXT)
+    assert out == {
+        "label": "x",
+        "exclude_urls": ["a", "b"],
+        "d2": {"a": "https://x.example"},
+        "d3": {"a": {"b": {"k": "https://x.example/3"}}},
+        "lst": [3, {"k": ["Bearer t", 1, "lit"]}],
+    }
+
+
+def test_nested_markers_keep_types_and_mixed_strings_render_as_text():
+    out = resolve_template({"a": {"n": {"$ref": "input.n"}, "l": {"$template": "{{steps.s.output.result}}"},
+                                  "t": {"$template": "n={{input.n}}"}}}, NESTED_CONTEXT)
+    assert out == {"a": {"n": 3, "l": ["a", "b"], "t": "n=3"}}
+    assert isinstance(out["a"]["n"], int)
+
+
+def test_a_nested_marker_that_does_not_resolve_is_ref_missing():
+    with pytest.raises(RefMissing):
+        resolve_template({"a": [{"b": {"$ref": "input.nope"}}]}, NESTED_CONTEXT)
+    with pytest.raises(RefMissing):
+        resolve_template({"a": {"b": {"$template": "{{input.nope}}"}}}, NESTED_CONTEXT)
+
+
+def test_a_dict_with_a_marker_key_and_siblings_is_data_not_a_marker():
+    # Publishing refuses it; at run time it is never half-resolved.
+    value = {"$ref": "input.u", "other": 1}
+    assert resolve_template({"a": {"b": value}}, NESTED_CONTEXT) == {"a": {"b": value}}
+
+
+def test_markers_inside_a_template_value_are_not_resolved_again():
+    out = resolve_template({"a": {"$template": {"k": {"$ref": "input.u"}}}}, NESTED_CONTEXT)
+    assert out == {"a": {"k": {"$ref": "input.u"}}}

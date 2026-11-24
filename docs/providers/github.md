@@ -49,7 +49,7 @@ not read a repository; a wrong repository name shows up as `not_found` in the fi
 | `include` | path globs (at least one); `exclude`: globs removed from that set |
 | `map` | ordered rules `{match, metadata}`; the **first** matching rule's metadata goes on the document (rules are not merged) |
 | `max_bytes` | per-file cap, never above 5 MiB for text or 25 MiB for PDF (the knowledge base's caps) |
-| `document_policy.types` | extensions to take; default all of `md rst html txt yaml yml json pdf` |
+| `document_policy.types` | extensions to take; default all of `md rst html txt yaml yml json pdf`. Source code is opt-in: add any of `py ts tsx js jsx mjs cjs sh toml sql dockerfile` (`dockerfile` matches `Dockerfile`, `Dockerfile.*` and `*.dockerfile` by file name). See *Source code* below |
 | `document_policy.delete_missing` | delete knowledge-base documents whose files disappeared (see below); default `false` |
 | `key_prefix` | document-key prefix; the key is the prefix plus the path with `/` as `~` (over 256 characters: shortened with a hash) |
 
@@ -115,3 +115,19 @@ walk of a corpus of 1,000 files needs a token); with a token: 5,000 an hour.
 GitLab and Bitbucket (another adapter), submodules, Git LFS pointers (they are small text files and would be ingested as such: exclude
 them), private GitHub Enterprise hosts (configurable, untested), the `restart` flag re-fetching unchanged blobs (a restart re-walks
 from offset 0; unchanged blobs still cost nothing).
+
+## Source code
+
+Code types are opt-in (`document_policy.types`); the default types and every existing source are unchanged. A code document is
+extracted by the `code` extractor in the extraction sandbox (`eap_knowledge.formats.code`): Python by `ast` (a header chunk, one chunk
+per function or class, big classes by method), TypeScript/TSX/JavaScript by a declaration scanner, shell, TOML, SQL and Dockerfile at
+their natural boundaries, everything else (and any file that does not parse) in overlapping line windows. Each chunk has the header line
+`# path:start-end symbol` and the code verbatim, `metadata.eap` with `language`, `path`, `symbol`, `start_line`, `end_line`, `kind`, and a
+citation `https://github.com/<repo>/blob/<commit>/<path>#L<start>-L<end>`. Generated files (`Code generated`, `DO NOT EDIT`,
+`@generated` in the first lines), minified files (a line over 2,000 characters) and binary files produce no chunks.
+
+The adapter stamps `kind: code` and `language: <python|typescript|tsx|javascript|shell|toml|sql|dockerfile>` on a code document; a `map`
+rule may set another `kind` (for example `test`). `kb.search` filters on `kind`, `language`, `component` and `path` like any metadata, and
+on `path_prefix` (a string or a list: any chunk whose `path` starts with one of them). A worked configuration for a whole repository is
+`examples/kb-sources/durable-platform-docs.json`; sizing and a phased first sync are in
+`docs/superpowers/specs/2026-11-22-architect-system-context-design.md` (6.7).

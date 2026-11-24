@@ -24,12 +24,17 @@ from fastmcp.tools.base import ToolResult
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from eap_api import control_catalog
+from eap_api.audit import record_mcp_change
+from eap_api.auth import bind_agui_actor
 from eap_api.mcp_control.audit import audit_call
 from eap_api.mcp_control.auth import PRINCIPAL_SCOPE_KEY, McpAuthError, actor_id, authenticate, has_manage
 from eap_api.mcp_control.routing import Ctx, McpToolError
 from eap_api.deps import mcp_limiter_of
 
 log = logging.getLogger("eap_api.mcp_control")
+
+DENIED_CODES = frozenset({"scope_required", "human_only", "forbidden"})
 
 MOUNT_PATH = "/api/v1/mcp"
 # A result or resource is cut to this many bytes (the shared bound; tools bound their own lists further).
@@ -85,11 +90,19 @@ class _Guard:
 def register(mcp: FastMCP) -> Callable[..., Callable[[Callable[..., Any]], Callable[..., Any]]]:
     """`tool(name, manage=False)` and `resource(uri)` decorators bound to `mcp`."""
 
-    def tool(name: str, *, manage: bool = False, description: str | None = None, human_only: bool = False):
-        """`human_only` keeps the tool away from the Architect's own `control__*` bridge (tag `human_only`)."""
+    def tool(
+        name: str, *, manage: bool = False, description: str | None = None, human_only: bool = False,
+        internal: bool = False,
+    ):
+        """`human_only` keeps the tool away from the Architect's own `control__*` bridge (tag `human_only`).
+        `internal` keeps it away from the Architect's model but lets the worker's own code call it as the
+        Architect's run (tag `internal`): the bridge hides it from the model's toolset."""
 
         def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
             guard = _Guard(name, manage, human_only)
+            control_catalog.record(
+                name, manage=manage, description=description or fn.__doc__, human_only=human_only, internal=internal
+            )
 
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> ToolResult:
@@ -99,16 +112,23 @@ def register(mcp: FastMCP) -> Callable[..., Callable[[Callable[..., Any]], Calla
                 except McpToolError as exc:
                     return ToolResult(structured_content=exc.body, is_error=True)
                 token = _ctx.set(ctx)
+                bind_agui_actor(ctx.principal)  # a run this tool starts names who started it
                 try:
                     data = await fn(*args, **kwargs)
                     audit_call(tool=name, tenant_id=ctx.tenant_id, principal_id=who, outcome="ok")
+                    if manage:
+                        await record_mcp_change(ctx, name, "success")
                     return ToolResult(structured_content=_bound(data))
                 except McpToolError as exc:
                     audit_call(tool=name, tenant_id=ctx.tenant_id, principal_id=who, outcome="error", code=exc.code)
+                    if manage:
+                        await record_mcp_change(ctx, name, "denied" if exc.code in DENIED_CODES else "failed")
                     return ToolResult(structured_content=exc.body, is_error=True)
                 except Exception:  # noqa: BLE001 - never a traceback to the client
                     log.exception("mcp tool %s failed", name)
                     audit_call(tool=name, tenant_id=ctx.tenant_id, principal_id=who, outcome="error", code="internal")
+                    if manage:
+                        await record_mcp_change(ctx, name, "failed")
                     return ToolResult(
                         structured_content={"error": {"code": "internal", "message": "the call failed; see the platform logs"}},
                         is_error=True,
@@ -118,7 +138,8 @@ def register(mcp: FastMCP) -> Callable[..., Callable[[Callable[..., Any]], Calla
                     lease.release()
 
             mcp.tool(name=name, description=description or (fn.__doc__ or "").strip() or None, output_schema=None,
-                     tags=({"manage"} if manage else {"read"}) | ({"human_only"} if human_only else set()))(wrapper)
+                     tags=({"manage"} if manage else {"read"}) | ({"human_only"} if human_only else set())
+                     | ({"internal"} if internal else set()))(wrapper)
             return wrapper
 
         return decorate
@@ -166,7 +187,14 @@ class McpControlASGI:
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
         try:
-            principal = await authenticate(self.app, headers.get("authorization"), headers.get("origin"))
+            client = scope.get("client")
+            principal = await authenticate(
+                self.app,
+                headers.get("authorization"),
+                headers.get("origin"),
+                headers=headers,
+                peer_host=client[0] if client else None,
+            )
         except McpAuthError as exc:
             code = "unauthorized" if exc.status == 401 else "forbidden"
             response = JSONResponse(

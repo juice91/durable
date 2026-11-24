@@ -252,6 +252,32 @@ def test_pdf_end_to_end():
     assert result.document.sections[0].page == 1
 
 
+def test_code_extraction_runs_in_the_sandbox_under_the_audit_hook():
+    source = "import os\n\n\ndef a():\n    return os.name\n\n\nclass B:\n    pass\n"
+    code = {"language": "python", "path": "pkg/m.py", "kind": "test"}
+    result = _run(extract_in_sandbox("code", source, source_url="https://h/m.py", max_tokens=512,
+                                     overlap_tokens=32, code=code, limits=FAST))
+    assert result.document.format == "code"
+    got = [(s.code.symbol, s.code.start_line, s.code.end_line, s.code.kind, s.anchor) for s in result.document.sections]
+    assert got == [("<module>", 1, 1, "test", "L1-L1"), ("a", 4, 5, "test", "L4-L5"), ("B", 8, 9, "test", "L8-L9")]
+    assert result.document.sections[1].text.startswith("# pkg/m.py:4-5 a\n")
+
+
+def test_code_extraction_needs_a_language_and_a_path():
+    exc = _run(_fails(extract_in_sandbox("code", "x = 1", code={"language": "cobol", "path": "a"}, limits=FAST)))
+    assert exc.code == "extract_failed"
+    exc = _run(_fails(extract_in_sandbox("code", "x = 1", code=None, limits=FAST)))
+    assert exc.code == "extract_failed"
+
+
+def test_code_extraction_reports_generated_files_and_refuses_binary():
+    code = {"language": "javascript", "path": "a.js"}
+    result = _run(extract_in_sandbox("code", "// Code generated. DO NOT EDIT.\nvar a = 1;\n", code=code, limits=FAST))
+    assert result.document.sections == () and result.document.warnings == ("generated_skipped",)
+    exc = _run(_fails(extract_in_sandbox("code", "a\x00b", code=code, limits=FAST)))
+    assert exc.code == "unsupported_content"
+
+
 def test_options_and_limits_reach_the_child():
     content = base64.b64encode(manual_pdf()).decode()
     result = _run(extract_in_sandbox("pdf", content, options={"pdf_headings": "pages"}, limits=FAST))

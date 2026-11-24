@@ -21,7 +21,14 @@ UNTRUSTED_EVENT = re.compile(r"\$\{\{[^}]*github\.event\.", re.IGNORECASE)
 # test_privileged_workflows_never_check_out_or_run_pr_code holds them to a stricter rule of their own.
 PRIVILEGED_WORKFLOWS = {
     "cla.yml": "the CLA bot must comment on pull requests and record signatures; it never checks out or runs pull-request code",
+    "labeler.yml": "labels a pull request; runs the base commit's script, never the pull request's code",
+    "release.yml": "pushes the release branch and opens the release pull request, from main, by the repository owner",
+    "release-tag.yml": "tags the pushed main commit and creates the GitHub Release",
+    "release-public.yml": "tags and creates the Release in the public mirror only",
 }
+# The release family has its own, stricter rules (test_release_workflows_are_least_privilege); the CLA bot rule
+# (no checkout, no run step) does not fit workflows that must run the release scripts.
+RELEASE_WORKFLOWS = ("labeler.yml", "release.yml", "release-tag.yml", "release-public.yml")
 CLA_SENTENCE = "I have read the CLA Document and I hereby sign the CLA"
 
 
@@ -59,6 +66,8 @@ def test_workflows_default_to_read_only_contents():
         assert _load(name).get("permissions") == {"contents": "read"}, name
 
 
+# The labeler runs on pull_request only, so its guard needs no event-name clause.
+PULL_REQUEST_SAME_REPO = "github.event.pull_request.head.repo.full_name == github.repository"
 SAME_REPO_ONLY = (
     "github.event_name != 'pull_request' || "
     "github.event.pull_request.head.repo.full_name == github.repository"
@@ -77,7 +86,7 @@ def _may_be_self_hosted(job: dict[str, Any]) -> bool:
 def _guarded(job: dict[str, Any]) -> bool:
     return " ".join(job.get("if", "").split()).startswith(f"({SAME_REPO_ONLY})") or " ".join(
         job.get("if", "").split()
-    ) == SAME_REPO_ONLY
+    ) in (SAME_REPO_ONLY, PULL_REQUEST_SAME_REPO)
 
 
 def test_ci_runs_on_defaults_to_hosted_and_reads_only_ci_runner():
@@ -101,9 +110,9 @@ def test_self_hosted_workflows_never_run_fork_code():
         for forbidden in ("pull_request_target", "issue_comment"):
             assert forbidden not in events, name
         if "pull_request" in events:
-            # Only CI Heavy and CI (when CI_RUNNER is set) run for pull requests, and only for
-            # branches of this repository.
-            assert name in ("ci-heavy.yml", "ci.yml"), name
+            # Only CI Heavy, CI and the labeler (when CI_RUNNER is set) run for pull requests, and only for
+            # branches of this repository. The labeler runs the base commit's script, not the pull request's.
+            assert name in ("ci-heavy.yml", "ci.yml", "labeler.yml"), name
             for job in self_hosted:
                 assert _guarded(job), name
         push = events.get("push")
@@ -144,7 +153,7 @@ def test_no_workflow_lists_issue_comment_or_a_write_permission():
 
 
 def test_privileged_workflows_never_check_out_or_run_pr_code():
-    present = [name for name in PRIVILEGED_WORKFLOWS if name in WORKFLOW_NAMES]
+    present = [name for name in PRIVILEGED_WORKFLOWS if name in WORKFLOW_NAMES and name not in RELEASE_WORKFLOWS]
     if not present:
         print(f"no privileged workflow present ({', '.join(PRIVILEGED_WORKFLOWS)}): nothing to check")
         return
@@ -168,6 +177,68 @@ def test_privileged_workflows_never_check_out_or_run_pr_code():
                     f"{name}/{job_name}: {clause}"
                 )
             assert allowed_comments <= set(clauses), f"{name}/{job_name}"
+
+
+def test_release_workflows_are_least_privilege():
+    """Versioning and releases (docs/releasing.md): the CI_RUNNER runner expression, a read-only default, write scopes
+    named per job and only the two a release needs, a pinned checkout without persisted credentials, and
+    no trigger that runs pull-request code with a write token."""
+    for name in RELEASE_WORKFLOWS:
+        if name not in WORKFLOW_NAMES:
+            continue  # the public tree leaves the upstream-only ones out
+        workflow = _load(name)
+        assert PRIVILEGED_WORKFLOWS[name], name
+        assert workflow["permissions"] == {"contents": "read"}, name
+        events = workflow["on"]
+        assert "pull_request_target" not in events and "issue_comment" not in events, name
+        if "pull_request" in events:
+            assert name == "labeler.yml", name
+        text = (WORKFLOW_DIR / name).read_text()
+        assert not re.search(r"\$\{\{\s*secrets\.", text), name
+        granted = set()
+        for job_name, job in workflow["jobs"].items():
+            assert job["runs-on"] == CI_RUNNER_EXPRESSION, f"{name}/{job_name}"
+            assert "timeout-minutes" in job, f"{name}/{job_name}"
+            granted |= {k for k, v in job["permissions"].items() if v == "write"}
+            for step in job["steps"]:
+                if str(step.get("uses", "")).startswith("actions/checkout"):
+                    assert step["with"]["persist-credentials"] == "false", f"{name}/{job_name}"
+                if "uses" in step:
+                    assert SHA.fullmatch(step["uses"]), f"{name}/{job_name}: {step['uses']}"
+        allowed = {"labeler.yml": {"pull-requests"}, "release.yml": {"contents", "pull-requests"},
+                   "release-tag.yml": {"contents"}, "release-public.yml": {"contents"}}[name]
+        assert granted == allowed, f"{name}: {granted}"
+
+
+def test_labeler_runs_trusted_code_for_same_repo_pull_requests_only():
+    workflow = _load("labeler.yml")
+    job = workflow["jobs"]["label"]
+    assert job["if"] == "github.event.pull_request.head.repo.full_name == github.repository"
+    checkout = job["steps"][0]
+    # The base commit, never the pull request's merge ref or head: no pull-request code runs with the write token.
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert all("head" not in str(step.get("with", {}).get("ref", "")) for step in job["steps"])
+
+
+def test_release_workflows_gate_who_and_where():
+    if "release.yml" in WORKFLOW_NAMES:  # the private release workflows are not exported
+        assert _load("release.yml")["jobs"]["release-pr"]["if"] == (
+            "github.ref == 'refs/heads/main' && github.actor == github.repository_owner"
+        )
+        assert list(_load("release.yml")["on"]) == ["workflow_dispatch"]
+        assert _load("release-tag.yml")["on"]["push"]["branches"] == ["main"]
+    if "release-public.yml" in WORKFLOW_NAMES:
+        # Exported to the public mirror with the rest of the workflows; inert anywhere else.
+        assert _load("release-public.yml")["jobs"]["release"]["if"] == "github.repository == 'juice91/durable'"
+
+
+def test_deploy_records_the_version_it_deployed():
+    if "deploy.yml" not in WORKFLOW_NAMES:
+        return
+    steps = _load("deploy.yml")["jobs"]["deploy"]["steps"]
+    record = next(s for s in steps if s.get("name") == "Record the version being deployed")
+    assert "GITHUB_STEP_SUMMARY" in record["run"] and "SHA:0:12" in record["run"]
+    assert steps.index(record) < next(i for i, s in enumerate(steps) if s.get("name") == "Deploy this revision")
 
 
 def test_hosted_path_filters_skip_unaffected_jobs():
@@ -325,3 +396,36 @@ def test_selection_scripts_exist_and_do_not_use_untrusted_input():
     assert "PR_TITLE" not in script.read_text() and "HEAD_REF" not in script.read_text()
 
 
+
+
+HOSTED_RUNNER = re.compile(r"\b(ubuntu|macos|windows)-[\w.]+", re.IGNORECASE)
+
+
+def test_no_workflow_hard_codes_a_github_hosted_runner():
+    # GitHub-hosted runners are blocked for the private repository. A job either targets self-hosted labels or
+    # reads the repository variable CI_RUNNER, falling back to ubuntu-latest where it is unset (the public mirror).
+    for name in WORKFLOW_NAMES:
+        if name in ("cla.yml", "codeql.yml", "pages.yml", "security.yml"):
+            continue  # owned by the public repository, where GitHub-hosted runners are the norm
+        for job_name, job in (_load(name).get("jobs") or {}).items():
+            runs_on = job.get("runs-on")
+            assert runs_on, f"{name}:{job_name} has no runs-on"
+            labels = runs_on if isinstance(runs_on, list) else [runs_on]
+            if "self-hosted" in labels:
+                continue
+            text = " ".join(str(label) for label in labels)
+            assert "vars.CI_RUNNER" in text and "fromJSON(vars.CI_RUNNER)" in text, (
+                f"{name}:{job_name} runs-on {runs_on!r} must use the CI_RUNNER fallback expression"
+            )
+            if HOSTED_RUNNER.search(text):
+                assert text.count("ubuntu-latest") == 1 and not re.search(r"macos|windows", text, re.I), (
+                    f"{name}:{job_name} hard-codes a hosted runner beyond the fallback"
+                )
+
+
+def test_labeler_skips_when_the_base_commit_has_no_labeler_script():
+    # A pull request into a repository whose base predates scripts/release/labels.py (the first sync) must pass,
+    # not fail on a missing file: every step after the checkout is guarded on the script being present.
+    steps = _load("labeler.yml")["jobs"]["label"]["steps"]
+    guard = "hashFiles('scripts/release/labels.py') != ''"
+    assert all(step.get("if") == guard for step in steps[1:])

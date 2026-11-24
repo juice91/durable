@@ -37,6 +37,7 @@ from eap_schemas.workflows import (
     Step,
     ToolStep,
     WorkflowSpec,
+    input_markers,
     iter_refs,
     loop_exit_refs,
     parse_ref,
@@ -173,6 +174,37 @@ def unpublished_agents(conn: Connection, spec: WorkflowSpec, tenant_id: str) -> 
     return found
 
 
+_MODEL_LEVEL_ERRORS = frozenset({"value_error", "assertion_error"})
+
+
+def tool_input_problems(spec: WorkflowSpec) -> list[str]:
+    """Tool steps whose input cannot match the tool's input model whatever the markers resolve to. The
+    input is validated as written; an error at or under a `$ref` / `$template` marker (or a model-level
+    check over a field that holds one) is skipped, since the value is only known at run time, so a valid
+    templated input is never refused. Unknown tools are left to reference_problems."""
+    problems: list[str] = []
+    for _, step in walk_steps(spec.steps):
+        declaration = TOOL_DECLARATIONS.get(step.tool_id) if isinstance(step, ToolStep) else None
+        if declaration is None:
+            continue
+        marked = [
+            (field, *path) for field, value in step.input.items() for path, _k, _p in input_markers(value)
+        ]
+        try:
+            declaration.input_model.model_validate(step.input)
+        except ValidationError as exc:
+            for err in exc.errors():
+                loc = tuple(err["loc"])
+                if any(loc[: len(m)] == m and (len(loc) > len(m) or err["type"] != "extra_forbidden")
+                       for m in marked):
+                    continue  # at or under a marker (an unknown FIELD that holds one is still unknown)
+                if any(m[: len(loc)] == loc for m in marked) and err["type"] in _MODEL_LEVEL_ERRORS:
+                    continue  # a validator over a value that a marker supplies
+                where = ".".join(str(part) for part in loc) or "input"
+                problems.append(f"step '{step.id}': input '{where}' does not match tool '{step.tool_id}': {err['msg']}")
+    return problems
+
+
 def reference_problems(conn: Connection, spec: WorkflowSpec, tenant_id: str, *, lock: bool = False) -> list[str]:
     """What a spec points at that this tenant cannot run, one message per problem, naming the step:
     agent and tool steps at every depth (loop bodies included), judge models, and the loop caps.
@@ -220,6 +252,7 @@ def reference_problems(conn: Connection, spec: WorkflowSpec, tenant_id: str, *, 
                     f"step '{step.id}': tool '{step.tool_id}' is not allowed on this platform "
                     "(not in the EAP_ALLOWED_TOOLS allowlist)"
                 )
+    problems += tool_input_problems(spec)
     problems += judge_model_problems(spec)
     return problems
 
@@ -630,3 +663,72 @@ def agent_step_cost_cap_warnings(conn: Connection, spec: WorkflowSpec, tenant_id
             })
     return warnings
 
+
+
+WARNING_STEP_ID_CONVENTION = "step_id_convention"
+STEP_ID_MAX_LENGTH = 40
+_GATE_SUFFIX = "_gate"
+_RETURN_PREFIX = "ret_"
+_GATE_TOKENS = frozenset({"gate"})
+_RETURN_TOKENS = frozenset({"ret", "r", "return"})
+
+
+def _trim_id(name: str, limit: int = STEP_ID_MAX_LENGTH) -> str:
+    """`name` cut to `limit` characters at an underscore when one is close enough."""
+    if len(name) <= limit:
+        return name
+    cut = name[:limit]
+    head = cut.rsplit("_", 1)[0]
+    return head if len(head) >= limit // 2 else cut.rstrip("_")
+
+
+def _stem(step_id: str, tokens: frozenset[str]) -> list[str]:
+    """The id's underscore-separated words with the convention's marker words removed from both ends."""
+    parts = step_id.split("_")
+    while parts and parts[0] in tokens:
+        parts.pop(0)
+    while parts and parts[-1] in tokens:
+        parts.pop()
+    return [p for p in parts if p]
+
+
+def suggested_step_id(step: Step) -> str | None:
+    """The convention's name for a step whose id breaks it, or None when the id conforms: branch steps
+    `<subject>_gate`, workflow.return tool steps `ret_<reason>`, every step at most 40 characters."""
+    step_id = step.id
+    if step.type == "branch":
+        if step_id.endswith(_GATE_SUFFIX) and len(step_id) > len(_GATE_SUFFIX) and len(step_id) <= STEP_ID_MAX_LENGTH:
+            return None
+        stem = "_".join(_stem(step_id, _GATE_TOKENS)) or "check"
+        return _trim_id(stem, STEP_ID_MAX_LENGTH - len(_GATE_SUFFIX)) + _GATE_SUFFIX
+    if isinstance(step, ToolStep) and step.tool_id == "workflow.return":
+        if step_id.startswith(_RETURN_PREFIX) and len(step_id) > len(_RETURN_PREFIX) and len(step_id) <= STEP_ID_MAX_LENGTH:
+            return None
+        stem = "_".join(_stem(step_id, _RETURN_TOKENS)) or "done"
+        return _RETURN_PREFIX + _trim_id(stem, STEP_ID_MAX_LENGTH - len(_RETURN_PREFIX))
+    if len(step_id) > STEP_ID_MAX_LENGTH:
+        return _trim_id(step_id)
+    return None
+
+
+def step_id_convention_warnings(spec: WorkflowSpec) -> list[dict[str, str]]:
+    """One `step_id_convention` warning per step id (at every depth, loop bodies included) that breaks
+    the naming convention, with the suggested name. A warning, never a 422: existing workflows keep
+    publishing. `path` is the step's path."""
+    warnings: list[dict[str, str]] = []
+    for where, _, step in _walk_with_paths(spec.steps):
+        suggestion = suggested_step_id(step)
+        if suggestion is None:
+            continue
+        if step.type == "branch":
+            rule = "a branch step is named <subject>_gate"
+        elif isinstance(step, ToolStep) and step.tool_id == "workflow.return":
+            rule = "a workflow.return step is named ret_<reason>"
+        else:
+            rule = f"a step id is at most {STEP_ID_MAX_LENGTH} characters"
+        warnings.append({
+            "code": WARNING_STEP_ID_CONVENTION,
+            "path": where,
+            "message": f"step '{step.id}': {rule}; suggested name '{suggestion}'",
+        })
+    return warnings

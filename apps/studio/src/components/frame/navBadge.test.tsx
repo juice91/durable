@@ -41,6 +41,11 @@ afterEach(() => {
 
 const sidebar = () => screen.getByTestId("sidebar");
 
+/** The calls that are not the header's capabilities read (CurrentUser). */
+function approvalCalls(mock: { mock: { calls: unknown[][] } }) {
+  return mock.mock.calls.filter((call) => !String(call[0]).includes("/iam/capabilities"));
+}
+
 describe("Approvals nav item and pending badge (AC.15)", () => {
   test("Approvals is the first item, in the untitled top group", () => {
     fetchMock.mockResolvedValue(pendingPage(0));
@@ -57,7 +62,7 @@ describe("Approvals nav item and pending badge (AC.15)", () => {
     expect(await within(sidebar()).findByTestId("nav-badge-approvals")).toHaveTextContent("3");
     expect(within(sidebar()).getByRole("link", { name: "Approvals, 3 pending" })).toBeInTheDocument();
     expect(String(fetchMock.mock.calls[0][0])).toContain("/api/v1/approvals?status=pending");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(approvalCalls(fetchMock)).toHaveLength(1);
   });
 
   test("hidden at 0; caps at 99+ when there are more pages", async () => {
@@ -76,12 +81,12 @@ describe("Approvals nav item and pending badge (AC.15)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     fetchMock.mockResolvedValue(pendingPage(1));
     render(<FrameHarness />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(1));
     fetchMock.mockResolvedValue(pendingPage(2));
     await act(async () => {
       vi.advanceTimersByTime(PENDING_POLL_MS);
     });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(2));
     expect(await within(sidebar()).findByTestId("nav-badge-approvals")).toHaveTextContent("2");
   });
 
@@ -89,14 +94,14 @@ describe("Approvals nav item and pending badge (AC.15)", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     fetchMock.mockResolvedValue(pendingPage(1));
     const { unmount } = render(<FrameHarness />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(1));
     expect(isPendingPollingForTests()).toBe(true);
     unmount();
     expect(isPendingPollingForTests()).toBe(false);
     await act(async () => {
       vi.advanceTimersByTime(PENDING_POLL_MS * 3);
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(approvalCalls(fetchMock)).toHaveLength(1);
   });
 
   test("pauses while the tab is hidden and catches up once when it is visible again", async () => {
@@ -106,7 +111,7 @@ describe("Approvals nav item and pending badge (AC.15)", () => {
     try {
       fetchMock.mockResolvedValue(pendingPage(1));
       render(<FrameHarness />);
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(1));
       visibility = "hidden";
       act(() => {
         document.dispatchEvent(new Event("visibilitychange"));
@@ -115,19 +120,19 @@ describe("Approvals nav item and pending badge (AC.15)", () => {
       await act(async () => {
         vi.advanceTimersByTime(PENDING_POLL_MS * 3);
       });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(approvalCalls(fetchMock)).toHaveLength(1);
       fetchMock.mockResolvedValue(pendingPage(5));
       visibility = "visible";
       act(() => {
         document.dispatchEvent(new Event("visibilitychange"));
       });
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(2));
       expect(await within(sidebar()).findByTestId("nav-badge-approvals")).toHaveTextContent("5");
       expect(isPendingPollingForTests()).toBe(true);
       await act(async () => {
         vi.advanceTimersByTime(PENDING_POLL_MS);
       });
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(3));
     } finally {
       spy.mockRestore();
     }

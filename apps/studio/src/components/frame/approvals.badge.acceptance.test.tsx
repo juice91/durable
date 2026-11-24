@@ -36,18 +36,23 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+/** The calls that are not the header's capabilities read (CurrentUser). */
+function approvalCalls(mock: { mock: { calls: unknown[][] } }) {
+  return mock.mock.calls.filter((call) => !String(call[0]).includes("/iam/capabilities"));
+}
+
 describe("pending badge", () => {
   test("polls every 30 s with fake timers, and a count that drops to 0 hides the badge", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     fetchMock.mockImplementation(async () => page(3));
     render(<FrameHarness />);
     await waitFor(() => expect(badge()).toHaveTextContent("3"));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(approvalCalls(fetchMock)).toHaveLength(1);
     await act(async () => { vi.advanceTimersByTime(PENDING_POLL_MS - 1000); });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(approvalCalls(fetchMock)).toHaveLength(1);
     fetchMock.mockImplementation(async () => page(0));
     await act(async () => { vi.advanceTimersByTime(1000); });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(2));
     await waitFor(() => expect(badge()).toBeNull());
     expect(within(sidebar()).getByRole("link", { name: "Approvals" })).toBeInTheDocument();
   });
@@ -59,7 +64,7 @@ describe("pending badge", () => {
     await waitFor(() => expect(badge()).toHaveTextContent("2"));
     fetchMock.mockImplementation(async () => jsonResponse({ detail: "boom" }, 500));
     await act(async () => { vi.advanceTimersByTime(PENDING_POLL_MS); });
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(approvalCalls(fetchMock)).toHaveLength(2));
     expect(badge()).toHaveTextContent("2");
   });
 
@@ -77,7 +82,7 @@ describe("pending badge", () => {
     render(<FrameHarness />);
     expect(await screen.findByTestId("mobile-nav-badge-dot")).toBeInTheDocument();
     await waitFor(() => expect(badge()).toHaveTextContent("5"));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(approvalCalls(fetchMock)).toHaveLength(1);
   });
 
   test("no dot on mobile and none in the rail while nothing is pending", async () => {

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-iam-devloopback"
+version = "0.3.0"
+description = "IAM identity plug-in: the dev bearer dev:<tenant>:<user>, accepted only from a loopback TCP peer"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "eap-iam",
+    "pyjwt[crypto]>=2.8",
+]
+
+[project.entry-points."eap.iam.identity"]
+devloopback = "eap_iam_devloopback:create"
+
+[tool.uv.sources]
+eap-iam = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_iam_devloopback"]

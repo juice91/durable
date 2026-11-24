@@ -15,14 +15,14 @@ FROM base AS builder
 ARG NEXT_PUBLIC_EAP_API_URL=
 # Target of the /api/:path* rewrite in next.config.ts (baked at build time).
 ARG EAP_API_INTERNAL_URL=http://api.pydanticos.svc.cluster.local:8000
-ARG NEXT_PUBLIC_EAP_DEV_TOKEN="Bearer dev:studio:operator"
 ENV NEXT_PUBLIC_EAP_API_URL=$NEXT_PUBLIC_EAP_API_URL
 ENV EAP_API_INTERNAL_URL=$EAP_API_INTERNAL_URL
-ENV NEXT_PUBLIC_EAP_DEV_TOKEN=$NEXT_PUBLIC_EAP_DEV_TOKEN
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/studio/node_modules ./apps/studio/node_modules
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/studio ./apps/studio
+# No credential is built in: the public host authenticates with the Cloudflare Access cookie and JWT, the loopback page
+# gets its dev bearer at runtime (EAP_STUDIO_LOOPBACK_DEV_BEARER). CI greps the built bundle for the dev bearer.
 RUN pnpm --filter @eap/studio build
 
 FROM node:22-bookworm-slim AS runtime

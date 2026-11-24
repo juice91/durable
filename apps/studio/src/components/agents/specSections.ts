@@ -8,6 +8,7 @@
 import { apiErrorFromResponse, apiHeaders, BASE_URL, type AgentSpec } from "@/lib/api";
 import type { ModelCapabilities } from "@/lib/attachments";
 import type { JsonSchema } from "@/lib/tools";
+import { agentToolProblems, agentToolsOf, isAgentToolsError } from "./agentTools";
 import {
   approvalProblems,
   approvalsOf,
@@ -350,9 +351,9 @@ export function stepStatus(stepId: string, spec: AgentSpec | null | undefined): 
       return { text: plural(text.trim().split(/\s+/).length, "word"), valid: true };
     }
     case "tools": {
-      const problems = approvalProblems(spec).length;
+      const problems = approvalProblems(spec).length + agentToolProblems(spec).length;
       if (problems > 0) return { text: plural(problems, "problem"), valid: false };
-      const count = (spec?.tools?.length ?? 0) + (spec?.mcp_tools?.length ?? 0);
+      const count = (spec?.tools?.length ?? 0) + (spec?.mcp_tools?.length ?? 0) + agentToolsOf(spec).length;
       if (count === 0) return { text: "None", valid: true };
       const gated = approvalsOf(spec)?.tools.length ?? 0;
       return { text: gated > 0 ? `${plural(count, "tool")} · ${gated} ${gated === 1 ? "needs" : "need"} approval` : plural(count, "tool"), valid: true };
@@ -387,7 +388,7 @@ export function stepForErrorMessage(message: string): CoreStepId | null {
   // is on, fixed on the Tools step (at save it arrives as a pydantic "Value error, ...").
   // AC.13: `approvals.tools[i]: ...` (the Tools step's approval toggles) and `limits` /
   // `fallback_models[i]: ...` (the Identity step's group); at save they arrive as "Value error, ...".
-  if (isApprovalError(message)) return "tools";
+  if (isApprovalError(message) || isAgentToolsError(message)) return "tools";
   if (isIdentityCapabilityError(message)) return "identity";
   if (/^(mcp_tools|tools)(\[\d+\])?[.:\s]/.test(message) || /^MCP server '[^']*'/.test(message) || /^(Value error, )?tool name '[^']*' is reserved/.test(message)) return "tools";
   if (/^(name|model|model_settings)(\.[a-z_]+)*[:\s]/.test(message) || /^Model [^\s]+ is not/.test(message)) return "identity";

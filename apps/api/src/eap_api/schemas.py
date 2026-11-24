@@ -68,6 +68,7 @@ class AgentVersionResponse(BaseModel):
     spec_hash: str
     created_at: datetime
     created_by: str
+    published_by: str | None = None  # who published it (IAM P0b); NULL on versions from before
     restored_from: int | None = None
 
 

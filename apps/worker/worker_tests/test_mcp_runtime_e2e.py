@@ -13,7 +13,7 @@ admits exactly that endpoint by runtime identity (`for_managed_runtime`), as in 
 allow-list is not set.
 
 Needs the cluster and the operator: `requires_k3s` (skipped without them; failing under
-`EAP_REQUIRE_K3S=1`). Cleanup deletes the tenants' namespaces, rows and seeded catalog entries.
+`EAP_REQUIRE_K3S=1`); the npm tests also need the current runner image in the cluster's docker (`up.sh`). Cleanup deletes the tenants' namespaces, rows and seeded catalog entries.
 """
 
 from __future__ import annotations
@@ -76,6 +76,37 @@ def _k3s_unavailable() -> str | None:
 @pytest.fixture(autouse=True)
 def _require_cluster() -> None:
     reason = _k3s_unavailable()
+    if reason is None:
+        return
+    if os.environ.get("EAP_REQUIRE_K3S") == "1":
+        pytest.fail(f"EAP_REQUIRE_K3S=1 and {reason}")
+    pytest.skip(f"{reason} (set EAP_REQUIRE_K3S=1 to fail instead)")
+
+
+def _runner_image_missing(registry_type: str) -> str | None:
+    """Why the platform runner image for `registry_type` is not in the cluster's image store, or None.
+
+    npm and pypi servers run on `pydanticos-mcp-runner-<node|python>:<hash of the Dockerfile>`, which
+    `deploy/scripts/up.sh` builds into the colima docker. A commit that changes a runner Dockerfile
+    changes the tag; until up.sh runs again the pod sits in ImagePullBackOff and the server stays
+    `starting` forever (the cluster cannot pull a local-only image), so a missing image is a missing
+    precondition, not a failure to wait six minutes for."""
+    from eap_mcp_runtime.images import PackageSpec, image_for
+
+    image = image_for(PackageSpec(registry_type, "x", "1"))[0]
+    try:
+        r = subprocess.run(["docker", "--context", CONTEXT, "image", "inspect", image],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"docker is not usable on {CONTEXT} to check for {image}: {exc}"
+    if r.returncode == 0:
+        return None
+    return (f"the runner image {image} is not in the {CONTEXT} docker (a runner Dockerfile changed; "
+            "run deploy/scripts/up.sh on this host to build it)")
+
+
+def require_runner_image(registry_type: str) -> None:
+    reason = _runner_image_missing(registry_type)
     if reason is None:
         return
     if os.environ.get("EAP_REQUIRE_K3S") == "1":
@@ -177,6 +208,7 @@ class World:
         return entry
 
     def npm_entry(self) -> CatalogEntry:
+        require_runner_image("npm")
         return self.seed(packages=[{
             "registry_type": "npm", "identifier": "@modelcontextprotocol/server-memory", "version": "2.1.1",
             "transport": "stdio", "environment_variables": [{"name": "API_TOKEN", "required": True, "secret": True}]}])

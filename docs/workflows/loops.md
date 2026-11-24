@@ -80,10 +80,10 @@ item's result in item order.
         "agent_id": "${agents.triage}",
         "version": 1,
         "input": {"title": {"$ref": "loop.each.item.title"}, "body": {"$ref": "loop.each.item.body"}},
-        "next": "route"
+        "next": "route_gate"
       },
       {
-        "id": "route",
+        "id": "route_gate",
         "type": "branch",
         "cases": [
           {
@@ -229,7 +229,7 @@ output of the body step that ended the last iteration.
       }
     ]
   },
-  "next": "outcome"
+  "next": "outcome_gate"
 }
 ```
 
@@ -238,7 +238,7 @@ With `"exit"`, the step after the loop can tell why the loop stopped:
 <!-- example: until-polling.json /spec/steps/1 -->
 ```json
 {
-  "id": "outcome",
+  "id": "outcome_gate",
   "type": "branch",
   "cases": [
     {"when": {"op": "eq", "left": {"$ref": "steps.poll.output.exited"}, "right": "condition"}, "next": "finished"}

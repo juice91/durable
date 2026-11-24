@@ -66,8 +66,15 @@ def split_input(document_id: str, version: int) -> str:
     )
 
 
-def put(store, tenant, kb_id, *, pdf: bytes | None = None, markdown: str | None = None, key="trm.pdf"):
+def put(store, tenant, kb_id, *, pdf: bytes | None = None, markdown: str | None = None, key="trm.pdf",
+        code: str | None = None, mime_type: str = "text/x-python", metadata: dict | None = None, source_url: str = SOURCE):
     run_id = uuid.uuid4()
+    if code is not None:
+        result = store.put_document(
+            tenant, kb_id, document_key=key, title=key, source_url=source_url, metadata=metadata or {},
+            run_id=str(run_id), content=code, mime_type=mime_type,
+        )
+        return result.document["id"], result.document["latest_version"], run_id
     if pdf is not None:
         kwargs = {"content": base64.b64encode(pdf).decode(), "mime_type": "application/pdf"}
     else:
@@ -346,3 +353,47 @@ def test_a_markdown_flavour_switch_never_mixes_rows(worker, store, kb_tenant):
     store.upsert_chunks(kb_tenant, doc_id, version, generation, chunks, metadata={}, extract_metadata=other)
     assert stamps() == {"rst"}
     assert len(chunk_rows(worker.engine, kb_tenant, doc_id)) == len(chunks)
+
+
+CODE_URL = "https://github.com/o/r/blob/abc123/apps/api/src/mod.py"
+CODE = (
+    "import os\n\n\ndef first(a):\n    \"\"\"One.\"\"\"\n    return a\n\n\n"
+    "@decorated\nclass Second:\n    def method(self):\n        return os.name\n"
+)
+
+
+def test_code_ingests_with_line_citations_and_filterable_metadata(
+    client, worker, worker_settings, store, kb_tenant, sandbox_calls
+):
+    kb_id = create_kb(store, kb_tenant)
+    doc_id, version, run_id, run = ingest(
+        client, worker, store, kb_tenant, kb_id, code=CODE, key="apps~api~src~mod.py", source_url=CODE_URL,
+        metadata={"path": "apps/api/src/mod.py", "kind": "code", "language": "python"},
+    )
+    assert run["status"] == "completed", run["error"]
+    assert sandbox_calls == ["code"]
+    rows = chunk_rows(worker.engine, kb_tenant, doc_id)
+    by_symbol = {r["metadata"]["eap"]["symbol"]: r for r in rows}
+    assert set(by_symbol) == {"<module>", "first", "Second"}
+    first = by_symbol["first"]
+    assert first["anchor_url"] == f"{CODE_URL}#L4-L6"
+    eap = first["metadata"]["eap"]
+    assert eap["extractor"] == "code" and eap["extractor_version"] == 1
+    assert (eap["language"], eap["path"], eap["start_line"], eap["end_line"], eap["kind"]) == (
+        "python", "apps/api/src/mod.py", 4, 6, "code")
+    assert first["content"].startswith("# apps/api/src/mod.py:4-6 first\n")
+    assert first["metadata"]["kind"] == "code" and first["metadata"]["language"] == "python"
+    assert by_symbol["Second"]["anchor_url"] == f"{CODE_URL}#L9-L12"
+    event = next(e for e in event_rows(worker.engine, run_id) if e[2] == "extracted")
+    assert event[3]["extractor"] == "code"
+
+
+def test_a_generated_file_is_ready_with_no_chunks(client, worker, store, kb_tenant, sandbox_calls):
+    kb_id = create_kb(store, kb_tenant)
+    doc_id, _, _, run = ingest(
+        client, worker, store, kb_tenant, kb_id, code="# DO NOT EDIT\nx = 1\n", key="gen.py",
+        metadata={"path": "gen.py"},
+    )
+    assert run["status"] == "completed", run["error"]
+    assert chunk_rows(worker.engine, kb_tenant, doc_id) == []
+    assert store.get_document_by_id(kb_tenant, doc_id)["status"] == "ready"

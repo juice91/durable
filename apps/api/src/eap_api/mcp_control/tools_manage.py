@@ -32,6 +32,27 @@ def _model(cls: Any, **fields: Any) -> Any:
 
 
 def register_tools(tool: Any) -> None:
+    # ------------------------------------------------------------------------------- provenance
+
+    @tool("provenance.record", manage=True, internal=True)
+    async def provenance_record(
+        kind: Literal["agent", "workflow"], definition_id: str, card: Literal["draft", "publish"] = "draft",
+        version: int | None = None,
+    ) -> dict[str, Any]:
+        """Record what the Architect's run based a draft (or a publish card with its `version`) on. Only the
+        Architect's own run may call it, and the platform's code does so, not the model: the hashes, principal
+        and tool-call names come from the run's own recorded events."""
+        from eap_api.mcp_servers.managed import get_mcp_runtime
+        from eap_api.service_deps.connections import get_outbound_policy
+        from eap_api.service_deps.system_context import build_provenance_service
+        from eap_api.services.capabilities import Viewer
+
+        ctx = current_ctx()
+        viewer = Viewer(ctx.tenant_id, ctx.principal.kind, ctx.principal.user_id or ctx.principal.key_id)
+        return await call_service(
+            ctx, lambda db: build_provenance_service(db, ctx.engine, get_outbound_policy(), get_mcp_runtime()),
+            lambda s: s.record(viewer, kind=kind, definition_id=definition_id, card=card, version=version))
+
     # ------------------------------------------------------------------------------- agents
 
     @tool("agent.save_draft", manage=True)

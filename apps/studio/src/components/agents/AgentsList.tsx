@@ -115,13 +115,20 @@ function ToolCount({ agent }: { agent: AgentListItem }) {
   );
 }
 
-/** "Built in" for built-in agents, plus "System helper" for the Architect's drafters. */
+/** Pin order: the Architect first, then the Architect's drafters (shown only with "show system agents"), then the rest. */
+export function agentPinRank(agent: { builtin_role?: "architect" | "drafter" | null }): number | null {
+  if (agent.builtin_role === "architect") return 0;
+  if (agent.builtin_role === "drafter") return 1;
+  return null;
+}
+
+/** "Built-in" for built-in agents, plus "System helper" for the Architect's drafters. */
 function BuiltInChips({ agent }: { agent: AgentListItem }) {
   if (!agent.builtin && !agent.builtin_role) return null;
   const chip = "rounded-sm border border-border px-1.5 py-0.5 text-caption font-normal text-muted-foreground";
   return (
     <>
-      <span className={chip}>Built in</span>
+      <span className={chip} data-testid="builtin-badge">Built-in</span>
       {agent.builtin_role === "drafter" ? <span className={chip}>System helper</span> : null}
     </>
   );
@@ -269,6 +276,7 @@ export function AgentsListUI({
           searchLabel="Search agents"
           initialQuery={query}
           onSearchChange={setQuery}
+          pinRank={agentPinRank}
           filterRow={(agent, q) => filterAgents([agent], q).length > 0}
           toolbar={
             <>
@@ -290,7 +298,10 @@ export function AgentsListUI({
     );
   }
 
-  const visible = filterAgents(agents, query);
+  const visible = filterAgents(agents, query)
+    .map((agent, index) => ({ agent, index, rank: agentPinRank(agent) }))
+    .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.index - b.index)
+    .map((entry) => entry.agent);
   return (
     <div className="flex min-w-0 flex-col gap-3" data-testid="agents-grid">
       <div className="flex min-w-0 flex-wrap items-center gap-2">

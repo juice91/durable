@@ -1,5 +1,6 @@
 "use client";
 
+import { subjectLabel } from "@/lib/subjects";
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { MessageSquare, ScrollText, Workflow } from "lucide-react";
@@ -165,7 +166,7 @@ export function ApprovalSheet({ approval, missing = false, missingError = null, 
                     {approval.decided_at ? (
                       <Field label="Decided" testId="approval-sheet-decided">
                         <time dateTime={approval.decided_at}>{when(approval.decided_at)}</time>
-                        {approval.decision === "timed_out" ? " (timeout)" : approval.decided_by ? ` by ${approval.decided_by}` : ""}
+                        {approval.decision === "timed_out" ? " (timeout)" : approval.decided_by ? ` by ${subjectLabel(approval.decided_by)}` : ""}
                       </Field>
                     ) : null}
                     {approval.decided_at && approval.comment ? <Field label="Comment" testId="approval-sheet-comment">{approval.comment}</Field> : null}

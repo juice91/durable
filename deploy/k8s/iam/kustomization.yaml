@@ -1,0 +1,14 @@
+# Identity (ZITADEL) and authorization (OpenFGA). A separate kustomization because the platform one
+# (../kustomization.yaml) forces namespace pydanticos; these live in their own namespace, `iam`.
+# up.sh renders and applies this directory after the platform; both Deployments are off (replicas: 0) until the
+# deploy Secret carries their fields. deploy/README.md, "Identity (ZITADEL) and authorization (OpenFGA)".
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: iam
+resources:
+  - namespace.yaml
+  - networkpolicy.yaml
+  - openfga.yaml
+  - zitadel.yaml
+generatorOptions:
+  disableNameSuffixHash: true

@@ -90,16 +90,16 @@ describe("AgentsListUI system agents", () => {
     { id: "d", name: "Architect drafter", latest_version: 1, builtin: true, builtin_role: "drafter" as const },
   ];
 
-  it("marks built-in rows with a Built in chip and drafters as a System helper", () => {
+  it("marks built-in rows with a Built-in chip and drafters as a System helper", () => {
     render(<AgentsListUI agents={rows} />);
     const architect = screen.getByRole("link", { name: /Architect$/ }).closest("tr") as HTMLElement;
-    expect(within(architect).getByText("Built in")).toBeInTheDocument();
+    expect(within(architect).getByText("Built-in")).toBeInTheDocument();
     expect(within(architect).queryByText("System helper")).toBeNull();
     const drafter = screen.getByRole("link", { name: /Architect drafter/ }).closest("tr") as HTMLElement;
-    expect(within(drafter).getByText("Built in")).toBeInTheDocument();
+    expect(within(drafter).getByText("Built-in")).toBeInTheDocument();
     expect(within(drafter).getByText("System helper")).toBeInTheDocument();
     const plain = screen.getByRole("link", { name: "Plain" }).closest("tr") as HTMLElement;
-    expect(within(plain).queryByText("Built in")).toBeNull();
+    expect(within(plain).queryByText("Built-in")).toBeNull();
   });
 
   it("shows a Show system agents toggle only when wired, and reports changes", () => {
@@ -111,6 +111,57 @@ describe("AgentsListUI system agents", () => {
     expect(toggle.checked).toBe(false);
     fireEvent.click(toggle);
     expect(onChange).toHaveBeenCalledWith(true);
+  });
+});
+
+describe("AgentsListUI pinned Architect", () => {
+  const rows = [
+    { id: "z", name: "Zed", latest_version: 3, builtin_role: null },
+    { id: "a", name: "Architect", latest_version: 1, builtin: true, builtin_role: "architect" as const },
+    { id: "b", name: "Alpha", latest_version: 1, builtin_role: null },
+    { id: "d", name: "Architect drafter", latest_version: 1, builtin: true, builtin_role: "drafter" as const },
+  ];
+  const names = () => screen.getAllByTestId("agent-row").map((row) => within(row).getAllByRole("link")[0]?.getAttribute("aria-label") ?? row.textContent ?? "");
+
+  it("keeps the Architect first under each sort direction, with its Built-in badge", () => {
+    render(<AgentsListUI agents={rows} showSystem />);
+    for (const header of ["Name", "Version", "Tools"]) {
+      const button = screen.getByRole("button", { name: new RegExp(`^${header}`) });
+      for (let i = 0; i < 3; i++) {
+        fireEvent.click(button);
+        const rowsNow = screen.getAllByTestId("agent-row");
+        expect(within(rowsNow[0]!).getByTestId("builtin-badge")).toHaveTextContent("Built-in");
+        expect(rowsNow[0]!.textContent).toMatch(/^Architect(?! drafter)/);
+        expect(rowsNow[1]!.textContent).toMatch(/^Architect drafter/);
+      }
+    }
+  });
+
+  it("puts drafters right after the Architect and sorts normal agents below", () => {
+    render(<AgentsListUI agents={rows} showSystem />);
+    const order = screen.getAllByTestId("agent-row").map((r) => r.textContent ?? "");
+    ["Architect", "Architect drafter", "Alpha", "Zed"].forEach((name, k) => expect(order[k]!.startsWith(name)).toBe(true));
+    expect(order[0]!.startsWith("Architect drafter")).toBe(false);
+  });
+
+  it("does not force the Architect in when the search excludes it", async () => {
+    render(<AgentsListUI agents={rows} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search agents" }), { target: { value: "zed" } });
+    await waitFor(() => expect(screen.getAllByTestId("agent-row")).toHaveLength(1));
+    expect(screen.queryByTestId("builtin-badge")).toBeNull();
+  });
+
+  it("pins only when the Architect is in the shown (archived) set", () => {
+    render(<AgentsListUI agents={[rows[0]!, rows[2]!]} scope="archived" />);
+    expect(screen.queryByTestId("builtin-badge")).toBeNull();
+    expect(screen.getAllByTestId("agent-row")[0]).toHaveTextContent("Alpha");
+  });
+
+  it("pins in the compact grid too", async () => {
+    window.localStorage.setItem("studio.agents.view", "compact");
+    render(<AgentsListUI agents={rows} />);
+    await waitFor(() => expect(screen.getAllByTestId("agent-card")[0]).toHaveTextContent("Architect"));
+    window.localStorage.removeItem("studio.agents.view");
   });
 });
 

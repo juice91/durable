@@ -39,6 +39,20 @@ TABLE = {  # mime -> (format, canonical)
     "text/yaml": ("yaml", "application/yaml"),
     "application/json": ("json", "application/json"),
 }
+CODE = {  # source code: format -> canonical, aliases
+    "python": ("text/x-python", ("text/x-script.python", "application/x-python-code")),
+    "typescript": ("text/typescript", ("application/typescript", "text/x-typescript")),
+    "tsx": ("text/tsx", ("text/x-tsx",)),
+    "javascript": ("text/javascript", ("application/javascript", "application/x-javascript", "text/ecmascript")),
+    "shell": ("text/x-shellscript", ("application/x-sh", "text/x-sh")),
+    "toml": ("application/toml", ("text/x-toml", "text/toml")),
+    "sql": ("application/sql", ("text/x-sql", "text/sql")),
+    "dockerfile": ("text/x-dockerfile", ("text/dockerfile",)),
+    "css": ("text/css", ()),
+}
+for _fmt, (_canonical, _aliases) in CODE.items():
+    for _mime in (_canonical, *_aliases):
+        TABLE[_mime] = (_fmt, _canonical)
 VARIANTS = ["{}", "{}; charset=utf-8", "{};charset=UTF-8", "{} ; charset=utf-8", "  {}  ", "{}; charset=\"utf-8\"; q=1",
             "{};", "{}\t;boundary=x"]
 
@@ -50,14 +64,16 @@ def test_every_alias_in_every_case_and_parameter_variant(mime):
         for text in (variant.format(mime), variant.format(mime.upper()), variant.format(mime.title())):
             assert format_for_mime(text).format == fmt, text
             assert canonical_mime_type(text) == canonical, text
-            assert extractor_for(text) is None or fmt in {"rst", "pdf", "yaml", "json"}
+            assert extractor_for(text) is None or fmt in {"rst", "pdf", "yaml", "json", *CODE}
 
 
 def test_supported_list_is_canonical_first_then_aliases_without_duplicates():
     assert CANONICAL_MIME_TYPES == (
         "text/markdown", "text/html", "text/plain", "text/x-rst", "application/pdf", "application/yaml", "application/json",
+        "text/x-python", "text/typescript", "text/tsx", "text/javascript", "text/x-shellscript", "application/toml",
+        "application/sql", "text/x-dockerfile", "text/css",
     )
-    assert SUPPORTED_MIME_TYPES[:7] == CANONICAL_MIME_TYPES
+    assert SUPPORTED_MIME_TYPES[:16] == CANONICAL_MIME_TYPES
     assert sorted(SUPPORTED_MIME_TYPES) == sorted(TABLE)
     assert all(format_for_mime(m).mime_type == TABLE[m][1] for m in SUPPORTED_MIME_TYPES)
 
@@ -95,7 +111,7 @@ def test_every_extension_case_insensitively(name, fmt):
 
 
 @pytest.mark.parametrize("name", [
-    "", "md", "README", "a.", "a.md.bak", "a.mdx", "a.jsonl", "a.yaml.gz", "a.pdf ", "a.docx", "a.png", "a.js", "dir.md/x",
+    "", "md", "README", "a.", "a.md.bak", "a.mdx", "a.jsonl", "a.yaml.gz", "a.pdf ", "a.docx", "a.png", "a.js", "a.py", "Dockerfile", "dir.md/x",
     "dir.rst/file", "a.md/", "a.rst\\b",
 ])
 def test_unsupported_extensions(name):
@@ -108,8 +124,10 @@ def test_every_registered_extension_maps_back_to_its_own_format():
         for ext in spec.extensions:
             assert ext.startswith(".") and ext == ext.lower() and ext not in seen
             seen.add(ext)
-            assert format_for_filename("x" + ext) is spec
-            assert format_for_filename("x" + ext.upper()) is spec
+            code = spec.extractor == "code"  # code extensions are opt-in
+            assert format_for_filename("x" + ext, include_code=code) is spec
+            assert format_for_filename("x" + ext.upper(), include_code=code) is spec
+            assert code or format_for_filename("x" + ext, include_code=True) is spec
 
 
 def test_doxygen_only_changes_markdown_and_none_or_plain_changes_nothing():

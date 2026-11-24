@@ -2,6 +2,7 @@
 
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { subjectLabel } from "@/lib/subjects";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { api, ApiError, type Agent } from "@/lib/api";
 import { listTools, type ToolDefinition } from "@/lib/tools";
@@ -164,7 +165,7 @@ function WorkflowDetail() {
               <div className="min-w-0 space-y-2 border-b border-border p-4 empty:hidden">
                 {graphSpec?.description ? <p className="text-label text-muted-foreground">{graphSpec.description}</p> : null}
                 {current ? (
-                  <p className="text-caption text-muted-foreground">Published {formatDateTime(current.created_at)} by <span className="font-mono">{current.created_by}</span></p>
+                  <p className="text-caption text-muted-foreground">Published {formatDateTime(current.created_at)} by <span className="font-mono">{subjectLabel(current.created_by)}</span></p>
                 ) : (
                   <p role="status" className="rounded-md border border-border bg-muted/40 p-2 text-label text-foreground">No published version: showing the draft. Publish it (POST /api/v1/workflows/{"{id}"}/versions) to run it.</p>
                 )}

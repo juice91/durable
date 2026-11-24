@@ -26,7 +26,7 @@ const CORE_SPEC_KEYS: Record<string, readonly string[]> = {
   // AC.13: the Identity step's "Limits and fallback models" group and the Tools step's approvals.
   identity: ["name", "model", "model_settings", "limits", "fallback_models"],
   instructions: ["instructions"],
-  tools: ["tools", "mcp_tools", "approvals"],
+  tools: ["tools", "mcp_tools", "approvals", "agent_tools"],
   "request-context": ["context_fields"],
   processors: ["input_processors", "output_processors"],
 };

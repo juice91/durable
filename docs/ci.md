@@ -19,9 +19,18 @@ A pull request runs **the tests its change affects**; a push to `main` runs ever
   `[dependency-groups]`, and the `workspace = true` entries of `[tool.uv.sources]`. The output is the
   test directories of the affected members, with the reason for each (JSON, or a table with
   `--format table`). `scripts/ci/select-tests.sh` runs it per suite and writes the step summary.
+- **System manifest** (the `python` job, always, pure Python): `scripts/ci/system_manifest.py --check` fails
+  when `docs/platform/system-manifest.yaml` has drifted from the code: a stale generated block (limits, tools,
+  step kinds, triggers, providers, gaps, context budgets), a pattern or gap that does not resolve in the
+  capability registry, a hand-written string that repeats a generated number, a worker or MCP control tool with
+  no registry entry, a Platform layer over budget, or hand-written changes without a higher `manifest_version`.
+  After changing a source constant, run `uv run python scripts/ci/system_manifest.py --write`.
 - **Studio** (`studio-test`): `vitest run --changed <merge-base>` (vitest's import-graph selection),
   still split into five shards so the check names do not change. A shard with nothing to run passes.
   `lint` and `tsc` run only when a Studio path changed (the `changes` filter), as before.
+  On CI each shard runs vitest with `maxWorkers: 3` (override with `VITEST_MAX_WORKERS`): the default of
+  cores-1 workers per shard put ~36 jsdom workers on the ten-core Mac when four shards overlapped, and the
+  tests timed out. Test and hook timeouts are 15 s everywhere; `findBy`/`waitFor` use 8 s.
 - **Jobs with nothing to run still succeed.** CI Heavy skips the Postgres container, the install and
   the migration when no suite is affected and reports "no affected Python tests" in the step summary.
   Job and check names are the same as before, so branch protection and the deploy gate keep working.

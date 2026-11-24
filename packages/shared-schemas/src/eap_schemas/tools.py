@@ -274,6 +274,16 @@ class JsonQueryInput(BaseModel):
 TEXT_CHECK_TOOL_ID = "text.check"
 
 
+class VerbatimExempt(BaseModel):
+    """What `max_verbatim_run` does not count as copying (summary side only); every part is off unless set."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    quoted: bool = False
+    numbers: bool = False
+    terms: Annotated[list[Annotated[str, Field(min_length=1, max_length=40)]], Field(max_length=100)] = []
+
+
 class TextCheckRules(BaseModel):
     """The checks of ``text.check``; every one is off unless set."""
 
@@ -291,6 +301,7 @@ class TextCheckRules(BaseModel):
     forbid_terms_ci: Annotated[list[Annotated[str, Field(min_length=1, max_length=200)]], Field(max_length=200)] = []
     min_han_ratio: Annotated[float, Field(ge=0, le=1)] | None = None
     max_verbatim_run: Annotated[int, Field(ge=1, le=100000)] | None = None
+    verbatim_exempt: VerbatimExempt | None = None
 
 
 class TextCheckInput(BaseModel):
@@ -301,6 +312,34 @@ class TextCheckInput(BaseModel):
     text: Annotated[str, Field(max_length=20000)]
     source: Annotated[str, Field(max_length=100000)] | None = None
     rules: TextCheckRules
+
+
+ATPROTO_RICHTEXT_TOOL_ID = "atproto.richtext"
+ATPROTO_RICHTEXT_MAX_TAGS = 8
+ATPROTO_POST_MAX_GRAPHEMES = 300
+
+
+class AtprotoRichtextDetect(BaseModel):
+    """What ``atproto.richtext`` finds in the text; both default on."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tags: bool = True
+    links: bool = True
+
+
+class AtprotoRichtextInput(BaseModel):
+    """Input for ``atproto.richtext``: a post text, optional tags to append, what to detect and the grapheme
+    limit. Pure: no I/O."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: Annotated[str, Field(max_length=20000)]
+    append_tags: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=64, pattern=r"^\S+$")]], Field(max_length=ATPROTO_RICHTEXT_MAX_TAGS)
+    ] = []
+    detect: AtprotoRichtextDetect = AtprotoRichtextDetect()
+    max_graphemes: Annotated[int, Field(ge=1, le=3000)] = ATPROTO_POST_MAX_GRAPHEMES
 
 
 HTML_EXTRACT_TOOL_ID = "html.extract"
@@ -376,6 +415,25 @@ class WorkflowRunResultInput(BaseModel):
 
     run_id: str
     require_success: bool = False
+
+
+WORKFLOW_HISTORY_TOOL_ID = "workflow.history"
+WORKFLOW_HISTORY_STATUSES = ("completed", "skipped", "failed")
+
+
+class WorkflowHistoryInput(BaseModel):
+    """Input for ``workflow.history``: what the calling workflow's own recent runs returned. `where` matches
+    top-level fields of a run's output by equality; `select` is a dot path into the output; `distinct` defaults
+    to true when `select` is set. Read-only; only a workflow tool step can call it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    since_hours: Annotated[int, Field(ge=1, le=168)] = 24
+    where: dict[str, str | int | float | bool] | None = None
+    select: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    statuses: Annotated[list[Literal["completed", "skipped", "failed"]], Field(min_length=1, max_length=3)] = ["completed"]  # noqa: RUF012 - pydantic copies the default
+    limit: Annotated[int, Field(ge=1, le=500)] = 100
+    distinct: bool | None = None
 
 
 TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
@@ -583,6 +641,31 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
         result_schema={"type": "object", "properties": {"result": {}}, "required": ["result"]},
         example={"data": {"items": [{"id": "c1"}, {"id": "c2"}]}, "expression": "items[?id=='c2'] | [0]"},
     ),
+    "workflow.history": ToolDeclaration(
+        id="workflow.history",
+        title="Recent runs of this workflow",
+        description=(
+            "Read what the calling workflow's own recent runs returned (any version, same tenant, never the calling "
+            "run; dry runs included), newest first, as {items, count}. since_hours (1-168, default 24) is the window; "
+            "statuses (completed, skipped, failed; default completed); where {field: value} keeps runs whose output "
+            "has that top-level field equal to the value (string, number or boolean), e.g. {status: check_failed}; "
+            "select is a dot path into the output (e.g. url) so each item is that value instead of the whole output "
+            "(a run without it is left out); distinct (default true with select) drops repeated items; limit (1-500, "
+            "default 100). To skip items your own recent runs rejected, read their urls here and add them to an "
+            "exclude list. Read-only; usable only as a workflow tool step. The result is cut (truncated: true) to fit "
+            "a step's output"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=WorkflowHistoryInput,
+        result_example={"items": ["https://news.example.com/a/1", "https://news.example.com/a/2"], "count": 2},
+        result_schema={
+            "type": "object",
+            "properties": {"items": {"type": "array", "items": {}}, "count": {"type": "integer"}, "truncated": {"type": "boolean"}},
+            "required": ["items", "count"],
+        },
+        example={"since_hours": 24, "where": {"status": "check_failed"}, "select": "url"},
+    ),
     "html.extract": ToolDeclaration(
         id="html.extract",
         title="Extract from HTML",
@@ -635,7 +718,14 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
             "checks on it: grapheme length, no URLs, hashtags, emoji or Simplified Chinese, forbidden terms, a "
             "rumour term needs an attribution term, a minimum share of Han characters, and no long run copied from "
             "a source (verbatim fails when the longest shared run is >= max_verbatim_run, so 15 refuses a text that "
-            "shares 15 characters in a row with the source and allows 14). Returns {ok, text, reason, graphemes}; reason is the first failed check (empty, too_long, "
+            "shares 15 characters in a row with the source and allows 14). Optional verbatim_exempt {quoted, numbers, terms} "
+            "makes parts of the TEXT (never the source) act as breaks that end a run instead of counting: quoted = "
+            "text inside 「」『』《》〈〉“” or \"\" (brackets included; a span of up to 40 graphemes, an unclosed quote "
+            "or a longer span counts normally), numbers = digits (ASCII or full-width) with , . : / - and the units "
+            "年 月 日 時 點 分 %, terms = up to 100 exact strings of 1 to 40 characters such as proper names. Text on "
+            "both sides of a break never joins into one run. With it, and a source, the result also has "
+            "verbatim_longest_run (the longest counted run) and, when verbatim fails, verbatim_run_text (the run, up "
+            "to 60 characters, normalised). Returns {ok, text, reason, graphemes}; reason is the first failed check (empty, too_long, "
             "too_short, url, hashtag, emoji, simplified, forbidden_term, unattributed_rumour, not_chinese, "
             "verbatim) or null. Pure"
         ),
@@ -651,8 +741,46 @@ TOOL_DECLARATIONS: dict[str, ToolDeclaration] = {
                 "forbid_emoji": True, "forbid_simplified_chinese": True, "forbid_terms": ["a banned word"],
                 "rumour_terms": ["allegedly"], "attribution_terms": ["according to reports"],
                 "min_han_ratio": 0.5, "max_verbatim_run": 15,
+                "verbatim_exempt": {"quoted": True, "numbers": True, "terms": ["a proper name"]},
             },
         },
+    ),
+    "atproto.richtext": ToolDeclaration(
+        id="atproto.richtext",
+        title="Bluesky rich text",
+        description=(
+            "Build the text and the facets of a Bluesky post. Hashtags and links are only real tags and links when "
+            "the record carries app.bsky.richtext.facet entries with UTF-8 BYTE offsets (not character offsets, which "
+            "are wrong for Chinese or emoji); this computes them. append_tags (up to 8 strings without #, 1 to 64 "
+            "characters, no whitespace) are appended as a new line of '#Tag #Tag' unless the text already ends with "
+            "exactly those tags. detect {tags, links} (both default true) finds #tags by Bluesky's own rules (a tag "
+            "follows the start or whitespace, ends at whitespace or trailing punctuation, is not all digits, at most "
+            "64 graphemes) and http(s) links (trailing punctuation dropped). Returns {text, facets, graphemes}: pass "
+            "text as the record's text and facets as its facets; offsets index the final text, facets are sorted and "
+            "never overlap. max_graphemes (default 300, the post limit): a longer final text is the error result "
+            "{error: {code: text_too_long, graphemes, max_graphemes}}, never truncated; an append tag that would not "
+            "be a tag (all digits) is {error: {code: invalid_tag}}. Pure"
+        ),
+        side_effect=False,
+        external_idempotent=False,
+        input_model=AtprotoRichtextInput,
+        result_example={
+            "text": "台北今天放晴\n#Taiwan #twsky",
+            "facets": [
+                {"index": {"byteStart": 19, "byteEnd": 26}, "features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "Taiwan"}]},
+                {"index": {"byteStart": 27, "byteEnd": 33}, "features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "twsky"}]},
+            ],
+            "graphemes": 21,
+        },
+        result_schema={"type": "object", "properties": {
+            "text": {"type": "string"}, "graphemes": {"type": "integer"},
+            "facets": {"type": "array", "items": {"type": "object", "properties": {
+                "index": {"type": "object", "properties": {"byteStart": {"type": "integer"}, "byteEnd": {"type": "integer"}}},
+                "features": {"type": "array", "items": {"type": "object"}},
+            }}},
+            "error": {"type": "object", "properties": {"code": {"type": "string"}, "graphemes": {"type": "integer"}, "max_graphemes": {"type": "integer"}}},
+        }},
+        example={"text": "台北今天放晴，https://example.com", "append_tags": ["Taiwan", "twsky"], "detect": {"tags": True, "links": True}, "max_graphemes": 300},
     ),
     "clock.sleep": ToolDeclaration(
         id="clock.sleep",

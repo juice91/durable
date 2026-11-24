@@ -1,0 +1,95 @@
+{
+  "description": "Skip the items your own recent runs rejected. A listing (an RSS or Atom document) is parsed, but first `workflow.history` reads the urls that this workflow's runs of the last 24 hours rejected (their output was {status: check_failed, url}); they go into feed.parse's exclude_urls, so a rejected article is not picked and rewritten again on the next run. The workflow returns the first remaining item as {status: picked, url}; a real workflow would write and check a summary there and return {status: check_failed, reason, url} when `text.check` refuses it. With nothing left the run ends `skipped`. It needs no agent: it uses platform tools only.",
+  "agents": {},
+  "input": {
+    "feed": "<rss version=\"2.0\"><channel><title>t</title><item><title>First</title><link>https://news.example.com/a/1</link><description>one</description></item><item><title>Second</title><link>https://news.example.com/a/2</link><description>two</description></item></channel></rss>"
+  },
+  "spec": {
+    "name": "Skip recently rejected items",
+    "description": "Parse a feed without the items this workflow's own recent runs rejected (workflow.history), return the first remaining item, or end skipped when there is none.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "feed": {
+          "type": "string",
+          "description": "The RSS or Atom document to read."
+        }
+      },
+      "required": [
+        "feed"
+      ],
+      "additionalProperties": false
+    },
+    "start": "rejected",
+    "steps": [
+      {
+        "id": "rejected",
+        "type": "tool",
+        "tool_id": "workflow.history",
+        "input": {
+          "since_hours": 24,
+          "where": {
+            "status": "check_failed"
+          },
+          "select": "url"
+        },
+        "next": "listing"
+      },
+      {
+        "id": "listing",
+        "type": "tool",
+        "tool_id": "feed.parse",
+        "input": {
+          "text": {
+            "$ref": "input.feed"
+          },
+          "max_items": 5,
+          "exclude_urls": {
+            "$ref": "steps.rejected.output.items"
+          }
+        },
+        "next": "check_gate"
+      },
+      {
+        "id": "check_gate",
+        "type": "branch",
+        "cases": [
+          {
+            "when": {
+              "op": "exists",
+              "left": {
+                "$ref": "steps.listing.output.items.0"
+              }
+            },
+            "next": "ret_picked"
+          }
+        ],
+        "default": "ret_nothing"
+      },
+      {
+        "id": "ret_picked",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "$template": {
+              "status": "picked",
+              "url": "{{steps.listing.output.items.0.link}}"
+            }
+          }
+        }
+      },
+      {
+        "id": "ret_nothing",
+        "type": "tool",
+        "tool_id": "workflow.return",
+        "input": {
+          "value": {
+            "status": "nothing_new"
+          },
+          "outcome": "skipped"
+        }
+      }
+    ]
+  }
+}

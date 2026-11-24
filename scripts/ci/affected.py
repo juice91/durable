@@ -56,7 +56,8 @@ SCHEMA_FILE = re.compile(
 # own dependents do not rerun (nothing of the key's code changed), which keeps one cross-import
 # in a test from pulling in the whole graph.
 TEST_ONLY_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    "eap-api": ("eap-worker",),
+    # The API suite exercises the IAM plug-ins through the identity chain (the key, dev bearer and policy acceptance tests).
+    "eap-api": ("eap-worker", "eap-iam-apikey", "eap-iam-cfaccess", "eap-iam-devloopback", "eap-iam-openaccess", "eap-iam-zitadel"),
     "eap-pricing": ("eap-api", "eap-worker"),
     "eap-schemas": ("eap-agent-runtime", "eap-worker"),
 }

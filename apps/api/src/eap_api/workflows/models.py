@@ -76,6 +76,8 @@ class WorkflowVersionModel(Base):
     spec_hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     created_by: Mapped[str] = mapped_column(String, nullable=False)
+    # 0036: the principal who published (or restored) this version; NULL for versions from before (legacy).
+    published_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 0025: `architect:<run_id>` or `architect-page` for a version the Architect made; NULL otherwise.
     created_via: Mapped[str | None] = mapped_column(Text, nullable=True)
 

@@ -170,13 +170,13 @@ def test_seed_adds_missing_gated_approvals(api):
 
 
 def _age_architect(app, tenant: str, agent_id: str, *, extra_tool: str | None = None, edit: bool = False):
-    """Make the stored Architect look like one seeded before PR 45 (only the 21 architect.* tools), published;
+    """Make the stored Architect look like one seeded before PR 45 (only the architect.* tools), published;
     then optionally leave unpublished edits on the draft."""
     from eap_run_store import definitions
 
     spec = agent_row(app, tenant, "architect")["draft_spec"]
     spec["tools"] = [t for t in spec["tools"] if not t.startswith("platform.")]
-    assert len(spec["tools"]) == 21
+    assert len(spec["tools"]) == len(ARCHITECT_TOOL_IDS)
 
     def put(conn, value):
         conn.execute(

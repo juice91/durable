@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from eap_schemas.models_policy import ModelPolicy
 from worker_tests.conftest import APP_VERSION, DBOS_DB_URL, drop_schema, enqueue_run, event_rows, new_schema, wait_terminal
-from worker_tests.test_telemetry import telemetry  # noqa: F401 - fixture
+from worker_tests.test_telemetry import _wait_for_run_span, telemetry  # noqa: F401 - fixture
 
 SECRET = "Zq9xCtxSecret"
 CONTEXT_SPEC = {
@@ -175,7 +175,9 @@ def test_context_values_never_reach_spans_or_logs(worker, client, tenant, teleme
     run = wait_terminal(store, tenant, run_id)
     assert run["status"] == "completed", run["error"]
     assert SECRET in run["output"]  # it did reach the model, via the instructions
-    spans, logs = finished()
+    # The run row turns terminal before the `eap.run` span ends (see test_telemetry): wait for the span
+    # instead of reading the exporter once, which came back empty on a loaded runner.
+    spans, logs = _wait_for_run_span(finished, run_id)
     assert any(s.name == "eap.run" for s in spans), "telemetry captured nothing"
     traced = repr([(s.name, dict(s.attributes or {}), [(e.name, dict(e.attributes or {})) for e in s.events])
                    for s in spans])

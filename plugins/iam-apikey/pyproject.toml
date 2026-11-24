@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-iam-apikey"
+version = "0.3.0"
+description = "IAM identity plug-in: tenant API keys (pos_...) and the Architect run token"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "eap-iam",
+    "eap-run-store",
+    "sqlalchemy>=2.0",
+]
+
+[project.entry-points."eap.iam.identity"]
+apikey = "eap_iam_apikey:create"
+
+[tool.uv.sources]
+eap-iam = { workspace = true }
+eap-run-store = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_iam_apikey"]

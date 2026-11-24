@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-worker"
-version = "0.1.0"
+version = "0.3.0"
 description = "Worker runtime for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"

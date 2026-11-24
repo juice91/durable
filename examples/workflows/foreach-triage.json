@@ -63,10 +63,10 @@
               "agent_id": "${agents.triage}",
               "version": 1,
               "input": {"title": {"$ref": "loop.each.item.title"}, "body": {"$ref": "loop.each.item.body"}},
-              "next": "route"
+              "next": "route_gate"
             },
             {
-              "id": "route",
+              "id": "route_gate",
               "type": "branch",
               "cases": [
                 {

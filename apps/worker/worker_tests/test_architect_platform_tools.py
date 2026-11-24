@@ -259,6 +259,24 @@ def test_list_recent_runs_filters_and_never_returns_input_or_output(engine, tena
     assert run(tools.list_recent_runs(engine, tenant, workflow_id="nope"))["error"]["code"] == "invalid_argument"
 
 
+def test_registered_list_runs_handler_returns_runs_with_output_preview(engine, tenant, monkeypatch):
+    """The handler the Architect calls (`platform.list_runs`), not just the module-level wrapper: a NameError in it
+    once failed every Architect run, and a swallowed NameError once blanked output_preview."""
+    from types import SimpleNamespace
+
+    wf, ag, wr, ar = make_runs(engine, tenant)
+    with engine.begin() as c:
+        c.execute(text("UPDATE runs SET status='completed', output='the answer is 42' WHERE id = :i"), {"i": ar})
+    monkeypatch.setattr(tools, "_engine", lambda: engine)
+    handler = dict(tools._TOOLS)["platform.list_runs"]
+    ctx = SimpleNamespace(deps=SimpleNamespace(tenant_id=tenant))
+    out = run(handler(ctx))
+    assert {i["run_id"] for i in out["items"]} == {wr, ar}
+    assert next(i for i in out["items"] if i["run_id"] == ar)["output_preview"] == "the answer is 42"
+    assert [i["run_id"] for i in run(handler(ctx, status="failed"))["items"]] == [wr]
+    assert "SECRET-INPUT-TEXT" not in json.dumps(out)
+
+
 # ----------------------------------------------------------------------------- redaction and bounds
 
 

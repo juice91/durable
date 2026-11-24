@@ -59,10 +59,10 @@
             }
           ]
         },
-        "next": "outcome"
+        "next": "outcome_gate"
       },
       {
-        "id": "outcome",
+        "id": "outcome_gate",
         "type": "branch",
         "cases": [
           {"when": {"op": "eq", "left": {"$ref": "steps.poll.output.exited"}, "right": "condition"}, "next": "finished"}

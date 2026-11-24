@@ -451,3 +451,26 @@ def test_errors_are_pickle_safe():
         GenerationNotWritable("k", 3),
     ):
         assert str(pickle.loads(pickle.dumps(err))) == str(err)
+
+
+def test_code_filters_kind_language_and_path_prefix(store, tenant):
+    """Source code: `kind`, `language` and `path` are document metadata (equality filters), and the
+    reserved filter key `path_prefix` matches the start of `path` (any of several prefixes)."""
+    kb = make_kb(store, tenant)
+    ingest(store, tenant, kb, "a", ["a"], hot=[1], metadata={"kind": "code", "language": "python", "path": "apps/api/src/a.py"})
+    ingest(store, tenant, kb, "b", ["b"], hot=[2], metadata={"kind": "code", "language": "tsx", "path": "apps/studio/src/B.tsx"})
+    ingest(store, tenant, kb, "t", ["t"], hot=[3], metadata={"kind": "test", "language": "python", "path": "apps/api/api_tests/test_a.py"})
+    ingest(store, tenant, kb, "d", ["d"], hot=[4], metadata={"kind": "guide", "path": "docs/a.md"})
+    q = vec(1536, 1, 2, 3, 4)
+
+    def keys(**flt):
+        return {h.document_key for h in search(store, tenant, [kb["id"]], q, metadata_filter=flt)}
+
+    assert keys(kind="code") == {"a", "b"}
+    assert keys(kind=["code", "test"], language="python") == {"a", "t"}
+    assert keys(path_prefix="apps/api/") == {"a", "t"}
+    assert keys(path_prefix=["apps/studio/", "docs/"]) == {"b", "d"}
+    assert keys(path_prefix="apps/api/", kind="code") == {"a"}
+    assert keys(path_prefix="nothing/") == set()
+    assert keys(path_prefix="apps/api/src/a.py") == {"a"}
+    assert keys(path_prefix="a_%") == set()  # LIKE wildcards are literal characters

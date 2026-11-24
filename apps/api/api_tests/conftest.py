@@ -127,3 +127,28 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         if reporter is not None:
             reporter.write_line(f"API test session imported document parsers: {', '.join(loaded)}", red=True)
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+# With EAP_IAM_TEST_FAKES=1 (eap_iam.pytest_plugin) every IAM plug-in is absent and the fakes are in place: the fake
+# identity provider takes the dev bearer, the fake engine allows everything. The modules below exercise what only the
+# plug-ins provide (API-key authentication, the MCP control scope checks, the loopback rule), so they are skipped there.
+PLUGIN_DEPENDENT_MODULES = frozenset({
+    "test_ac18_cross_tenant", "test_agui15_security", "test_agui6_agent_endpoints",
+    "test_agui6_agent_endpoints_acceptance", "test_agui8_acceptance", "test_agui9_hardening",
+    "test_agui9_hardening_acceptance", "test_agui_attachments_api", "test_api_keys_api",
+    "test_api_keys_api_acceptance", "test_architect_control_seam", "test_iam_p0a", "test_iam_p0b", "test_mcp_control_evals",
+    "test_mcp_control_manage", "test_mcp_control_read", "test_mcp_control_revisions", "test_otlp_ingest",
+})
+# Single tests: they set EAP_AUTH_MODE=production with no plug-in lists (the fakes select their own), or send a key.
+PLUGIN_DEPENDENT_TESTS = frozenset({
+    "test_app_refuses_to_start_without_explicit_dev_auth", "test_api_key_may_not_override_settings",
+})
+
+
+def pytest_collection_modifyitems(config, items):
+    if os.environ.get("EAP_IAM_TEST_FAKES") != "1":
+        return
+    skip = pytest.mark.skip(reason="needs the eap-iam-apikey / devloopback plug-ins (EAP_IAM_TEST_FAKES=1)")
+    for item in items:
+        if item.module.__name__.rsplit(".", 1)[-1] in PLUGIN_DEPENDENT_MODULES or item.originalname in PLUGIN_DEPENDENT_TESTS:
+            item.add_marker(skip)

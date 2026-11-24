@@ -99,10 +99,10 @@
             "next": "post"
           }
         ],
-        "default": "login_failed"
+        "default": "ret_login_failed"
       },
       {
-        "id": "login_failed",
+        "id": "ret_login_failed",
         "type": "tool",
         "tool_id": "workflow.return",
         "input": {
@@ -155,13 +155,13 @@
               },
               "right": true
             },
-            "next": "result"
+            "next": "ret_result"
           }
         ],
-        "default": "post_failed"
+        "default": "ret_post_failed"
       },
       {
-        "id": "post_failed",
+        "id": "ret_post_failed",
         "type": "tool",
         "tool_id": "workflow.return",
         "input": {
@@ -176,7 +176,7 @@
         }
       },
       {
-        "id": "result",
+        "id": "ret_result",
         "type": "tool",
         "tool_id": "workflow.return",
         "input": {

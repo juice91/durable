@@ -38,15 +38,13 @@ describe("api client", () => {
     );
   });
 
-  it("fails clearly without configured API credentials", async () => {
+  it("sends no Authorization header without a configured credential: the Access cookie identifies the user", async () => {
     delete process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
-    await expect(api.agents.list()).rejects.toEqual(
-      expect.objectContaining({
-        name: "ApiError",
-        message: "No API credentials configured",
-      })
-    );
-    expect(global.fetch).not.toHaveBeenCalled();
+    (global.fetch as any).mockResolvedValueOnce({ ok: true, json: async () => [] });
+    await api.agents.list();
+    const init = (global.fetch as any).mock.calls[0][1];
+    expect(init.headers).not.toHaveProperty("Authorization");
+    expect(init.headers).toEqual(expect.objectContaining({ "Content-Type": "application/json" }));
   });
 
   it("wraps spec in {spec} for POST /api/v1/agents", async () => {

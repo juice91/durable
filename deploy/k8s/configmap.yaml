@@ -4,6 +4,41 @@ metadata:
   name: pydanticos-config
 data:
   EAP_AUTH_MODE: dev
+  # IAM plug-ins (docs/superpowers/specs/2026-11-22-iam-design.md): identity providers in order (first match wins) and
+  # exactly one policy engine. `apikey` = tenant API keys and the Architect run token; `cfaccess` = the Cloudflare
+  # Access JWT, whose e-mail is the user (the public Studio carries the Access cookie and cloudflared adds the JWT);
+  # `devloopback` = the dev bearer, accepted only from a loopback TCP peer (kubectl port-forward, the SSH tunnel);
+  # `openaccess` = every user is admin. The three EAP_CF_ACCESS_* values are required by `cfaccess` and are not
+  # secrets: the team domain, the AUD tag of the "Durable Studio" Access application, and the one tenant every Access
+  # user belongs to (Access has no tenant concept; "studio" is the tenant the dev bearer always used).
+  #
+  # IAM P1 adds `zitadel` first: ZITADEL access tokens (Studio's own OIDC sign-in) are verified before anything else, and
+  # a JWT-shaped bearer that fails is a 401 that never falls through. `cfaccess` stays for the transition (the Access JWT
+  # of people who have not switched yet). The plug-in is DORMANT until the operator has run the bootstrap and stored
+  # EAP_ZITADEL_PROJECT_ID and EAP_ZITADEL_ORG_TENANT_MAP in the deploy secrets (deploy/README.md, "ZITADEL bootstrap and
+  # sign-in"); until then it recognises nothing and the chain behaves as before. The membership source (the Members
+  # page) additionally needs EAP_ZITADEL_MACHINE_KEY and is left out of the capabilities answer while that is missing.
+  EAP_IAM_IDENTITY: "zitadel,apikey,cfaccess,devloopback"
+  EAP_IAM_POLICY: openaccess
+  EAP_IAM_MEMBERSHIP: zitadel
+  # ZITADEL: the public issuer (the exact `iss`), and the in-cluster Service the API verifies tokens and calls the
+  # management API through (the Host header stays the issuer's host; the iam-egress-zitadel policy allows it).
+  EAP_ZITADEL_ISSUER: https://auth.example-org.ai
+  EAP_ZITADEL_API_URL: http://zitadel.iam.svc.cluster.local:8080
+  # How Studio signs people in: `zitadel` (ON: OIDC code + PKCE against ZITADEL; Studio sends the access token as a
+  # Bearer) or `access` (the Cloudflare Access cookie and JWT; also the code default). The SSH-tunnel loopback page
+  # keeps the dev bearer either way. A missing EAP_ZITADEL_STUDIO_CLIENT_ID or EAP_ZITADEL_PROJECT_ID in the Secret
+  # makes Studio fall back to `access` (apps/studio/src/lib/auth/config.ts) instead of locking everyone out.
+  # Rollback: set this to `access` and redeploy; nothing else changes.
+  EAP_STUDIO_AUTH: zitadel
+  EAP_CF_ACCESS_TEAM_DOMAIN: example-org.cloudflareaccess.com
+  EAP_CF_ACCESS_AUD: REPLACE_WITH_ACCESS_APP_AUD
+  EAP_CF_ACCESS_TENANT: studio
+  # audit_log keeps 400 days (eap_worker.audit_retention prunes older rows daily); `off` keeps everything.
+  EAP_AUDIT_RETENTION_DAYS: "400"
+  # Studio over the SSH tunnel (http://127.0.0.1:13000) calls the API's own port-forward (http://127.0.0.1:18000)
+  # directly: a loopback peer. These are the only origins that get CORS for it (loopback hosts only; no credentials).
+  EAP_CORS_LOOPBACK_ORIGINS: http://127.0.0.1:13000,http://localhost:13000
   EAP_AGUI_CORS_ORIGINS: http://localhost:13000,http://127.0.0.1:13000
   EAP_APP_VERSION: m1
   EAP_DBOS_SYSTEM_SCHEMA: dbos
@@ -11,7 +46,7 @@ data:
   EAP_LITELLM_EMBEDDING_BASE_URL: http://host.lima.internal:4001
   EAP_ALLOWED_MODELS: "litellm:*,anthropic:*"
   EAP_ALLOWED_EMBEDDING_MODELS: "litellm:Qwen3-VL-Embedding-8B-mlx-8bit=1024"
-  EAP_ALLOWED_TOOLS: "clock.now,clock.sleep,secrets.request,http.request,workflow.return,feed.parse,json.query,text.check,html.extract,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
+  EAP_ALLOWED_TOOLS: "clock.now,clock.sleep,secrets.request,http.request,workflow.return,workflow.history,feed.parse,json.query,text.check,html.extract,atproto.richtext,tickets.create,kb.source.get,settings.connection.check,kb.source.sync,workflow.run.wait,workflow.run.result"
   EAP_LOKI_URL: http://lgtm:3100
   # The worker reaches the API's MCP control endpoint as the Architect's run (the `control__*` tools); the bearer is a
   # two-minute run token signed with a key derived from EAP_SECRETS_KEY, so nothing else is configured.
@@ -19,12 +54,12 @@ data:
   # Cloudflare Workers AI provider (optional; model ids cloudflare:@cf/...). The account id is not a secret; the API token
   # comes from the Secret (CLOUDFLARE_API_TOKEN). Leave both empty to keep the provider off. A gateway id routes every request
   # through Cloudflare AI Gateway (logging, caching, rate limits); empty calls Workers AI directly.
-  EAP_CLOUDFLARE_ACCOUNT_ID: "9a497744238ab16a1060dc3ae8abd102"
+  EAP_CLOUDFLARE_ACCOUNT_ID: "YOUR_CLOUDFLARE_ACCOUNT_ID"
   EAP_CLOUDFLARE_GATEWAY_ID: "default"
   # Chat attachment bytes live in Cloudflare R2 (S3 API), reached over HTTPS 443. The endpoint holds the account id, which
   # is not a secret; the access key and secret come from the Secret (EAP_BLOB_S3_ACCESS_KEY, EAP_BLOB_S3_SECRET_KEY). The bucket is created by the operator.
   EAP_BLOB_BACKEND: s3
-  EAP_BLOB_S3_ENDPOINT: https://9a497744238ab16a1060dc3ae8abd102.r2.cloudflarestorage.com
+  EAP_BLOB_S3_ENDPOINT: https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com
   EAP_BLOB_S3_BUCKET: pydanticos-attachments
   EAP_BLOB_S3_REGION: auto
   # up.sh replaces these with the cluster's `kubernetes` Service and endpoint addresses.

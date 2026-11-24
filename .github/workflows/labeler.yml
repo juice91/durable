@@ -1,0 +1,49 @@
+name: Label pull requests
+
+# Sets the release-note label (feature, fix, security, docs, infra or internal) on a pull request that has none,
+# from its title prefix or its changed paths (scripts/release/labels.py; the mapping is in docs/releasing.md).
+# Never relabels a pull request that already has a category label. Pull requests from forks are skipped: their
+# token is read-only and this workflow must not run their code. It runs the labeler from the BASE commit, never
+# the pull request's own checkout, and reads the title through the API, not through the workflow expression text.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    env:
+      # uv provisions the interpreter (the self-hosted macOS runner has no usable python3); the scripts are stdlib only.
+      UV_PYTHON: '3.13'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The trusted base commit, not the pull request's merge ref.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      # The base commit may predate the labeler (the first pull request that brings it in, such as a sync into a
+      # repository that does not have the script yet): then there is nothing to run, and the job passes without labelling.
+      - if: hashFiles('scripts/release/labels.py') != ''
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # No Actions cache: a self-hosted Mac keeps uv's own cache, and the release jobs install nothing.
+          enable-cache: false
+      - name: Label the pull request
+        if: hashFiles('scripts/release/labels.py') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: uv run --no-project python scripts/release/labels.py apply --pr "$PR_NUMBER"

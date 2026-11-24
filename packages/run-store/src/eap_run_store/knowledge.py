@@ -639,13 +639,25 @@ def _doc_dict(row: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+# A metadata filter key with its own meaning: a path prefix on the `path` metadata (equality filters
+# `kind`, `language` and `path` already work on the document metadata copied to every chunk).
+PATH_PREFIX_FILTER_KEY = "path_prefix"
+
+
 def _filter_clauses(metadata_filter: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
-    """`c.metadata @> ANY(...)` per key: a scalar is equality, a list is any of its values."""
+    """`c.metadata @> ANY(...)` per key: a scalar is equality, a list is any of its values. The key
+    `path_prefix` is a prefix match on the `path` metadata instead (source-code knowledge bases)."""
     checked = validate_filter(dict(metadata_filter)) if metadata_filter else None
     clauses: list[str] = []
     params: dict[str, Any] = {}
     for i, (key, value) in enumerate(sorted((checked or {}).items())):
         values = value if isinstance(value, tuple) else (value,)
+        if key == PATH_PREFIX_FILTER_KEY:
+            # Source code: `path_prefix` keeps chunks whose `path` metadata starts with a value
+            # (any of them); `starts_with` needs no LIKE escaping.
+            params[f"f{i}"] = [str(v) for v in values]
+            clauses.append(f"EXISTS (SELECT 1 FROM unnest(CAST(:f{i} AS text[])) p(v) WHERE starts_with(c.metadata ->> 'path', p.v))")
+            continue
         params[f"f{i}"] = [json.dumps({key: v}) for v in values]
         clauses.append(f"c.metadata @> ANY(CAST(:f{i} AS jsonb[]))")
     return clauses, params

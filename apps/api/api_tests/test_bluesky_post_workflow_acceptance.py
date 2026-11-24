@@ -104,8 +104,8 @@ def test_the_example_is_a_valid_spec_with_only_the_secret_name():
     spec = WorkflowSpec.model_validate(example["spec"])
     assert spec.name == "Bluesky Post"
     tools = [(s.id, s.tool_id) for s in spec.steps if s.type == "tool"]
-    assert tools == [("now", "clock.now"), ("session", "http.request"), ("login_failed", "workflow.return"),
-                     ("post", "http.request"), ("post_failed", "workflow.return"), ("result", "workflow.return")]
+    assert tools == [("now", "clock.now"), ("session", "http.request"), ("ret_login_failed", "workflow.return"),
+                     ("post", "http.request"), ("ret_post_failed", "workflow.return"), ("ret_result", "workflow.return")]
     dumped = json.dumps(example)
     assert f"secret:{SECRET}" in dumped and dumped.count(f"secret:{SECRET}") >= 2  # the steps and the description
     assert PASSWORD not in dumped
@@ -299,7 +299,7 @@ def test_a_post_completes_and_the_password_stays_out_of_every_record(stack, work
     assert events["step:post:started"][1]["input"]["headers"] == {"Authorization": "[REDACTED]"}
     assert "Bearer jwt-access-1" not in stack.everything_recorded(run_id)
     assert events["step:session:started"][1]["input"]["json"]["password"] == f"secret:{SECRET}"  # the reference only
-    assert "step:login_failed:started" not in events and "step:post_failed:started" not in events
+    assert "step:ret_login_failed:started" not in events and "step:ret_post_failed:started" not in events
 
 
 @requires_pg
@@ -311,7 +311,7 @@ def test_a_refused_login_fails_with_bluesky_auth_failed_before_any_post(stack, w
     assert stack.error_code(run_id) == "bluesky_auth_failed"
     events = stack.events(run_id)
     assert events["step:session:completed"][1]["output"]["status"] == 401
-    assert events["step:login_failed:failed"][1]["error_code"] == "bluesky_auth_failed"
+    assert events["step:ret_login_failed:failed"][1]["error_code"] == "bluesky_auth_failed"
     assert "step:post:started" not in events
     assert [r["url"].rsplit(".", 1)[-1] for r in stack.sent()] == ["createSession"]
     assert "FAKE-a-wrong-password-0000" not in stack.everything_recorded(run_id)
@@ -326,8 +326,8 @@ def test_a_refused_post_fails_with_bluesky_post_failed(stack, workflow):
     assert stack.error_code(run_id) == "bluesky_post_failed"
     events = stack.events(run_id)
     assert events["step:post:completed"][1]["output"]["status"] == 400
-    assert events["step:post_failed:failed"][1]["error_code"] == "bluesky_post_failed"
-    assert "step:result:started" not in events
+    assert events["step:ret_post_failed:failed"][1]["error_code"] == "bluesky_post_failed"
+    assert "step:ret_result:started" not in events
     assert PASSWORD not in stack.everything_recorded(run_id)
 
 

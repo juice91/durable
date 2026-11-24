@@ -67,6 +67,7 @@ from pydantic import (
 )
 
 from eap_schemas._omit import OmitNoneModel
+from eap_schemas.permissions import Permissions
 from eap_schemas.evals import EvaluatorSpec
 from eap_schemas.limits import (
     COST_DECIMAL_PLACES,
@@ -122,6 +123,7 @@ __all__ = (
 
 MAX_STEPS = 50
 MAX_SPEC_BYTES = 64 * 1024
+DEFAULT_MAX_STEP_OUTPUT_BYTES = 32 * 1024  # a step's JSON output; the worker's EAP_WORKFLOW_MAX_STEP_OUTPUT_BYTES defaults to it
 MAX_LITERAL_DEPTH = 32  # nesting levels of one template value or condition literal
 MAX_SPEC_DEPTH = 64  # nesting levels of the whole spec document
 STEP_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -265,19 +267,66 @@ def _check_literal(value: Any, what: str) -> None:
             raise ValueError(f"{what} must be a JSON literal or a $ref, got {type(item).__name__}")
 
 
+def input_markers(value: Any) -> Iterator[tuple[tuple[str | int, ...], str, Any]]:
+    """Every ``$ref`` / ``$template`` marker in an input value at ANY depth (objects and lists), in document
+    order, as ``(path, key, payload)``; ``path`` is the object keys and list indexes down to the marker. A
+    marker is an object with exactly one key, ``$ref`` or ``$template``, and is never searched inside. An
+    object that has one of those keys next to others is refused (ValueError), so a half-marker is never run
+    as data. Iterative, so call it only on a value whose depth was checked."""
+    stack: list[tuple[tuple[str | int, ...], Any]] = [((), value)]
+    while stack:
+        path, item = stack.pop()
+        if isinstance(item, dict):
+            for key in (REF_KEY, TEMPLATE_KEY):
+                if key in item:
+                    if set(item) != {key}:
+                        where = " at " + ".".join(map(str, path)) if path else ""
+                        raise ValueError(
+                            f'a {key} must be exactly {{"{key}": ...}} with no other keys{where}'
+                        )
+                    yield path, key, item[key]
+                    break
+            else:
+                stack.extend(reversed([((*path, k), v) for k, v in item.items()]))
+        elif isinstance(item, list):
+            stack.extend(reversed([((*path, i), v) for i, v in enumerate(item)]))
+
+
+def _check_input_value(value: Any, what: str) -> None:
+    """One input value: a JSON literal with markers allowed at any depth (each checked as a whole value)."""
+    if nesting_depth(value, MAX_LITERAL_DEPTH) > MAX_LITERAL_DEPTH:
+        raise ValueError(f"{what} is nested more than {MAX_LITERAL_DEPTH} levels deep")
+    for path, key, payload in input_markers(value):
+        where = f"{what}" + (f" at {'.'.join(map(str, path))}" if path else "")
+        if key == REF_KEY:
+            _ref_path({REF_KEY: payload})
+        else:
+            _check_literal(payload, f"$template of {where}")
+            template_paths(payload)
+    stack = [value]
+    while stack:  # the literal parts around the markers: JSON types, string keys, finite numbers
+        item = stack.pop()
+        if isinstance(item, dict):
+            if len(item) == 1 and (REF_KEY in item or TEMPLATE_KEY in item):
+                continue
+            if not all(isinstance(k, str) for k in item):
+                raise ValueError(f"{what} must be a JSON literal or a $ref, got an object with a non-string key")
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise ValueError(f"{what} contains a non-finite number ({item}); JSON numbers must be finite")
+        elif not (item is None or isinstance(item, (str, bool, int, float))):
+            raise ValueError(f"{what} must be a JSON literal or a $ref, got {type(item).__name__}")
+
+
 def _validate_template(template: Any) -> dict[str, Any]:
     if not isinstance(template, dict):
         raise ValueError("input must be an object mapping field names to literals or $refs")
     for key, value in template.items():
         if not isinstance(key, str) or not key or len(key) > 128:
             raise ValueError("input field names must be 1-128 character strings")
-        if is_template(value):
-            if set(value) != {TEMPLATE_KEY}:
-                raise ValueError('a $template must be exactly {"$template": <json>}')
-            _check_literal(value[TEMPLATE_KEY], f"$template of '{key}'")
-            template_paths(value[TEMPLATE_KEY])
-        elif _ref_path(value) is None:
-            _check_literal(value, f"value of '{key}'")
+        _check_input_value(value, f"value of '{key}'")
     return template
 
 
@@ -792,12 +841,15 @@ def step_targets(step: Step) -> list[str]:
 
 
 def _template_refs(template: dict[str, Any] | None) -> list[str]:
+    """Every ref path an input / state / carry mapping reads: whole-value ``$ref``s and the placeholders of
+    ``$template``s, markers at any depth, in document order."""
     paths: list[str] = []
     for value in (template or {}).values():
-        if is_template(value):
-            paths.extend(template_paths(value[TEMPLATE_KEY]))
-        elif (path := _ref_path(value)) is not None:
-            paths.append(path)
+        for _path, key, payload in input_markers(value):
+            if key == REF_KEY:
+                paths.append(_ref_path({REF_KEY: payload}))  # type: ignore[arg-type]
+            else:
+                paths.extend(template_paths(payload))
     return paths
 
 
@@ -1393,6 +1445,8 @@ class WorkflowSpec(BaseModel):
     steps: tuple[Step, ...]
     start: str
     limits: WorkflowLimits | None = Field(default=None, exclude_if=_no_limits)
+    # What the workflow's steps may use (eap_schemas.permissions, IAM P0b): schema only, nothing enforces it yet.
+    permissions: Permissions | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="before")
     @classmethod

@@ -29,12 +29,23 @@ from eap_processors import processor_errors
 from eap_run_store.definition_errors import refuse
 from eap_run_store.knowledge import KnowledgeStore
 from eap_schemas import AgentSpec, canonical_spec_hash, reserved_tool_name_conflicts
+from eap_schemas.agent_tools import (
+    AGENT_TOOL_AGENT_ARCHIVED,
+    AGENT_TOOL_CYCLE,
+    AGENT_TOOL_NAME_CONFLICT,
+    AGENT_TOOL_NOT_PUBLISHED,
+    AGENT_TOOL_UNKNOWN_AGENT,
+    AGENT_TOOL_VERSION_NOT_FOUND,
+    LATEST,
+    agent_tool_default_name,
+)
+from eap_schemas.mcp import mcp_tool_name
 from eap_schemas.embedding_policy import EmbeddingModelNotAllowed, EmbeddingModelPolicy
 from eap_schemas.model_settings_support import unsupported_settings
 from eap_schemas.models_policy import ModelPolicy
 from eap_schemas.processors import processor_models
 from eap_schemas.request_context import placeholder_errors
-from eap_schemas.tools import HIDDEN_TOOL_DECLARATIONS
+from eap_schemas.tools import HIDDEN_TOOL_DECLARATIONS, RESERVED_TOOL_NAMES, builtin_tool_name
 
 log = logging.getLogger("eap_api")
 
@@ -60,7 +71,9 @@ def _check_mcp_servers(conn: Connection, tenant_id: str, spec: AgentSpec) -> Non
             raise refuse(status_code=422, detail=f"MCP server '{name}' is disabled")
 
 
-def check_publishable(conn: Connection, tenant_id: str, spec: AgentSpec, *, draft_run: bool = False) -> None:
+def check_publishable(
+    conn: Connection, tenant_id: str, spec: AgentSpec, *, draft_run: bool = False, agent_id: str | None = None
+) -> None:
     """Publish-time policy, applied by publish and by restore (a restore is re-validated under
     today's policy, not the one in force when the source version was published), and by a draft
     test run (`draft_run`, run_options._draft_target). 422 on the first failure.
@@ -69,7 +82,9 @@ def check_publishable(conn: Connection, tenant_id: str, spec: AgentSpec, *, draf
     deleted (DELETE /knowledge-bases/{id} lists draft references and needs force=true) runs like a
     published version that attaches one, and its retrieve tool answers "The attached knowledge bases
     no longer exist." The worker resolves knowledge bases within the run's tenant only, so an id of
-    another tenant still finds nothing."""
+    another tenant still finds nothing. It skips the agent tool checks too (the worker re-checks each
+    call and its depth cap bounds any chain). `agent_id` is the agent being published or restored, for
+    the cycle check."""
     _check_memory_features(spec)
 
     policy = ModelPolicy.from_env()
@@ -139,6 +154,122 @@ def check_publishable(conn: Connection, tenant_id: str, spec: AgentSpec, *, draf
     _check_platform_tools(spec)
     if not draft_run:
         _check_knowledge_bases(conn, tenant_id, spec)
+        check_agent_tools(conn, tenant_id, spec, agent_id)
+
+
+def _agent_tool_problem(status_code: int, code: str, detail: str):
+    return refuse(status_code=status_code, detail=detail, code=code)
+
+
+def _latest_version_number(conn: Connection, tenant_id: str, agent_id: str) -> int | None:
+    return conn.execute(
+        text("SELECT max(version) FROM agent_versions WHERE tenant_id = :t AND agent_id = :a"),
+        {"t": tenant_id, "a": agent_id},
+    ).scalar()
+
+
+def _version_spec(conn: Connection, tenant_id: str, agent_id: str, version: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        text("SELECT spec FROM agent_versions WHERE tenant_id = :t AND agent_id = :a AND version = :v"),
+        {"t": tenant_id, "a": agent_id, "v": version},
+    ).first()
+    return row[0] if row is not None else None
+
+
+def check_agent_tools(conn: Connection, tenant_id: str, spec: AgentSpec, agent_id: str | None) -> None:
+    """Agents as tools (eap_schemas.agent_tools), decided statically at publish and restore. 422 with a
+    stable `code`, naming the first problem:
+
+    - `agent_tool_unknown_agent`: the target is not an agent of this tenant (another tenant's is reported
+      exactly like an unknown one);
+    - `agent_tool_agent_archived`, `agent_tool_not_published` (no version yet),
+      `agent_tool_version_not_found` (a pinned version that does not exist);
+    - `agent_tool_name_conflict`: two refs, or a ref and a built-in, MCP or platform tool, share the
+      model-facing name (the derived name is the target's, so only publish knows it);
+    - `agent_tool_cycle`: this agent is reachable from one of its own refs over the published graph
+      (every ref to `latest` follows the target's newest version, every pinned ref that version; a ref
+      that reaches THIS agent at `latest` will run the version being published). The runtime depth cap
+      (EAP_AGENT_TOOL_MAX_DEPTH) still bounds a cycle that a later publish creates."""
+    refs = spec.agent_tools
+    if not refs:
+        return
+    ids = [ref.agent_id for ref in refs]
+    rows = {
+        r.id: r
+        for r in conn.execute(
+            text("SELECT id, name, archived FROM agents WHERE tenant_id = :t AND id = ANY(:ids)"),
+            {"t": tenant_id, "ids": ids},
+        )
+    }
+    taken = {builtin_tool_name(tool_id): tool_id for tool_id in spec.tools}
+    taken.update({mcp_tool_name(r.server, r.tool): f"{r.server}/{r.tool}" for r in spec.mcp_tools})
+    taken.update({name: name for name in RESERVED_TOOL_NAMES})
+    seen: dict[str, str] = {}
+    for ref in refs:
+        row = rows.get(ref.agent_id)
+        if row is None:
+            raise _agent_tool_problem(
+                422, AGENT_TOOL_UNKNOWN_AGENT, f"agent tool: agent {ref.agent_id} does not exist in this tenant"
+            )
+        if row.archived:
+            raise _agent_tool_problem(
+                422, AGENT_TOOL_AGENT_ARCHIVED, f"agent tool: agent '{row.name}' is archived; unarchive it or remove the tool"
+            )
+        latest = _latest_version_number(conn, tenant_id, ref.agent_id)
+        if latest is None:
+            raise _agent_tool_problem(
+                422, AGENT_TOOL_NOT_PUBLISHED, f"agent tool: agent '{row.name}' has no published version"
+            )
+        if ref.version != LATEST and _version_spec(conn, tenant_id, ref.agent_id, ref.version) is None:
+            raise _agent_tool_problem(
+                422, AGENT_TOOL_VERSION_NOT_FOUND, f"agent tool: agent '{row.name}' has no version {ref.version}"
+            )
+        name = ref.name or agent_tool_default_name(row.name, ref.agent_id)
+        if name in taken or name in seen:
+            other = taken.get(name) or seen[name]
+            raise _agent_tool_problem(
+                422, AGENT_TOOL_NAME_CONFLICT,
+                f"agent tool name '{name}' (agent '{row.name}') is already used by '{other}'; set a different name",
+            )
+        seen[name] = ref.agent_id
+    if agent_id is not None:
+        _check_agent_tool_cycle(conn, tenant_id, spec, str(agent_id), {r.id: r.name for r in rows.values()})
+
+
+def _check_agent_tool_cycle(
+    conn: Connection, tenant_id: str, spec: AgentSpec, agent_id: str, names: dict[str, str]
+) -> None:
+    """Depth first over the published graph from the new spec's refs; reaching `agent_id` through a
+    `latest` ref is a cycle. Each (agent, resolved version) is expanded once."""
+    own_name = spec.name
+
+    def label(a: str) -> str:
+        return names.get(a) or (own_name if a == agent_id else a)
+
+    expanded: set[tuple[str, int]] = set()
+
+    def walk(refs: Any, path: list[str]) -> None:
+        for ref in refs:
+            target = str(ref["agent_id"] if isinstance(ref, dict) else ref.agent_id)
+            version = ref.get("version", LATEST) if isinstance(ref, dict) else ref.version
+            if version == LATEST:
+                if target == agent_id:
+                    chain = " → ".join([*path, label(target)])
+                    raise _agent_tool_problem(
+                        422, AGENT_TOOL_CYCLE, f"agent tool cycle: {chain} (this publish would make it a loop)"
+                    )
+                resolved = _latest_version_number(conn, tenant_id, target)
+            else:
+                resolved = int(version)
+            if resolved is None or (target, resolved) in expanded:
+                continue
+            expanded.add((target, resolved))
+            sub = _version_spec(conn, tenant_id, target, resolved)
+            if sub is None:
+                continue
+            walk(sub.get("agent_tools") or (), [*path, label(target)])
+
+    walk(spec.agent_tools, [label(agent_id)])
 
 
 def _check_fallback_models(policy: ModelPolicy, spec: AgentSpec) -> None:

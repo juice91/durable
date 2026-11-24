@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-iam-zitadel"
+version = "0.3.0"
+description = "IAM plug-in (enterprise): ZITADEL access tokens as the identity, the tenant's org as the membership source, and the bootstrap CLI"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "eap-iam",
+    "pyjwt[crypto]>=2.8",
+    "httpx2>=2.16",
+]
+
+[project.entry-points."eap.iam.identity"]
+zitadel = "eap_iam_zitadel:create_identity"
+
+[project.entry-points."eap.iam.membership"]
+zitadel = "eap_iam_zitadel:create_membership"
+
+[tool.uv.sources]
+eap-iam = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_iam_zitadel"]

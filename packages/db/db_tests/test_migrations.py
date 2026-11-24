@@ -125,8 +125,8 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
         drop_schema(base, schema)
 
 
-def test_single_head_is_the_mcp_servers_keep_warm_migration():
-    assert head_revisions() == {"0035_mcp_servers_keep_warm"}
+def test_single_head_is_the_iam_actor_audit_migration():
+    assert head_revisions() == {"0039_api_key_owner"}
 
 
 def test_revisions_after_api_keys_form_one_chain():

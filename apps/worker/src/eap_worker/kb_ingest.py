@@ -627,12 +627,38 @@ def _chunk_extract_metadata(extractor: str, chunks: list[Any]) -> list[dict[str,
     from eap_schemas.knowledge import ChunkExtractMetadata
 
     version = _extractor_version(extractor)
-    return [
-        ChunkExtractMetadata(
-            extractor=extractor, extractor_version=version, page=c.page, page_end=c.page_end, condition=c.condition
-        ).model_dump(mode="json")
-        for c in chunks
-    ]
+    out: list[dict[str, Any]] = []
+    for c in chunks:
+        code = getattr(c, "code", None)
+        extra: dict[str, Any] = (
+            {
+                "language": code.language, "path": code.path, "symbol": code.symbol,
+                "start_line": code.start_line, "end_line": code.end_line, "kind": code.kind,
+            }
+            if code is not None
+            else {}
+        )
+        out.append(
+            ChunkExtractMetadata(
+                extractor=extractor, extractor_version=version, page=c.page, page_end=c.page_end,
+                condition=c.condition, **extra,
+            ).model_dump(mode="json")
+        )
+    return out
+
+
+def _code_info(doc: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """The `code` extractor's input: the language (from the mime type), the repository path (the
+    source's `path` metadata, else the title) and the kind (the document's `kind` metadata, else `code`)."""
+    from eap_knowledge import format_for_mime
+
+    path = metadata.get("path") if isinstance(metadata.get("path"), str) else None
+    kind = metadata.get("kind") if isinstance(metadata.get("kind"), str) else None
+    return {
+        "language": format_for_mime(str(doc["mime_type"])).format,
+        "path": (path or doc["title"] or doc.get("document_key") or "unknown")[:1024],
+        "kind": (kind or "code")[:64],
+    }
 
 
 @DBOS.step(name="eap.kb_extract_chunk", should_retry=_transient, **STEP_RETRY)
@@ -706,6 +732,8 @@ async def kb_extract_chunk_step(
                 source_url=doc["source_url"],
                 options=config.extract.model_dump(mode="json") if config.extract is not None else None,
                 max_tokens=config.max_tokens,
+                overlap_tokens=config.overlap_tokens,
+                code=_code_info(doc, metadata) if extractor == "code" else None,
             )
         except ExtractionFailed as exc:
             log.info("kb_ingest run %s extraction failed: %s", run_id, exc.code)

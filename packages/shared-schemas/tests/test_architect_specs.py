@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from eap_schemas.workflows import MAX_STEPS
 from eap_schemas.architect import (
     Allowlist,
     AllowlistAgent,
@@ -103,6 +104,16 @@ def test_compile_agent_denylist_holds_even_if_the_allowlist_offers_the_tool():
         compile_agent(agent(tools=("architect.publish_agent",)), forged)
 
 
+def test_workflow_history_is_for_workflow_steps_never_for_agents():
+    offered = allowlist(tools=(AllowlistTool(id="workflow.history", title="History", description="Recent runs"),))
+    with pytest.raises(ValueError, match="tool_not_allowed: workflow.history"):
+        compile_agent(agent(tools=("workflow.history",)), offered)
+    spec = compile_workflow(
+        wf([{"kind": "tool", "id": "rejected", "tool": "workflow.history", "params": {"select": "url"}}]), offered
+    )
+    assert spec.steps[0].tool_id == "workflow.history"
+
+
 def test_compile_agent_needs_a_model():
     with pytest.raises(ValueError, match="model_required"):
         compile_agent(agent(), allowlist(default_model=None))
@@ -163,7 +174,7 @@ def test_compile_workflow_rejects_loops_and_unknown_placeholders():
     with pytest.raises(ValidationError):
         wf([{"kind": "agent", "id": "run_end", "agent": "writer", "prompt": "x"}])  # reserved
     with pytest.raises(ValidationError):
-        wf([{"kind": "agent", "id": f"s{i}", "agent": "writer", "prompt": "x"} for i in range(41)])  # at most 40
+        wf([{"kind": "agent", "id": f"s{i}", "agent": "writer", "prompt": "x"} for i in range(MAX_STEPS + 1)])
     for prompt, message in [
         ("{{previous}}", "unknown_placeholder"),  # first step has no previous
         ("{{steps.later}}", "unknown_placeholder"),
@@ -181,3 +192,22 @@ def test_compile_workflow_rejects_loops_and_unknown_placeholders():
 def test_allowlist_dump_never_carries_row_ids():
     dumped = allowlist().model_dump(mode="json")
     assert "row_id" not in str(dumped) and WRITER not in str(dumped)
+
+
+def _agent_steps(n):
+    return [{"kind": "agent", "id": f"s{i}", "agent": "writer", "prompt": "x"} for i in range(n)]
+
+
+def test_the_architect_step_cap_is_the_platforms_cap():
+    assert MAX_STEPS == 50
+    compile_workflow(wf(_agent_steps(50)), allowlist())  # 50 compile into a valid WorkflowSpec
+    with pytest.raises(ValidationError, match="a workflow has at most 50 steps, got 51"):
+        wf(_agent_steps(51))
+
+
+def test_the_architect_cap_counts_parallel_branches_like_the_platform():
+    par = {"kind": "parallel", "id": "p", "branches": [
+        {"id": "b1", "agent": "writer", "prompt": "x"}, {"id": "b2", "agent": "writer", "prompt": "x"}]}
+    compile_workflow(wf([par, *_agent_steps(47)]), allowlist())  # 3 + 47 = 50
+    with pytest.raises(ValidationError, match="at most 50 steps, got 51"):
+        wf([par, *_agent_steps(48)])

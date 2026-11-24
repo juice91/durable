@@ -142,3 +142,126 @@ def test_input_limits():
     with pytest.raises(ValidationError):
         TextCheckInput(text="x", rules={"nonsense": True})
     assert TOOL_DECLARATIONS["text.check"].side_effect is False
+
+
+# --- verbatim_exempt -----------------------------------------------------------------------------------------------
+
+NAME = "市民動起來城市行動展覽活動名稱"  # 15 graphemes
+SRC = f"市府宣布「{NAME}」將於週末舉行，現場提供導覽。"
+
+
+def exempt(text, source=SRC, n=10, **parts):
+    return check(text, source=source, max_verbatim_run=n, verbatim_exempt=parts)
+
+
+def test_without_verbatim_exempt_results_keep_their_exact_shape():
+    out = check("某歌手昨天在台北小巨蛋宣布明年將舉辦三十場", source="某歌手昨天在台北小巨蛋宣布，明年將舉辦三十場", max_verbatim_run=15)
+    assert out == {"ok": False, "text": "某歌手昨天在台北小巨蛋宣布明年將舉辦三十場", "reason": "verbatim", "graphemes": 21}
+    assert check(GOOD, source="無關的原文", max_verbatim_run=5) == {"ok": True, "text": GOOD, "reason": None, "graphemes": len(GOOD)}
+
+
+def test_quoted_name_does_not_count_and_the_result_reports_the_longest_run():
+    text = f"活動「{NAME}」今天開幕，吸引許多人。"
+    assert check(text, source=SRC, max_verbatim_run=10)["reason"] == "verbatim"
+    out = exempt(text, quoted=True)
+    assert out["ok"] is True and out["verbatim_longest_run"] < 10
+
+
+def test_a_quote_is_a_break_so_text_either_side_does_not_join():
+    source = "甲乙丙丁戊己庚辛"
+    text = "甲乙丙丁「」戊己庚辛"  # the brackets are noise, so without the option the two halves join into 8
+    assert check(text, source=source, max_verbatim_run=8)["reason"] == "verbatim"
+    out = exempt(text, source=source, n=8, quoted=True)
+    assert out["ok"] is True and out["verbatim_longest_run"] == 4
+
+
+def test_each_side_of_a_quote_still_counts_on_its_own():
+    out = exempt("甲乙丙丁戊己庚辛壬「名」", source="甲乙丙丁戊己庚辛壬癸", n=9, quoted=True)
+    assert out["ok"] is False and out["reason"] == "verbatim"
+    assert out["verbatim_run_text"] == "甲乙丙丁戊己庚辛壬" and out["verbatim_longest_run"] == 9
+
+
+@pytest.mark.parametrize("pair", ["「」", "『』", "《》", "〈〉", "“”", '""'])
+def test_every_quote_kind_is_a_break(pair):
+    text = f"甲乙丙{pair[0]}丁戊{pair[1]}己庚辛"
+    assert exempt(text, source="甲乙丙丁戊己庚辛", n=7, quoted=True)["ok"] is True
+    assert exempt(text, source="甲乙丙丁戊己庚辛", n=7)["ok"] is False
+
+
+def test_unbalanced_quotes_count_normally():
+    source = "甲乙丙丁戊己庚辛壬癸"
+    out = exempt("甲乙丙丁戊「己庚辛壬癸", source=source, n=10, quoted=True)
+    assert out["reason"] == "verbatim"  # no closer: nothing is exempt
+    assert exempt("甲乙丙丁戊」己庚辛壬癸", source=source, n=10, quoted=True)["reason"] == "verbatim"  # stray closer
+    # a closed pair after an unclosed opener of another kind still breaks
+    assert exempt("「甲乙丙丁戊《己》庚辛壬癸", source=source, n=10, quoted=True)["ok"] is True
+
+
+def test_same_kind_brackets_nest():
+    source = "甲乙丙丁戊己庚辛壬癸"
+    assert exempt("甲乙丙丁戊「己『庚』辛」壬癸", source=source, n=7, quoted=True)["ok"] is True
+
+
+def test_an_over_long_quoted_span_still_counts():
+    sentence = "".join(chr(0x4E00 + i) for i in range(39))  # 39 graphemes + 2 brackets = 41 > 40
+    ok = "".join(chr(0x4E00 + i) for i in range(38))  # 40 with the brackets: exempt
+    assert exempt(f"「{sentence}」", source=sentence, n=20, quoted=True)["reason"] == "verbatim"
+    assert exempt(f"前文「{ok}」後文", source=ok, n=20, quoted=True)["ok"] is True
+
+
+def test_numbers_break_runs_and_dates_are_exempt():
+    source = "甲乙丙丁戊11月22日己庚辛壬癸"
+    text = "甲乙丙丁戊 11 月 22 日 己庚辛壬癸"
+    assert exempt(text, source=source, n=6)["reason"] == "verbatim"
+    out = exempt(text, source=source, n=6, numbers=True)
+    assert out["ok"] is True and out["verbatim_longest_run"] == 5
+    assert exempt("在２０２８年舉行", source="在2028年舉行", n=3, numbers=True)["ok"] is True  # full-width digits
+
+
+def test_a_copied_clause_with_a_number_inside_still_fails_when_a_side_is_long():
+    source = "目前累計95名學生出現症狀，目前無人住院"
+    assert exempt("累計95名學生出現症狀目前無人住院", source=source, n=12, numbers=True)["reason"] == "verbatim"
+    out = exempt("累計95名學生出現症狀，目前無人住院", source=source, n=12, numbers=True)
+    assert out["verbatim_run_text"] == "名學生出現症狀目前無人住院" and out["verbatim_longest_run"] == 13
+    assert exempt("累計95名學生出現症狀，目前無人住院", source=source, n=14, numbers=True)["ok"] is True
+    assert exempt("累計95名學生出現症狀", source=source, n=12, numbers=True)["ok"] is True
+
+
+def test_terms_break_runs():
+    source = "甲乙丙民進黨丁戊己庚"
+    assert exempt("甲乙丙民進黨丁戊己庚", source=source, n=8)["reason"] == "verbatim"
+    out = exempt("甲乙丙民進黨丁戊己庚", source=source, n=8, terms=["民進黨"])
+    assert out["ok"] is True and out["verbatim_longest_run"] == 4
+    assert exempt("甲乙丙民進黨丁戊己庚", source=source, n=8, terms=["國民黨"])["reason"] == "verbatim"
+
+
+def test_exempt_parts_are_only_taken_from_the_text_not_the_source():
+    source = "甲乙丙「丁戊己」庚辛壬"
+    assert exempt("甲乙丙丁戊己庚辛壬", source=source, n=9, quoted=True)["reason"] == "verbatim"
+
+
+def test_verbatim_exempt_without_a_source_or_limit_changes_nothing():
+    assert check(GOOD, max_verbatim_run=5, verbatim_exempt={"quoted": True}) == {"ok": True, "text": GOOD, "reason": None, "graphemes": len(GOOD)}
+
+
+def test_the_offending_run_text_is_bounded():
+    long = "".join(chr(0x4E00 + i) for i in range(200))
+    out = exempt(long, source=long, n=10, numbers=True)
+    assert out["verbatim_longest_run"] == 200 and len(out["verbatim_run_text"]) == 60
+
+
+def test_schema_bounds():
+    from eap_schemas.tools import TextCheckRules
+    assert TextCheckRules(verbatim_exempt={}).verbatim_exempt.terms == []
+    TextCheckRules(verbatim_exempt={"terms": ["x"] * 100, "quoted": True})
+    for bad in ({"terms": ["x"] * 101}, {"terms": [""]}, {"terms": ["x" * 41]}, {"extra": 1}, {"quoted": "maybe"}):
+        with pytest.raises(ValidationError):
+            TextCheckRules(verbatim_exempt=bad)
+    with pytest.raises(ValidationError):
+        TextCheckInput(text="a", rules={"verbatim_exempt": {"terms": ["x" * 41]}})
+
+
+def test_the_declaration_documents_the_rule():
+    description = TOOL_DECLARATIONS["text.check"].description
+    assert "verbatim_exempt" in description and "verbatim_run_text" in description
+    assert "verbatim_exempt" in TOOL_DECLARATIONS["text.check"].example["rules"]

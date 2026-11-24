@@ -39,6 +39,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.exc import IntegrityError
 
+from eap_run_store.actor import RunActor, current_actor
 from eap_run_store.cursor import ConversationCursor, RunCursor
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -284,6 +285,13 @@ class RunModel(Base):
     event_order_next: Mapped[int] = mapped_column(
         "event_order_next", BigInteger, nullable=False, server_default=text("0")
     )
+
+    # 0036_iam_actor_audit: who the run acts as ("user:a@b.c", "service:<schedule id>", "apikey:<id>",
+    # "run:<parent id>"), the human or service it acts for, and the kind of starter (user, service, api_key, run).
+    # NULL on runs from before: read as "unknown (legacy)".
+    principal: Mapped[str | None] = mapped_column("principal", Text, nullable=True)
+    on_behalf_of: Mapped[str | None] = mapped_column("on_behalf_of", Text, nullable=True)
+    started_by_kind: Mapped[str | None] = mapped_column("started_by_kind", Text, nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -1172,6 +1180,13 @@ def _write_status_in_session(
     return True
 
 
+def _actor_values(actor: RunActor | None) -> dict[str, Any]:
+    actor = actor or current_actor()  # the request's actor when the caller named none
+    if actor is None:
+        return {}
+    return {"principal": actor.principal, "on_behalf_of": actor.on_behalf_of, "started_by_kind": actor.kind}
+
+
 class RunStore:
     """Store for durable runs."""
 
@@ -1194,6 +1209,7 @@ class RunStore:
         model_id: str | None = None,
         model_overridden: bool = False,
         model_settings: dict[str, Any] | None = None,
+        actor: RunActor | None = None,
     ) -> tuple[UUID, bool]:
         """Create a new agent run. Idempotent: same run_id returns existing without creating second row.
 
@@ -1217,6 +1233,7 @@ class RunStore:
             trace_id=trace_id,
             traceparent=traceparent,
             **_run_option_values(request_context, draft_spec, model_id, model_overridden, model_settings),
+            **_actor_values(actor),
         )
 
     def create_tool_run(
@@ -1229,6 +1246,7 @@ class RunStore:
         traceparent: str | None = None,
         *,
         knowledge_base_id: UUID | str | None = None,
+        actor: RunActor | None = None,
     ) -> tuple[UUID, bool]:
         """Create a tool run (kind 'tool': one call of `tool_id`, `input` = its JSON arguments as text).
 
@@ -1246,6 +1264,7 @@ class RunStore:
             trace_id=trace_id,
             traceparent=traceparent,
             knowledge_base_id=None if knowledge_base_id is None else str(knowledge_base_id),
+            **_actor_values(actor),
         )
 
     def create_workflow_run(
@@ -1261,6 +1280,7 @@ class RunStore:
         rerun_of: UUID | str | None = None,
         schedule_id: UUID | str | None = None,
         pause_after_each_step: bool = False,
+        actor: RunActor | None = None,
     ) -> tuple[UUID, bool]:
         """Create a workflow run (kind 'workflow': published version `workflow_version` of
         `workflow_id`, `input` = the workflow input as canonical JSON text). `rerun_of`: the earlier
@@ -1281,6 +1301,7 @@ class RunStore:
             rerun_of=None if rerun_of is None else str(rerun_of),
             schedule_id=None if schedule_id is None else str(schedule_id),
             pause_after_each_step=pause_after_each_step,
+            **_actor_values(actor),
         )
 
     def create_kb_ingest_run(
@@ -1491,7 +1512,12 @@ class RunStore:
     ) -> tuple[UUID, bool]:
         """Create the agent run that executes agent step `parent_step_id` of workflow run
         `parent_run_id` (same tenant: enforced by fk_runs_tenant_parent_run). Same idempotency
-        rules as create_run; `eap.agent_run` then drives it like any agent run."""
+        rules as create_run; `eap.agent_run` then drives it like any agent run. The child acts as `run:<parent>` for
+        whoever the parent acts for (design 4.1: a child never acts for anyone else)."""
+        with self.Session() as session:
+            on_behalf_of = session.execute(
+                select(RunModel.on_behalf_of).where(RunModel.tenant_id == tenant_id, RunModel.id == str(parent_run_id))
+            ).scalar_one_or_none()
         return self._insert_run(
             tenant_id,
             run_id,
@@ -1502,6 +1528,9 @@ class RunStore:
             parent_run_id=str(parent_run_id),
             parent_step_id=parent_step_id,
             traceparent=traceparent,
+            principal=f"run:{parent_run_id}",
+            on_behalf_of=on_behalf_of,
+            started_by_kind="run",
         )
 
     def _insert_run(self, tenant_id: str, run_id: UUID, **values: Any) -> tuple[UUID, bool]:

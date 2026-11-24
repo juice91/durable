@@ -124,10 +124,10 @@ def test_list_approved_tools_excludes_architect_and_platform_tools(engine, tenan
         mcp_lister=lister,
     ))
     ids = [t.id for t in result.tools]
-    assert ids == ["clock.now", "clock.sleep", "feed.parse", "html.extract", "http.request", "json.query", "secrets.request", "text.check", "tickets.create", "workflow.return"]  # no architect.*, no knowledge.search
+    assert ids == ["atproto.richtext", "clock.now", "clock.sleep", "feed.parse", "html.extract", "http.request", "json.query", "secrets.request", "text.check", "tickets.create", "workflow.history", "workflow.return"]  # no architect.*, no knowledge.search
     assert {t.id: t.requires_approval for t in result.tools} == {
-        "clock.now": False, "clock.sleep": False, "feed.parse": False, "html.extract": False, "http.request": True, "json.query": False, "secrets.request": True, "text.check": False, "tickets.create": True,
-        "workflow.return": False}
+        "atproto.richtext": False, "clock.now": False, "clock.sleep": False, "feed.parse": False, "html.extract": False, "http.request": True, "json.query": False, "secrets.request": True, "text.check": False, "tickets.create": True,
+        "workflow.history": False, "workflow.return": False}
     assert seen["call"] == (tenant, ["docs"])  # the disabled server is not offered
     assert [(s.id, s.tools) for s in result.mcp_servers] == [("docs", ("read", "search"))]
     assert "litellm:qwen" in {m.id for m in result.models} and "test:echo" in {m.id for m in result.models}
@@ -436,7 +436,8 @@ def test_list_approved_tools_gives_the_five_general_tools_a_schema_and_an_exampl
         assert len(tool.description) > 40
     assert "feeds" in by_id["feed.parse"].input_schema["properties"] and by_id["feed.parse"].example["feeds"][0]["label"]
     assert "[?id==" in by_id["json.query"].example["expression"]
-    assert {"min_graphemes", "forbid_urls", "rumour_terms", "max_verbatim_run"} <= set(by_id["text.check"].example["rules"])
+    assert {"min_graphemes", "forbid_urls", "rumour_terms", "max_verbatim_run", "verbatim_exempt"} <= set(by_id["text.check"].example["rules"])
+    assert "verbatim_exempt" in json.dumps(by_id["text.check"].input_schema)
     assert "secret:" in json.dumps(by_id["http.request"].example) and "drop_response_paths" in by_id["http.request"].input_schema["properties"]
     assert "ended" in json.dumps(by_id["workflow.return"].example)
     assert "{error" in by_id["http.request"].description and "text" in by_id["http.request"].description
@@ -532,7 +533,11 @@ def _approved(engine, tenant):
 def test_list_approved_tools_gives_every_tool_its_result_shape(engine, tenant):
     by_id = _approved(engine, tenant)
     assert by_id["clock.now"].result_example == "2026-11-18T09:30:00+00:00"  # a bare RFC 3339 string, no field
-    assert by_id["clock.now"].result_schema == {"type": "string", "format": "date-time"}
+    # parts=false (the default) returns the bare string, parts=true the object: the Architect sees both.
+    clock_schema = by_id["clock.now"].result_schema
+    assert clock_schema["oneOf"][0] == {"type": "string", "format": "date-time"}
+    assert clock_schema["oneOf"][1]["type"] == "object"
+    assert set(clock_schema["oneOf"][1]["required"]) == {"iso", "date", "hour", "minute", "hour_prefix", "weekday", "epoch_s"}
     assert {"status", "ok", "headers", "json", "elapsed_ms"} <= set(by_id["http.request"].result_example)
     assert {"items", "listing", "count", "dropped"} <= set(by_id["feed.parse"].result_example)
     assert by_id["json.query"].result_example == {"result": {"id": "c2"}}
@@ -542,6 +547,11 @@ def test_list_approved_tools_gives_every_tool_its_result_shape(engine, tenant):
     assert by_id["secrets.request"].result_example == {"ref": "secret:api-token", "stored": True}
     assert {"ticket_id", "created"} <= set(by_id["tickets.create"].result_example)
     assert by_id["workflow.return"].result_example == {"ended": "nothing new"}
+    history = by_id["workflow.history"]
+    assert history.result_example == {"items": ["https://news.example.com/a/1", "https://news.example.com/a/2"], "count": 2}
+    assert history.result_schema["required"] == ["items", "count"] and "items" in history.result_schema["properties"]
+    assert history.example == {"since_hours": 24, "where": {"status": "check_failed"}, "select": "url"}
+    assert history.requires_approval is False and {"since_hours", "where", "select", "statuses", "limit", "distinct"} == set(history.input_schema["properties"])
     from eap_schemas.tools import TOOL_DECLARATIONS
     missing = [t for t, d in TOOL_DECLARATIONS.items() if d.result_example is None]
     assert missing == []

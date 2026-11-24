@@ -82,6 +82,9 @@ class ApiKeyOut(BaseModel):
     expires_at: datetime | None
     revoked_at: datetime | None
     last_used_at: datetime | None
+    # A personal key names its owner (subject and the e-mail at creation); both null for a tenant key.
+    owner_subject: str | None = None
+    owner_email: str | None = None
 
 
 class ApiKeyCreated(ApiKeyOut):
@@ -109,6 +112,8 @@ def _out(record: ApiKeyRecord) -> dict:
         expires_at=record.expires_at,
         revoked_at=record.revoked_at,
         last_used_at=record.last_used_at,
+        owner_subject=record.owner_subject,
+        owner_email=record.owner_email,
     )
 
 

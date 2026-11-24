@@ -18,6 +18,7 @@ from eap_knowledge.config import (
 from eap_knowledge.errors import ExtractionFailed, InvalidChunkingConfig, UnsupportedMimeType
 from eap_knowledge.extract import MAX_HTML_ATTRIBUTES, MAX_SECTIONS, document_format, extract
 from eap_knowledge.formats import (
+    CODE_LANGUAGES,
     EXTRACTOR_VERSIONS,
     FORMAT_SPECS,
     SUPPORTED_MIME_TYPES,
@@ -29,13 +30,14 @@ from eap_knowledge.formats import (
     has_pdf_signature,
     is_worker_extracted,
 )
-from eap_knowledge.model import Chunk, Document, Section, approx_tokens, sha256_hex
+from eap_knowledge.model import Chunk, CodeRef, Document, Section, approx_tokens, sha256_hex
 from eap_knowledge.slug import anchor_fragment, slugify
 
 __all__ = [
     "CHARS_PER_TOKEN",
     "CHUNKER_ID",
     "CHUNKER_VERSION",
+    "CODE_LANGUAGES",
     "DEFAULT_CHUNKING",
     "EXTRACTOR_VERSIONS",
     "EXTRACT_LIMIT_ENV",
@@ -47,6 +49,7 @@ __all__ = [
     "SUPPORTED_CHUNKER_VERSIONS",
     "SUPPORTED_MIME_TYPES",
     "Chunk",
+    "CodeRef",
     "ChunkingConfig",
     "ChunkingConfigLike",
     "Document",

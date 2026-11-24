@@ -161,7 +161,7 @@ def test_external_otlp_forwarding_is_off_by_default_and_the_limit_is_set():
 def test_r2_endpoint_is_in_the_configmap_not_a_secret():
     cm = next(d for d in kustomize_docs() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
     data = cm["data"]
-    assert data["EAP_BLOB_S3_ENDPOINT"] == "https://9a497744238ab16a1060dc3ae8abd102.r2.cloudflarestorage.com"
+    assert data["EAP_BLOB_S3_ENDPOINT"] == "https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
     assert data["EAP_BLOB_S3_BUCKET"] == "pydanticos-attachments"
     assert data["EAP_BLOB_S3_REGION"] == "auto"
     assert "PLACEHOLDER" not in data["EAP_BLOB_S3_ENDPOINT"]
@@ -256,7 +256,7 @@ def test_host_path_is_only_the_backup_placeholder():
             host = vol.get("hostPath")
             if host:
                 paths.append(host.get("path"))
-    assert paths == ["/var/lib/pydanticos-backups"]
+    assert paths == ["/var/lib/pydanticos-backup-dir"]
     assert all(not str(path).startswith("/Users") for path in paths)
 
 
@@ -294,14 +294,14 @@ def test_backup_job_publishes_only_a_listed_dump():
     ):
         assert needle in rendered, needle
     cron = [d for d in kustomize_docs() if d["kind"] == "CronJob" and d["metadata"]["name"] == "postgres-backup"]
-    container = containers(cron[0])[0]
+    container = {c["name"]: c for c in containers(cron[0])}["pg-dump"]
     assert container["command"] == ["sh", "-eu", "/scripts/backup.sh"]
     assert "pg_dump" not in " ".join(container["command"])
     mounts = {m["mountPath"]: m for m in container["volumeMounts"]}
     assert mounts["/scripts"]["name"] == "script"
     volumes = {v["name"]: v for v in pod_spec(cron[0])["volumes"]}
     assert volumes["script"]["configMap"]["name"] == "postgres-backup-script"
-    assert volumes["backups"]["hostPath"]["path"] == "/var/lib/pydanticos-backups"
+    assert volumes["backups"]["hostPath"]["path"] == "/var/lib/pydanticos-backup-dir"
 
 
 def test_migrate_and_backup_pods_are_labeled():
@@ -330,7 +330,7 @@ def test_allowed_tools_name_the_kb_source_tools_and_spell_tickets_correctly():
     config = next(d for d in kustomize_docs() if d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
     allowed = set(config["data"]["EAP_ALLOWED_TOOLS"].split(","))
     assert "ticket.create" not in allowed and "tickets.create" in allowed
-    assert {"clock.now", "secrets.request", "http.request", "workflow.return", "feed.parse", "json.query", "text.check", "html.extract"} <= allowed  # general tools every tenant agent may be granted
+    assert {"clock.now", "secrets.request", "http.request", "workflow.return", "workflow.history", "feed.parse", "json.query", "text.check", "html.extract"} <= allowed  # general tools every tenant agent may be granted
     assert {"kb.source.get", "settings.connection.check", "kb.source.sync", "workflow.run.wait",
             "workflow.run.result"} <= allowed
 
@@ -388,7 +388,8 @@ def test_cloudflared_runs_the_tunnel_with_a_secret_token_and_is_off_by_default()
     assert set(env) == {"TUNNEL_TOKEN"}
     assert "value" not in env["TUNNEL_TOKEN"]
     ref = env["TUNNEL_TOKEN"]["valueFrom"]["secretKeyRef"]
-    assert ref["name"] == "pydanticos-secrets" and ref["key"] == "CLOUDFLARE_TUNNEL_TOKEN"
+    # Its own (optional) Secret, created by up.sh from CLOUDFLARE_TUNNEL_TOKEN.
+    assert ref["name"] == "cloudflared-secrets" and ref["key"] == "CLOUDFLARE_TUNNEL_TOKEN"
     assert ref.get("optional") is True
     for probe in ("readinessProbe", "livenessProbe"):
         assert c[probe]["httpGet"] == {"path": "/ready", "port": "metrics"}
@@ -397,14 +398,12 @@ def test_cloudflared_runs_the_tunnel_with_a_secret_token_and_is_off_by_default()
 
 def test_cloudflared_deploy_wiring_uses_the_one_secret_field_name():
     root = K8S_DIR.parents[1]
-    refs_file = root / "deploy/secrets.op.env"
-    if not refs_file.exists():
-        pytest.skip("deploy/secrets.op.env belongs to the private deployment repository")
-    refs = refs_file.read_text()
-    assert "CLOUDFLARE_TUNNEL_TOKEN=op://<vault>/<item>/CLOUDFLARE_TUNNEL_TOKEN" in refs
+    assert "CLOUDFLARE_TUNNEL_TOKEN=" in (K8S_DIR / "secrets.example.env").read_text()
     up = (root / "deploy/scripts/up.sh").read_text()
     assert 'dotenv_get "$secret_file" CLOUDFLARE_TUNNEL_TOKEN' in up
     assert "scale deployment/cloudflared --replicas=1" in up and "scale deployment/cloudflared --replicas=0" in up
+
+
 
 
 def _peer_names(rules: list[dict], direction: str) -> set[tuple[str, tuple[int, ...]]]:
@@ -447,3 +446,24 @@ def test_studio_image_builds_same_origin_with_the_in_cluster_api_rewrite_target(
     assert "18000" not in dockerfile
     config = (K8S_DIR.parents[1] / "apps/studio/next.config.ts").read_text()
     assert '"/api/:path*"' in config and "EAP_API_INTERNAL_URL" in config
+
+
+def test_only_studio_cloudflared_and_the_worker_reach_the_api_port_and_it_stays_cluster_internal():
+    """Design 10 (`allow-api-ingress`): default-deny plus exactly three ingress policies naming the API pods."""
+    from kustomize_util import kustomize_docs
+
+    api_ingress = [
+        d for d in kustomize_docs()
+        if d.get("kind") == "NetworkPolicy"
+        and d["spec"].get("podSelector", {}).get("matchLabels") == {"app.kubernetes.io/name": "api"}
+        and "Ingress" in d["spec"].get("policyTypes", [])
+    ]
+    peers = {
+        peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"]
+        for d in api_ingress for rule in d["spec"]["ingress"] for peer in rule["from"]
+    }
+    assert peers == {"studio", "cloudflared", "worker"}
+    assert all(p["port"] == 8000 for d in api_ingress for rule in d["spec"]["ingress"] for p in rule["ports"])
+    assert _policy("default-deny")["spec"]["policyTypes"] == ["Ingress", "Egress"]
+    api_service = next(d for d in kustomize_docs() if d.get("kind") == "Service" and d["metadata"]["name"] == "api")
+    assert api_service["spec"].get("type", "ClusterIP") == "ClusterIP"

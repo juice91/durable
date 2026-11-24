@@ -154,7 +154,8 @@ class Stack:
         workflow_id = created.json()["id"]
         published = self.client.post(f"{BASE}/{workflow_id}/versions", headers=self.h)
         assert published.status_code == 201, published.text
-        assert published.json()["warnings"] == []
+        # the example keeps its original step ids (the live workflow runs them), so only that warning is allowed
+        assert [w for w in published.json()["warnings"] if w["code"] != "step_id_convention"] == []
         return workflow_id
 
     def source(self, *, refs: dict[str, str] | None = None, skip_check: bool = True) -> str:

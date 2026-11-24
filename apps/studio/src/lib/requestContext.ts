@@ -5,6 +5,7 @@
 // - POST /api/v1/agents/{id}/request-context/validate           {version?, request_context?}
 //   200 {valid: true, request_context} or 422 {detail: [{loc: ["body", "request_context", field], msg, type}]}
 import { ApiError, BASE_URL, apiErrorFromResponse, apiHeaders } from "@/lib/api";
+import { authorizationValue } from "@/lib/credentials";
 import type { JsonSchema } from "@/lib/tools";
 import { safeLocalStorage } from "@/lib/safeStorage";
 
@@ -175,7 +176,7 @@ export interface SavedRequestContext {
  * The credential itself is never stored.
  */
 export function credentialScope(): string {
-  const token = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN || "";
+  const token = authorizationValue() || "";
   if (!token) return "anon";
   // FNV-1a, two 32-bit lanes; not a security boundary, only a namespace.
   let a = 0x811c9dc5;

@@ -51,6 +51,7 @@ from eap_schemas.architect import (
     offer_tool,
 )
 from eap_schemas.architect_seed import rank_model_ids
+from eap_schemas.capabilities import declared_tool_status
 from eap_schemas.models_policy import ANTHROPIC_FALLBACK
 
 log = logging.getLogger("eap_worker.architect_allowlist")
@@ -65,10 +66,17 @@ GatewayLister = Callable[[str, str | None], list[str]]
 
 
 def registry_tools(registry: Any, allowed: frozenset[str]) -> tuple[AllowlistTool, ...]:
-    """The registry's tools that survive the allowed set and the denylist, sorted by id."""
+    """The registry's tools that survive the allowed set, the denylist and the capability registry, sorted by id.
+
+    The capability registry (eap_schemas.capabilities) is the inventory: a tool it declares as anything but
+    `available` is never offered, so this list is a subset of the registry's available tools. (A tool a test
+    registers that has no declaration passes: in the platform the drift test fails when one exists.)"""
     found: list[AllowlistTool] = []
     for tool_id in sorted(registry.tool_ids()):
         if tool_id not in allowed:
+            continue
+        declared = declared_tool_status(tool_id)
+        if declared is not None and declared != "available":
             continue
         meta = registry.get_metadata(tool_id)
         try:

@@ -5,12 +5,14 @@ import { listTools, type ToolDefinition } from "@/lib/tools";
 import type { McpToolRef } from "@/lib/api";
 import { approvalProblems, approvalsOf, builtinApprovalSuggestion, mcpApprovalRef, mcpApprovalSuggestion, prunedApprovals } from "../agentCapabilities";
 import { McpToolPicker } from "../McpToolPicker";
+import { agentToolProblems } from "../agentTools";
+import { AgentToolsSection, agentToolFieldId } from "./AgentToolsStep";
 import { stepForErrorMessage, stepStatus } from "../specSections";
 import { APPROVAL_TIMEOUT_ID, ApprovalSettings, ApprovalToggle, staleApprovalId, toggledApprovals } from "./ApprovalToggles";
 import type { EditorStepDefinition, MissingField, StepProps } from "./types";
 
 /**
- * Step 3: built-in tools and MCP tools. A selected tool's row carries its "Require approval" toggle
+ * Step 3: built-in tools, MCP tools and agents as tools (`spec.agent_tools`). A selected tool's row carries its "Require approval" toggle
  * (AC.13: `spec.approvals`, edited through `onSpecChange`); the approval timeout follows the lists.
  * Unselecting a tool also drops its approval entry, so a save never names a tool the agent no
  * longer has.
@@ -88,6 +90,8 @@ export function ToolsStep({ draft, spec, onChange, onSpecChange }: StepProps) {
       />
 
       <ApprovalSettings spec={spec} approvals={approvals} onChange={(next) => onSpecChange({ approvals: next })} />
+
+      <AgentToolsSection spec={spec} onSpecChange={onSpecChange} />
     </div>
   );
 }
@@ -98,10 +102,13 @@ export const toolsStep: EditorStepDefinition = {
   Component: ToolsStep,
   status: (spec) => stepStatus("tools", spec)!,
   ownsError: (message) => stepForErrorMessage(message) === "tools",
-  missing: (_draft, spec): MissingField[] =>
-    approvalProblems(spec).map((problem) => ({
+  missing: (_draft, spec): MissingField[] => [
+    ...approvalProblems(spec).map((problem) => ({
       step: "tools",
       fieldId: problem.field === "timeout_hours" ? APPROVAL_TIMEOUT_ID : problem.field.startsWith("stale-") ? staleApprovalId(Number(problem.field.slice(6))) : "approvals-problem",
       message: problem.message,
     })),
+    // The "Agents as tools" section (spec.agent_tools) is part of this step.
+    ...agentToolProblems(spec).map((problem) => ({ step: "tools", fieldId: agentToolFieldId(problem.field), message: problem.message })),
+  ],
 };

@@ -522,20 +522,15 @@ def test_malformed_ref_path_rejected():
         )
 
 
-def test_nested_ref_rejected():
-    with pytest.raises(ValueError, match="inside a literal"):
-        WorkflowSpec(
-            name="Test",
-            input_schema={"type": "object"},
-            steps=(
-                ToolStep(
-                    id="s1",
-                    tool_id="clock.now",
-                    input={"q": {"data": {"$ref": "input.x"}}},
-                ),
-            ),
-            start="s1",
-        )
+def test_nested_ref_is_a_marker_and_read_as_a_ref():
+    """A $ref below the top level is resolved too (see test_workflow_nested_markers.py)."""
+    spec = WorkflowSpec(
+        name="Test",
+        input_schema={"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]},
+        steps=(ToolStep(id="s1", tool_id="clock.now", input={"q": {"data": {"$ref": "input.x"}}}),),
+        start="s1",
+    )
+    assert iter_refs(spec.steps[0]) == ["input.x"]
 
 
 def test_parallel_branch_jumping_past_join_rejected():

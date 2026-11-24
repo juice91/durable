@@ -142,3 +142,45 @@ def test_retention_never_deletes_the_newest_valid_dump(tmp_path: Path):
     assert not older.exists()
     assert not empty.exists()
     assert not partial.exists()
+
+
+def _nights(backup: Path, hours_ago: list[int]) -> list[Path]:
+    import time
+
+    files = []
+    for i, h in enumerate(hours_ago):
+        f = backup / f"eap_app-2026010{i + 1}T031700Z.dump"
+        f.write_bytes(b"PGDMP")
+        t = time.time() - h * 3600
+        os.utime(f, (t, t))
+        files.append(f)
+    return files
+
+
+def _retain(tmp_path: Path, days: str) -> subprocess.CompletedProcess[str]:
+    env = _env(tmp_path, _bins(tmp_path), {"BACKUP_SKIP_MAIN": "1", "BACKUP_RETENTION_DAYS": days})
+    return subprocess.run(
+        ["sh", "-c", '. "$1"; retain', "sh", str(SCRIPT)], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False
+    )
+
+
+def test_one_day_retention_leaves_only_the_latest_of_three_nightly_dumps(tmp_path: Path):
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    # Three nights as the next run sees them: 48 h, 24 h and a few minutes old (the new dump).
+    night1, night2, night3 = _nights(backup, [48, 24, 0])
+    proc = _retain(tmp_path, "1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not night1.exists()
+    assert not night2.exists(), "a 24 h old dump must go with BACKUP_RETENTION_DAYS=1 (find -mtime +1 would keep it)"
+    assert night3.exists()
+
+
+def test_one_day_retention_keeps_the_newest_valid_dump_even_when_old(tmp_path: Path):
+    backup = tmp_path / "backups"
+    backup.mkdir()
+    old1, old2 = _nights(backup, [200, 100])
+    proc = _retain(tmp_path, "1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not old1.exists()
+    assert old2.exists()

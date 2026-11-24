@@ -1,0 +1,184 @@
+# ZITADEL (identity): one replica, datastore = the platform's Postgres (database zitadel, role zitadel).
+# TLS is terminated at Cloudflare (--tlsMode external); the public host is auth.example-org.ai on 443. ZITADEL v4
+# defaults to Login V2 (instance feature loginV2.required = true), which only the separate zitadel-login container
+# serves, and we do not run it. So the built-in (v1) login UI is pinned with ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED
+# below (cmd/defaults.yaml, DefaultInstance.Features.LoginV2.Required, v4.20.5); the zitadel-login container is a
+# later, optional step (deploy/README.md). The setting applies only to an instance created by `setup`. Off by default (replicas: 0); up.sh scales it to 1 only when the deploy Secret carries
+# ZITADEL_MASTERKEY, ZITADEL_DB_PASSWORD, ZITADEL_ADMIN_USERNAME and ZITADEL_ADMIN_PASSWORD.
+#
+# Start-up flow, every pod start, all idempotent: `init` (schemas in the pre-created database), `setup` (migrations,
+# and the first instance once), then `start`. The first instance (org Durable, the human admin with a forced
+# password change, the machine user platform-automation) is created by `setup` only on a database that has no
+# instance yet; the machine key is written once to the zitadel-bootstrap volume, never to a log.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zitadel-config
+data:
+  ZITADEL_DATABASE_POSTGRES_HOST: postgres.pydanticos.svc.cluster.local
+  ZITADEL_DATABASE_POSTGRES_PORT: "5432"
+  ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+  ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+  ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+  ZITADEL_EXTERNALDOMAIN: auth.example-org.ai
+  ZITADEL_EXTERNALPORT: "443"
+  ZITADEL_EXTERNALSECURE: "true"
+  ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
+  ZITADEL_FIRSTINSTANCE_INSTANCENAME: Durable
+  ZITADEL_FIRSTINSTANCE_ORG_NAME: Durable
+  ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "true"
+  ZITADEL_FIRSTINSTANCE_ORG_HUMAN_EMAIL_VERIFIED: "true"
+  ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: platform-automation
+  ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: Platform automation
+  ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINEKEY_TYPE: "1"
+  ZITADEL_FIRSTINSTANCE_MACHINEKEYPATH: /bootstrap/machine-key.json
+  ZITADEL_LOG_LEVEL: info
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zitadel-bootstrap
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests: {storage: 16Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zitadel
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: zitadel
+  ports:
+    - {name: http, port: 8080, targetPort: http, appProtocol: kubernetes.io/h2c}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zitadel
+spec:
+  replicas: 0
+  # One replica and a ReadWriteOnce volume: stop the old pod before starting the new one.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: zitadel}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: zitadel}
+      # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
+      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_ZITADEL@@"}
+    spec:
+      # Service-link env vars (ZITADEL_PORT=tcp://ip:PORT) would be read by the app as configuration and crash it.
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        # The database and role exist already (up.sh creates them); init creates ZITADEL's schemas in it. The role
+        # is also the "admin" connection, so ZITADEL never holds the Postgres superuser password.
+        - name: init
+          # Pinned by version and digest (multi-arch index, includes linux/arm64). Bump both together.
+          image: ghcr.io/zitadel/zitadel:v4.20.5@sha256:cb21fe73badfe44972bb24a66cf0ebce6a8dc63ab8ed24567af6b731bd8bbf45
+          imagePullPolicy: IfNotPresent
+          args: ["init"]
+          envFrom:
+            - configMapRef: {name: zitadel-config}
+          env:
+            - name: ZITADEL_DATABASE_POSTGRES_USER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_DB_PASSWORD, optional: true}
+            - name: ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME
+              value: zitadel
+            - name: ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_DB_PASSWORD, optional: true}
+            - name: ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE
+              value: disable
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          resources:
+            requests: {cpu: "50m", memory: 64Mi}
+            limits: {cpu: "500m", memory: 256Mi}
+        - name: setup
+          image: ghcr.io/zitadel/zitadel:v4.20.5@sha256:cb21fe73badfe44972bb24a66cf0ebce6a8dc63ab8ed24567af6b731bd8bbf45
+          imagePullPolicy: IfNotPresent
+          args: ["setup", "--masterkeyFromEnv", "--tlsMode", "external"]
+          envFrom:
+            - configMapRef: {name: zitadel-config}
+          env:
+            - name: ZITADEL_MASTERKEY
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_MASTERKEY, optional: true}
+            - name: ZITADEL_DATABASE_POSTGRES_USER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_DB_PASSWORD, optional: true}
+            - name: ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_ADMIN_USERNAME, optional: true}
+            - name: ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_ADMIN_PASSWORD, optional: true}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          resources:
+            requests: {cpu: "100m", memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          volumeMounts:
+            - {name: bootstrap, mountPath: /bootstrap}
+      containers:
+        - name: zitadel
+          image: ghcr.io/zitadel/zitadel:v4.20.5@sha256:cb21fe73badfe44972bb24a66cf0ebce6a8dc63ab8ed24567af6b731bd8bbf45
+          imagePullPolicy: IfNotPresent
+          args: ["start", "--masterkeyFromEnv", "--tlsMode", "external"]
+          envFrom:
+            - configMapRef: {name: zitadel-config}
+          env:
+            - name: ZITADEL_MASTERKEY
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_MASTERKEY, optional: true}
+            - name: ZITADEL_DATABASE_POSTGRES_USER_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: zitadel-secrets, key: ZITADEL_DB_PASSWORD, optional: true}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+            readOnlyRootFilesystem: true
+          ports:
+            - {name: http, containerPort: 8080}
+          resources:
+            requests: {cpu: "200m", memory: 384Mi}
+            limits: {cpu: "2", memory: 1536Mi}
+          readinessProbe:
+            httpGet: {path: /debug/ready, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /debug/healthz, port: http}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: bootstrap
+          persistentVolumeClaim: {claimName: zitadel-bootstrap}

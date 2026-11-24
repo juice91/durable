@@ -362,8 +362,8 @@ def new_knowledge_base_chunking(**overrides: Any) -> ChunkingConfig:
 
 # Extractor ids, as recorded in `metadata.eap.extractor` and the `extracted` event. Their current
 # versions are `eap_knowledge.EXTRACTOR_VERSIONS`.
-ExtractorId = Literal["rst", "pdf", "yaml", "json", "markdown-doxygen"]
-EXTRACTOR_IDS: tuple[str, ...] = ("rst", "pdf", "yaml", "json", "markdown-doxygen")
+ExtractorId = Literal["rst", "pdf", "yaml", "json", "markdown-doxygen", "code"]
+EXTRACTOR_IDS: tuple[str, ...] = ("rst", "pdf", "yaml", "json", "markdown-doxygen", "code")
 MAX_CONDITION_CHARS = 200
 MAX_IMAGE_ONLY_PAGES_LISTED = 200
 
@@ -379,6 +379,13 @@ class ChunkExtractMetadata(OmitNoneModel):
     page: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
     condition: str | None = Field(default=None, max_length=MAX_CONDITION_CHARS)
+    # Source code (extractor `code`): where the chunk sits in its file.
+    language: str | None = Field(default=None, max_length=32)
+    path: str | None = Field(default=None, max_length=1024)
+    symbol: str | None = Field(default=None, max_length=256)
+    start_line: int | None = Field(default=None, ge=1)
+    end_line: int | None = Field(default=None, ge=1)
+    kind: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _pages(self) -> "ChunkExtractMetadata":

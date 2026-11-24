@@ -20,6 +20,9 @@ spec:
   template:
     metadata:
       labels: {app.kubernetes.io/name: worker}
+      # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
+      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_PLATFORM@@"}
     spec:
       serviceAccountName: pydanticos-mcp-worker
       hostAliases:
@@ -66,7 +69,7 @@ spec:
                 secretKeyRef: {name: pydanticos-secrets, key: EAP_LITELLM_EMBEDDING_API_KEY}
             - name: ANTHROPIC_API_KEY
               valueFrom:
-                secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY}
+                secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY, optional: true}
             # Cloudflare Workers AI (optional): the provider stays off while the key is absent from the Secret.
             - name: CLOUDFLARE_API_TOKEN
               valueFrom:

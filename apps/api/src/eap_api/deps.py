@@ -15,9 +15,11 @@ from collections.abc import Callable, Generator
 from typing import Annotated, Any, TypeVar
 
 from eap_blob_store import BlobStore
+from eap_iam import IamRuntime, load_iam
 from eap_run_store import (
     AgUiStore,
     ApiKeyStore,
+    AuditStore,
     ApprovalStore,
     EventLog,
     MetricsStore,
@@ -73,9 +75,20 @@ def _lazy(app: Any, name: str, factory: Callable[[], T]) -> T:
     return value
 
 
+def audit_store_of(app: Any) -> AuditStore:
+    """The AuditStore on the app's database engine, made once per app."""
+    return _lazy(app, "audit_store", lambda: AuditStore(database_engine_of(app)))
+
+
 def api_key_store_of(app: Any) -> ApiKeyStore:
     """The ApiKeyStore on the app's database engine, made once per app."""
     return _lazy(app, "api_key_store", lambda: ApiKeyStore(database_engine_of(app)))
+
+
+def iam_of(app: Any) -> IamRuntime:
+    """The IAM runtime (identity chain, policy engine, membership source): built by `create_app`, or on first use for an
+    app assembled without it (a test's bare FastAPI app), from the same configuration."""
+    return _lazy(app, "iam", lambda: load_iam(getattr(app.state, "database_engine", None)))
 
 
 def mcp_limiter_of(app: Any) -> StreamLimiter:
@@ -275,12 +288,26 @@ def get_ag_ui_store(request: Request) -> AgUiStore:
 AgUiStoreDep = Annotated[AgUiStore, Depends(get_ag_ui_store)]
 
 
+def get_iam(request: Request) -> IamRuntime:
+    return iam_of(request.app)
+
+
+IamDep = Annotated[IamRuntime, Depends(get_iam)]
+
+
 def get_api_key_store(request: Request) -> ApiKeyStore:
     """The ApiKeyStore on the app's database engine, made once per app."""
     return api_key_store_of(request.app)
 
 
 ApiKeyStoreDep = Annotated[ApiKeyStore, Depends(get_api_key_store)]
+
+
+def get_audit_store(request: Request) -> AuditStore:
+    return audit_store_of(request.app)
+
+
+AuditStoreDep = Annotated[AuditStore, Depends(get_audit_store)]
 
 
 # --- blobs and limiters -----------------------------------------------------------------------------

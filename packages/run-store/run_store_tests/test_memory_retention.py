@@ -527,7 +527,7 @@ FORGET_COVERAGE = {
     "memory_forget_watermarks": "conversation_id = ANY(CAST(:convs AS text[]))",
 }
 # Kept by design as the audit and cost record, with their text removed (checked separately).
-AUDIT_KEPT = {"runs"}
+AUDIT_KEPT = {"runs", "audit_log"}  # audit_log: the platform audit trail (IAM P0b): ids and outcomes, no text; it names a resource_id of any kind
 
 _MEMORY_TABLES_SQL = """
 SELECT t.table_name FROM information_schema.tables t

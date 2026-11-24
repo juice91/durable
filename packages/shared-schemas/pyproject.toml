@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-schemas"
-version = "0.1.0"
+version = "0.3.0"
 description = "Shared Pydantic schemas for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -13,4 +13,6 @@ dependencies = [
     "pydantic>=2",
     # Client tool schemas (eap_schemas.client_tools): Draft 2020-12 meta-schema check.
     "jsonschema>=4.20",
+    # The system manifest (eap_schemas.system_manifest) is a YAML file.
+    "pyyaml>=6",
 ]

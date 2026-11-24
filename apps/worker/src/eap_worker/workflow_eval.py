@@ -65,7 +65,6 @@ from eap_schemas.workflows import (
     LoopStep,
     NotCondition,
     TEMPLATE_KEY,
-    is_template,
     parse_placeholders,
 )
 
@@ -225,23 +224,31 @@ def mask_recorded_input(resolved: dict[str, Any]) -> dict[str, Any]:
     return {**resolved, "headers": {k: REDACTED if sensitive_header(str(k)) else v for k, v in headers.items()}}
 
 
+def resolve_value(value: Any, context: dict[str, Any]) -> Any:
+    """One input value with every marker at ANY depth replaced: an object with exactly one key, `$ref` (the
+    value it points at, any JSON type) or `$template` (see `render_template`). Objects and lists around a
+    marker are rebuilt; any other object (one that has `$ref`/`$template` next to other keys is refused at
+    publish) is data. RefMissing when a `$ref` does not resolve."""
+    if isinstance(value, dict):
+        if len(value) == 1:
+            if TEMPLATE_KEY in value:
+                return render_template(value[TEMPLATE_KEY], context)
+            path = _ref_path(value)
+            if path is not None:
+                found = resolve_ref(context, path)
+                if found is MISSING:
+                    raise RefMissing(path)
+                return found
+        return {k: resolve_value(v, context) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve_value(v, context) for v in value]
+    return value
+
+
 def resolve_template(template: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """A step's input mapping with every `$ref` and `$template` value replaced; RefMissing if one does not
-    resolve."""
-    resolved: dict[str, Any] = {}
-    for key, value in template.items():
-        if is_template(value):
-            resolved[key] = render_template(value[TEMPLATE_KEY], context)
-            continue
-        path = _ref_path(value)
-        if path is None:
-            resolved[key] = value
-            continue
-        found = resolve_ref(context, path)
-        if found is MISSING:
-            raise RefMissing(path)
-        resolved[key] = found
-    return resolved
+    """A step's input mapping with every `$ref` and `$template` marker replaced, at any depth; RefMissing if
+    one does not resolve."""
+    return {key: resolve_value(value, context) for key, value in template.items()}
 
 
 def _operand(value: Any, context: dict[str, Any]) -> Any:

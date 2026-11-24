@@ -1,0 +1,478 @@
+# OpenFGA model tests (`fga model test --tests durable.fga.yaml`). Section 2.2 matrix, per-resource grants (2.3),
+# `usable_by`, run inheritance and tenant isolation. Roles are stored tuples here; on a live platform they arrive as
+# contextual tuples (docs/iam.md), which the integration test exercises against a real OpenFGA.
+name: durable authorization model
+model_file: ./durable.fga
+tuples:
+  - {user: user:vera, relation: viewer, object: tenant:acme}
+  - {user: user:eddie, relation: editor, object: tenant:acme}
+  - {user: user:alice, relation: admin, object: tenant:acme}
+  - {user: user:owen, relation: editor, object: tenant:acme}
+  - {user: user:rita, relation: viewer, object: tenant:acme}
+  - {user: user:abel, relation: editor, object: tenant:acme}
+  - {user: user:zed, relation: admin, object: tenant:other}
+  - {user: tenant:acme, relation: tenant, object: agent:acme/r1}
+  - {user: tenant:acme, relation: tenant, object: agent:acme/r2}
+  - {user: tenant:acme, relation: tenant, object: workflow:acme/r1}
+  - {user: tenant:acme, relation: tenant, object: workflow:acme/r2}
+  - {user: tenant:acme, relation: tenant, object: knowledge_base:acme/r1}
+  - {user: tenant:acme, relation: tenant, object: secret:acme/r1}
+  - {user: tenant:acme, relation: tenant, object: schedule:acme/r1}
+  - {user: tenant:acme, relation: tenant, object: mcp_server:acme/r1}
+  - {user: tenant:acme, relation: tenant, object: api_key:acme/r1}
+  - {user: tenant:other, relation: tenant, object: agent:other/r9}
+  - {user: tenant:other, relation: tenant, object: secret:other/r1}
+  - {user: user:owen, relation: owner, object: agent:acme/r2}
+  - {user: user:owen, relation: owner, object: secret:acme/r2}
+  - {user: tenant:acme, relation: tenant, object: secret:acme/r2}
+  - {user: user:rita, relation: runner, object: workflow:acme/r1}
+  - {user: user:abel, relation: approver, object: workflow:acme/r1}
+  - {user: tenant:acme#editor, relation: usable_by, object: secret:acme/r1}
+  - {user: workflow:acme/r1, relation: parent, object: run:acme/run1}
+  - {user: agent:acme/r1, relation: parent, object: run:acme/run2}
+  - {user: user:ann, relation: owner, object: workflow:acme/r1}
+  - {user: user:ann, relation: editor, object: tenant:acme}
+tests:
+  - name: "matrix agent: roles"
+    check:
+      - user: user:vera
+        object: agent:acme/r1
+        assertions:
+          can_read: true
+          can_run: false
+          can_edit: false
+          can_publish: false
+          can_approve: false
+          can_archive: false
+          can_manage_access: false
+          can_grant_use: false
+      - user: user:eddie
+        object: agent:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_publish: true
+          can_approve: false
+          can_archive: false
+          can_manage_access: false
+          can_grant_use: true
+      - user: user:alice
+        object: agent:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_publish: true
+          can_approve: true
+          can_archive: true
+          can_manage_access: true
+          can_grant_use: true
+  - name: "matrix workflow: roles"
+    check:
+      - user: user:vera
+        object: workflow:acme/r1
+        assertions:
+          can_read: true
+          can_run: false
+          can_edit: false
+          can_publish: false
+          can_approve: false
+          can_archive: false
+          can_manage_access: false
+          can_grant_use: false
+      - user: user:eddie
+        object: workflow:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_publish: true
+          can_approve: false
+          can_archive: false
+          can_manage_access: false
+          can_grant_use: true
+      - user: user:alice
+        object: workflow:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_publish: true
+          can_approve: true
+          can_archive: true
+          can_manage_access: true
+          can_grant_use: true
+  - name: "matrix: an editor archives and manages access only on resources they own"
+    check:
+      - user: user:owen
+        object: agent:acme/r2
+        assertions:
+          can_archive: true
+          can_manage_access: true
+          can_edit: true
+      - user: user:owen
+        object: agent:acme/r1
+        assertions:
+          can_archive: false
+          can_manage_access: false
+          can_edit: true
+      - user: user:eddie
+        object: agent:acme/r2
+        assertions:
+          can_archive: false
+          can_manage_access: false
+          can_edit: true
+      - user: user:alice
+        object: agent:acme/r2
+        assertions:
+          can_archive: true
+          can_manage_access: true
+  - name: "matrix: knowledge bases, schedules, MCP servers"
+    check:
+      - user: user:vera
+        object: knowledge_base:acme/r1
+        assertions:
+          can_read: true
+          can_run: false
+          can_edit: false
+          can_grant_use: false
+      - user: user:eddie
+        object: knowledge_base:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_grant_use: true
+          can_archive: false
+      - user: user:alice
+        object: knowledge_base:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_grant_use: true
+          can_archive: true
+          can_manage_access: true
+      - user: user:vera
+        object: schedule:acme/r1
+        assertions:
+          can_read: true
+          can_run: false
+          can_edit: false
+      - user: user:eddie
+        object: schedule:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: true
+          can_archive: false
+      - user: user:alice
+        object: schedule:acme/r1
+        assertions:
+          can_archive: true
+          can_manage_access: true
+      - user: user:vera
+        object: mcp_server:acme/r1
+        assertions:
+          can_read: true
+          can_edit: false
+          can_archive: false
+          can_grant_use: false
+      - user: user:eddie
+        object: mcp_server:acme/r1
+        assertions:
+          can_read: true
+          can_edit: false
+          can_archive: false
+          can_grant_use: true
+      - user: user:alice
+        object: mcp_server:acme/r1
+        assertions:
+          can_read: true
+          can_edit: true
+          can_archive: true
+          can_grant_use: true
+          can_manage_access: true
+  - name: "matrix: secrets (metadata for everyone, writes for admins, use only where marked)"
+    check:
+      - user: user:vera
+        object: secret:acme/r1
+        assertions:
+          can_read: true
+          can_edit: false
+          can_archive: false
+          can_grant_use: false
+      - user: user:eddie
+        object: secret:acme/r1
+        assertions:
+          can_read: true
+          can_edit: false
+          can_archive: false
+          can_grant_use: true
+      - user: user:eddie
+        object: secret:acme/r2
+        assertions:
+          can_read: true
+          can_edit: false
+          can_grant_use: false
+      - user: user:alice
+        object: secret:acme/r1
+        assertions:
+          can_read: true
+          can_edit: true
+          can_archive: true
+          can_grant_use: true
+          can_manage_access: true
+      - user: user:alice
+        object: secret:acme/r2
+        assertions:
+          can_grant_use: true
+      - user: user:owen
+        object: secret:acme/r2
+        assertions:
+          can_edit: true
+          can_archive: true
+          can_grant_use: true
+  - name: "matrix: API keys (admin only)"
+    check:
+      - user: user:vera
+        object: api_key:acme/r1
+        assertions:
+          can_read: false
+          can_revoke: false
+          can_manage_access: false
+      - user: user:eddie
+        object: api_key:acme/r1
+        assertions:
+          can_read: false
+          can_revoke: false
+      - user: user:alice
+        object: api_key:acme/r1
+        assertions:
+          can_read: true
+          can_revoke: true
+          can_manage_access: true
+  - name: "matrix: the tenant itself"
+    check:
+      - user: user:vera
+        object: tenant:acme
+        assertions:
+          can_read: true
+          can_create_agent: false
+          can_create_workflow: false
+          can_create_knowledge_base: false
+          can_create_schedule: false
+          can_create_secret: false
+          can_create_mcp_server: false
+          can_create_api_key: false
+          can_manage_members: false
+          can_read_audit: false
+          can_manage_settings: false
+      - user: user:eddie
+        object: tenant:acme
+        assertions:
+          can_read: true
+          can_create_agent: true
+          can_create_workflow: true
+          can_create_knowledge_base: true
+          can_create_schedule: true
+          can_create_secret: false
+          can_create_mcp_server: false
+          can_create_api_key: false
+          can_manage_members: false
+          can_read_audit: false
+      - user: user:alice
+        object: tenant:acme
+        assertions:
+          can_read: true
+          can_create_agent: true
+          can_create_secret: true
+          can_create_mcp_server: true
+          can_create_api_key: true
+          can_manage_members: true
+          can_read_audit: true
+          can_manage_settings: true
+  - name: "grant: a runner grant on one workflow lets a viewer run exactly that workflow"
+    check:
+      - user: user:rita
+        object: workflow:acme/r1
+        assertions:
+          can_read: true
+          can_run: true
+          can_edit: false
+          can_publish: false
+          can_approve: false
+          can_archive: false
+      - user: user:rita
+        object: workflow:acme/r2
+        assertions:
+          can_read: true
+          can_run: false
+      - user: user:rita
+        object: agent:acme/r1
+        assertions:
+          can_run: false
+  - name: "grant: an approver grant lets an editor decide approvals of one workflow only"
+    check:
+      - user: user:abel
+        object: workflow:acme/r1
+        assertions:
+          can_approve: true
+          can_read: true
+          can_edit: true
+      - user: user:abel
+        object: workflow:acme/r2
+        assertions:
+          can_approve: false
+      - user: user:abel
+        object: agent:acme/r1
+        assertions:
+          can_approve: false
+      - user: user:eddie
+        object: workflow:acme/r1
+        assertions:
+          can_approve: false
+  - name: "grant: an owner without a tenant role keeps full rights on that resource"
+    check:
+      - user: user:ann
+        object: workflow:acme/r1
+        assertions:
+          can_edit: true
+          can_run: true
+          can_manage_access: true
+          can_archive: true
+  - name: "run: a run inherits read, approve and cancel from its parent"
+    check:
+      - user: user:abel
+        object: run:acme/run1
+        assertions:
+          can_read: true
+          can_approve: true
+          can_cancel: true
+      - user: user:rita
+        object: run:acme/run1
+        assertions:
+          can_read: true
+          can_approve: false
+          can_cancel: true
+      - user: user:vera
+        object: run:acme/run1
+        assertions:
+          can_read: true
+          can_approve: false
+          can_cancel: false
+      - user: user:eddie
+        object: run:acme/run1
+        assertions:
+          can_approve: false
+          can_cancel: true
+      - user: user:alice
+        object: run:acme/run1
+        assertions:
+          can_approve: true
+      - user: user:abel
+        object: run:acme/run2
+        assertions:
+          can_approve: false
+      - user: user:alice
+        object: run:acme/run2
+        assertions:
+          can_approve: true
+          can_cancel: true
+  - name: "tenant isolation: an admin of another tenant reaches nothing here, and nobody here reaches theirs"
+    check:
+      - user: user:zed
+        object: agent:acme/r1
+        assertions:
+          can_read: false
+          can_run: false
+          can_approve: false
+          can_manage_access: false
+      - user: user:zed
+        object: secret:acme/r1
+        assertions:
+          can_read: false
+          can_grant_use: false
+      - user: user:zed
+        object: tenant:acme
+        assertions:
+          can_read: false
+          can_manage_members: false
+      - user: user:alice
+        object: agent:other/r9
+        assertions:
+          can_read: false
+          can_run: false
+          can_manage_access: false
+      - user: user:zed
+        object: agent:other/r9
+        assertions:
+          can_read: true
+          can_approve: true
+  - name: "a resource without its tenant link is invisible (tuple drift fails closed)"
+    check:
+      - user: user:alice
+        object: agent:acme/orphan
+        assertions:
+          can_read: false
+          can_run: false
+          can_manage_access: false
+      - user: user:owen
+        object: workflow:acme/orphan
+        assertions:
+          can_read: false
+
+  - name: "list objects: what each role may see and do"
+    list_objects:
+      - user: user:vera
+        type: agent
+        assertions:
+          can_read:
+            - agent:acme/r1
+            - agent:acme/r2
+          can_run: []
+      - user: user:rita
+        type: workflow
+        assertions:
+          can_run:
+            - workflow:acme/r1
+          can_read:
+            - workflow:acme/r1
+            - workflow:acme/r2
+      - user: user:eddie
+        type: agent
+        assertions:
+          can_run:
+            - agent:acme/r1
+            - agent:acme/r2
+          can_archive: []
+      - user: user:owen
+        type: agent
+        assertions:
+          can_archive:
+            - agent:acme/r2
+      - user: user:abel
+        type: workflow
+        assertions:
+          can_approve:
+            - workflow:acme/r1
+      - user: user:alice
+        type: agent
+        assertions:
+          can_approve:
+            - agent:acme/r1
+            - agent:acme/r2
+      - user: user:eddie
+        type: secret
+        assertions:
+          can_grant_use:
+            - secret:acme/r1
+          can_read:
+            - secret:acme/r1
+            - secret:acme/r2
+      - user: user:zed
+        type: agent
+        assertions:
+          can_read:
+            - agent:other/r9

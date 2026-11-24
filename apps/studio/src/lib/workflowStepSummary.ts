@@ -91,6 +91,12 @@ function toolDetail(toolId: string, input: Record<string, unknown>): string {
       return input.expression === undefined ? "" : cut(inputValueText(input.expression), MAX_EXPRESSION);
     case "workflow.return":
       return returnDetail(input);
+    case "workflow.history": {
+      const where = keys(input.where);
+      return [input.select !== undefined ? `select ${inputValueText(input.select)}` : "", where.length > 0 ? `where ${where.join(", ")}` : ""]
+        .filter(Boolean)
+        .join(" · ");
+    }
     case "text.check": {
       const rules = keys(input.rules);
       return rules.length > 0 ? rules.join(", ") : "";

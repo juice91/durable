@@ -87,14 +87,14 @@ A non-2xx answer is a result, not an error, so `login_gate` decides:
       "next": "post"
     }
   ],
-  "default": "login_failed"
+  "default": "ret_login_failed"
 }
 ```
 
 <!-- example: bluesky-post.json /spec/steps/3 -->
 ```json
 {
-  "id": "login_failed",
+  "id": "ret_login_failed",
   "type": "tool",
   "tool_id": "workflow.return",
   "input": {
@@ -110,7 +110,7 @@ A non-2xx answer is a result, not an error, so `login_gate` decides:
 }
 ```
 
-A refused login (a wrong handle or password answers 401) goes to `login_failed`, which ends the run with the
+A refused login (a wrong handle or password answers 401) goes to `ret_login_failed`, which ends the run with the
 stable code `bluesky_auth_failed`. `workflow.return` returns its input unchanged; a tool that returns
 `{"error": {"code", "message"}}` fails the tool step, and so the run, with that code (the same convention as
 `kb-source-sync`). Network failures end the run with the tool's own codes: `http_timeout`,
@@ -174,17 +174,17 @@ strings, numbers and booleans. Keys are never templated.
         },
         "right": true
       },
-      "next": "result"
+      "next": "ret_result"
     }
   ],
-  "default": "post_failed"
+  "default": "ret_post_failed"
 }
 ```
 
 <!-- example: bluesky-post.json /spec/steps/6 -->
 ```json
 {
-  "id": "post_failed",
+  "id": "ret_post_failed",
   "type": "tool",
   "tool_id": "workflow.return",
   "input": {
@@ -203,7 +203,7 @@ strings, numbers and booleans. Keys are never templated.
 <!-- example: bluesky-post.json /spec/steps/7 -->
 ```json
 {
-  "id": "result",
+  "id": "ret_result",
   "type": "tool",
   "tool_id": "workflow.return",
   "input": {
@@ -219,7 +219,7 @@ strings, numbers and booleans. Keys are never templated.
 ```
 
 A refused post (for example an expired session or an invalid record) ends the run with `bluesky_post_failed`;
-otherwise `result` shapes the output.
+otherwise `ret_result` shapes the output.
 
 ## Things to know
 

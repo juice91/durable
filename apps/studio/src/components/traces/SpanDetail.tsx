@@ -136,7 +136,8 @@ function Links({ span }: { span: TraceSpan }) {
     links.push({ runId, tab: "events", label: "Run details", testId: "span-link-run" });
   }
   const childRun = str(a.child_run_id);
-  if (span.kind === "workflow_step" && childRun) {
+  // A workflow agent step's child run, or an agent-tool call's (a `tool_call` span with `agent_tool`).
+  if ((span.kind === "workflow_step" || (span.kind === "tool_call" && a.agent_tool === true)) && childRun) {
     links.push({ runId: childRun, label: "Open child run trace", testId: "span-link-child-trace" });
   }
   const traceId = str(a.trace_id);
