@@ -586,7 +586,7 @@ def test_kb_source_routes_are_in_the_inventory_and_closed_to_another_tenant(api,
         for name in ("conn-id", "conn-secret"):
             assert client.put(f"{API}/secrets/{name}", json={"value": "fake-not-real"}, headers=h).status_code == 200
         conn = client.post(f"{API}/settings/connections", headers=h, json={
-            "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://x.example.com",
+            "name": "vendor", "kind": "oauth2_client_credentials", "base_url": "https://x.example.com",
             "config": {"provider": "fake"}, "credential_refs": {"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}},
         ).json()
         kb = client.post(f"{API}/knowledge-bases", json={"name": "d", "embedding_model": "test:hash"}, headers=h).json()["id"]

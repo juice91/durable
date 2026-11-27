@@ -23,7 +23,7 @@ from eap_run_store.kb_sources import (
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
 REFS = {"client_id": "secret:conn-client-id", "client_secret": "secret:conn-client-secret"}
-URL = "https://www.ti.com/lit/ds/symlink/lm317.pdf"
+URL = "https://www.vendor.example/lit/ds/symlink/lm317.pdf"
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def kb(engine, tenants):
             conn.execute(text("DELETE FROM settings_connections WHERE tenant_id = :t"), {"t": t})
 
 
-def _conn(engine, tenant, name="ti"):
+def _conn(engine, tenant, name="vendor"):
     return ConnectionStore(engine).create(
         tenant, name=name, kind="oauth2_client_credentials", base_url="https://api.vendor.example",
         config={"quota": 1}, credential_refs=REFS,
@@ -67,7 +67,7 @@ def test_connection_crud_isolation_and_check(engine, tenants, kb):
     c = _conn(engine, a)
     assert c.credential_refs == REFS and c.enabled and c.last_status is None and c.last_checked_at is None
     assert c.base_url == "https://api.vendor.example" and c.kind == "oauth2_client_credentials"
-    assert store.get(a, c.id).name == "ti" and store.get(b, c.id) is None
+    assert store.get(a, c.id).name == "vendor" and store.get(b, c.id) is None
     assert [x.id for x in store.list(a)] == [c.id] and store.list(b) == []
     with pytest.raises(ConnectionNameConflict):
         _conn(engine, a)

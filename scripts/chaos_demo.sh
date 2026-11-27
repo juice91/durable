@@ -20,7 +20,7 @@
 #                            database: eap_app (application tables) or eap_dbos (DBOS tables, schema dbos)
 #   EXAMPLE_FILE             workflow example to publish when none exists (default examples/workflows/kb-source-sync.json)
 #
-# A targeted run spends about 3 provider (TI product) calls per part against the daily budget.
+# A targeted run spends about 3 provider calls per product part against the daily budget.
 # Exit status: 0 only when the parent and the child sync completed, a crash was injected while the child was running, no
 # segment completed twice and the duplicate check holds.
 # Do not kill the worker during the posting schedules (slots 08, 11, 14, 17, 20 and 23 Taipei time).

@@ -167,10 +167,10 @@ def test_kb_connection_and_source_tools(world, monkeypatch):
 
     # A credential value is refused and never echoed; a reference is accepted and shown as a reference.
     value = world.call(key, "settings.connection.create", {
-        "name": "ti", "config": {"provider": "fake"}, "kind": "api_token", "credential_refs": {"token": "sentinel-VALUE-0001"}})
+        "name": "vendor", "config": {"provider": "fake"}, "kind": "api_token", "credential_refs": {"token": "sentinel-VALUE-0001"}})
     assert value.is_error and value.error["code"] == "secret_ref_required" and "sentinel" not in str(value.data)
     conn = world.call(key, "settings.connection.create", {
-        "name": "ti", "config": {"provider": "fake"}, "kind": "api_token", "base_url": "https://example.com",
+        "name": "vendor", "config": {"provider": "fake"}, "kind": "api_token", "base_url": "https://example.com",
         "credential_refs": {"token": "secret:ti-token"}})
     assert not conn.is_error, conn.data
     assert conn.data["credential_refs"] == {"token": "secret:ti-token"}

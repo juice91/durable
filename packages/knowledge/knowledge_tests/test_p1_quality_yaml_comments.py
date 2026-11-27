@@ -1,6 +1,6 @@
 """RAG P1 quality fix 1: the YAML extractor keeps comments (extractor version 2).
 
-The live TI check lost zephyr #2 (2 -> 0): ti,ads1x1x-base.yaml keeps its only description in its
+The live Acme check lost zephyr #2 (2 -> 0): ti,ads1x1x-base.yaml keeps its only description in its
 header comment, and v1 dropped every comment. The leading comment block is now the document-level
 preamble (the level-0 section's body) and every other comment rides with its key's section.
 """

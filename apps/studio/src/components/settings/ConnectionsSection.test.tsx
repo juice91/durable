@@ -253,14 +253,14 @@ describe("ConnectionsSection", () => {
 
   it("names the sources when the delete is refused as in use", async () => {
     mocks.deleteConnection.mockRejectedValue(new KbSourceError(409, "connection_in_use", "A source still uses this connection."));
-    mocks.sourcesUsingConnection.mockResolvedValue([{ id: "s1", name: "TI parts", knowledgeBaseId: "kb1", knowledgeBaseName: "Parts" }]);
+    mocks.sourcesUsingConnection.mockResolvedValue([{ id: "s1", name: "Acme parts", knowledgeBaseId: "kb1", knowledgeBaseName: "Parts" }]);
     render(<ConnectionsSection />);
     await screen.findByText("ti-prod");
     fireEvent.click(screen.getByRole("button", { name: "Delete ti-prod" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
     const alert = await within(dialog).findByRole("alert");
-    await waitFor(() => expect(alert).toHaveTextContent("TI parts"));
+    await waitFor(() => expect(alert).toHaveTextContent("Acme parts"));
     expect(alert).toHaveTextContent("Parts");
   });
 

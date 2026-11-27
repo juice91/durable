@@ -1,7 +1,7 @@
 """RAG P1 quality fix 2: a worker-extracted version with no extractable text is an EMPTY document,
 not a failure.
 
-The live TI check marked 89 rst pages `extraction_failed` (toctree-only index pages, include-only
+The live Acme check marked 89 rst pages `extraction_failed` (toctree-only index pages, include-only
 wrappers: `.. include::` is dropped, by decision). They now finish 'ready' with 0 chunks and no
 error; their `extracted` event carries `empty_reason: "no_extractable_text"`. PDFs never do: an
 image-only PDF fails `no_text_layer` (a blank one `no_extractable_text`) and stays re-extractable. The fail-closed rule stays for a document that already has searchable

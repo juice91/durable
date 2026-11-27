@@ -29,32 +29,32 @@ function renderText(raw: unknown[], text: string) {
 
 describe("citations in chat", () => {
   it("a worker source with page 212 and no anchor shows p. 212 and links #page=212", () => {
-    renderText([{ n: 1, numbering: "run", title: "TRM", url: "https://ti.example/trm.pdf", page: 212 }], "Divisor [1].");
+    renderText([{ n: 1, numbering: "run", title: "TRM", url: "https://vendor.example/trm.pdf", page: 212 }], "Divisor [1].");
     const link = screen.getByTestId("citation-link");
-    expect(link).toHaveAttribute("href", "https://ti.example/trm.pdf#page=212");
+    expect(link).toHaveAttribute("href", "https://vendor.example/trm.pdf#page=212");
     expect(screen.getByTestId("citation-page")).toHaveTextContent("p. 212");
   });
 
   it("a range shows pp. 12–14 in the label and the accessible name; the link opens the first page", () => {
-    renderText([{ n: 1, numbering: "run", title: "TRM", url: "https://ti.example/trm.pdf", page: 12, page_end: 14 }], "See [1].");
+    renderText([{ n: 1, numbering: "run", title: "TRM", url: "https://vendor.example/trm.pdf", page: 12, page_end: 14 }], "See [1].");
     expect(screen.getByTestId("citation-page")).toHaveTextContent("pp. 12–14");
     expect(screen.getByTestId("citation-link")).toHaveAccessibleName("Source 1: TRM, pp. 12–14");
-    expect(screen.getByTestId("citation-link")).toHaveAttribute("href", "https://ti.example/trm.pdf#page=12");
+    expect(screen.getByTestId("citation-link")).toHaveAttribute("href", "https://vendor.example/trm.pdf#page=12");
   });
 
   it("when source.page is missing, the anchor is the fallback (and a non-page anchor shows nothing)", () => {
     renderText([
-      { n: 1, numbering: "run", title: "A", url: "https://ti.example/a.pdf#page=7" },
-      { n: 2, numbering: "run", title: "B", url: "https://ti.example/b.html#intro" },
+      { n: 1, numbering: "run", title: "A", url: "https://vendor.example/a.pdf#page=7" },
+      { n: 2, numbering: "run", title: "B", url: "https://vendor.example/b.html#intro" },
     ], "One [1] two [2].");
     expect(screen.getAllByTestId("citation-page").map((e) => e.textContent)).toEqual(["p. 7"]);
-    expect(screen.getAllByTestId("citation-link")[1]).toHaveAttribute("href", "https://ti.example/b.html#intro");
+    expect(screen.getAllByTestId("citation-link")[1]).toHaveAttribute("href", "https://vendor.example/b.html#intro");
   });
 
   it("the page label passes axe", async () => {
     document.title = "Chat";
     document.documentElement.lang = "en";
-    const view = renderText([{ n: 1, numbering: "run", title: "TRM", url: "https://ti.example/trm.pdf", page: 3, page_end: 5 }], "Hi [1].");
+    const view = renderText([{ n: 1, numbering: "run", title: "TRM", url: "https://vendor.example/trm.pdf", page: 3, page_end: 5 }], "Hi [1].");
     await expectNoAxeViolations(view.container);
   }, AXE_TIMEOUT_MS);
 });

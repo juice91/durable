@@ -20,7 +20,7 @@ from eap_kb_sources.errors import (
     SourceError,
 )
 from eap_kb_sources.providers.github.adapter import GithubRepositoryDocsAdapter, git_blob_sha, path_problem
-from eap_kb_sources.providers.github.fixtures import TOKEN, FakeGithub, pdf_bytes, ti_like_repo
+from eap_kb_sources.providers.github.fixtures import TOKEN, FakeGithub, pdf_bytes, sdk_like_repo
 
 from .helpers import CONFIG, REPO, Clock, MemoryStore, Secrets, conn, make_adapter, run_segment, walk_all
 
@@ -28,7 +28,7 @@ DOCS = 30  # md, rst, yaml, pdf under docs/** (the symlink and the oversize file
 
 
 def fresh():
-    repo = ti_like_repo()
+    repo = sdk_like_repo()
     return repo, FakeGithub(repo), MemoryStore(), None
 
 
@@ -88,7 +88,7 @@ def check(server, **kw):
 
 
 def test_check_ok_with_a_token_and_without():
-    server = FakeGithub(ti_like_repo())
+    server = FakeGithub(sdk_like_repo())
     assert check(server).ok
     assert server.requests[-1][3] is True  # the token went out
     assert check(server, connection=conn(token=None)).ok
@@ -96,7 +96,7 @@ def test_check_ok_with_a_token_and_without():
 
 
 def test_check_reports_a_bad_token_and_a_missing_secret_by_code():
-    server = FakeGithub(ti_like_repo())
+    server = FakeGithub(sdk_like_repo())
     bad = check(server, secrets=Secrets({"gh-token": "nope"}))
     assert (bad.ok, bad.error_code) == (False, CONNECTION_AUTH_FAILED)
     missing = check(server, secrets=Secrets({}))

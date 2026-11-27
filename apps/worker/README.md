@@ -25,7 +25,7 @@ model step:
   `EAP_LITELLM_API_KEY` (fallback `LITELLM_API_KEY`). The platform key is scoped to
   `qwen3.8-thinking` (a reasoning model): `{provider: "litellm", name: "qwen3.8-thinking"}`.
   Load the key into your shell, never into a file:
-  `export LITELLM_API_KEY="$(sops -d ~/.config/sops/secrets.json | jq -r .LITELLM_QWEN38_THINKING_API_KEY)"`.
+  `export LITELLM_API_KEY="$(sops -d <your-secrets-file> | jq -r .LITELLM_API_KEY)"`.
 
   The public URL `https://llm-gateway.example.com/v1` sits behind a proxy that cuts any single
   request at ~300 s. For local development use the SSH tunnel `http://127.0.0.1:14001/v1`, which

@@ -343,9 +343,9 @@ def test_an_overlong_line_fails_extract_limit_instead_of_an_empty_document() -> 
     assert extract_rst("x" * rst.LINE_LENGTH_LIMIT + "\n").extracted_chars == rst.LINE_LENGTH_LIMIT
 
 
-# --- rst: a TI-like tree, deterministic ------------------------------------------------------------
+# --- rst: an SDK-like tree, deterministic ------------------------------------------------------------
 
-TI_TREE = {
+SDK_TREE = {
     "linux/Foundational_Components/Kernel/Kernel_Drivers/UART.rst": """
 .. _uart-driver:
 
@@ -420,13 +420,13 @@ From Linux
 
 def _tree_digest(config: object, options: ExtractConfig | None) -> str:
     hashes = []
-    for path, text in sorted(TI_TREE.items()):
-        doc = extract_rst(text, options, title=Path(path).stem, source_url=f"https://ti.example/{path[:-4]}.html")
+    for path, text in sorted(SDK_TREE.items()):
+        doc = extract_rst(text, options, title=Path(path).stem, source_url=f"https://vendor.example/{path[:-4]}.html")
         hashes.append("|".join(c.embed_text_hash for c in chunk(doc, config)))
     return hashlib.sha256("\n".join(hashes).encode()).hexdigest()
 
 
-def test_a_ti_rst_tree_chunks_deterministically_across_runs_and_processes() -> None:
+def test_an_sdk_rst_tree_chunks_deterministically_across_runs_and_processes() -> None:
     options = ExtractConfig(rst_config={"CONFIG_part_variant": "AM62X"})
     first = _tree_digest(V2, options)
     assert _tree_digest(V2, options) == first
@@ -443,15 +443,15 @@ def test_a_ti_rst_tree_chunks_deterministically_across_runs_and_processes() -> N
         assert out.stdout.strip() == first
 
 
-def test_ti_tree_v2_keeps_each_command_with_its_heading_context() -> None:
+def test_sdk_tree_v2_keeps_each_command_with_its_heading_context() -> None:
     path = "linux/How_to_Guides/Target/How_to_flash.rst"
-    doc = extract_rst(TI_TREE[path], title="How_to_flash", source_url="https://ti.example/flash.html")
+    doc = extract_rst(SDK_TREE[path], title="How_to_flash", source_url="https://vendor.example/flash.html")
     chunks = chunk(doc, V2)
     dd = next(c for c in chunks if "dd if=tiboot3.bin" in c.text)
     # "From Linux" is short: v2 puts it under its parent heading, never into an unrelated section.
     assert dd.heading_path == ("How to flash the eMMC",)
     assert "### From Linux" in dd.text or "## From Linux" in dd.text
-    uart = extract_rst(TI_TREE["linux/Foundational_Components/Kernel/Kernel_Drivers/UART.rst"])
+    uart = extract_rst(SDK_TREE["linux/Foundational_Components/Kernel/Kernel_Drivers/UART.rst"])
     assert "Up to seven UART instances" in _all_text(uart)  # no config: both branches kept
     assert "|__PART_FAMILY_NAME__|" in _all_text(uart)  # undefined substitution kept as text
 
@@ -469,7 +469,7 @@ def _prop(name: str) -> str:
 
 DT_BINDING = (
     "%YAML 1.2\n---\n$id: http://devicetree.org/schemas/iio/adc/ti,ads1x1x.yaml#\n"
-    "$schema: http://devicetree.org/meta-schemas/core.yaml#\n\ntitle: TI ADS1x1x ADC\n\n"
+    "$schema: http://devicetree.org/meta-schemas/core.yaml#\n\ntitle: Acme ADS1x1x ADC\n\n"
     "maintainers:\n  - Jane Doe <jane@example.com>\n\ndescription: |\n  Acme Semiconductor ADCs.\n  Two lines.\n\n"
     "properties:\n" + _prop("compatible") + _prop("reg") + _prop("interrupts") + _prop('"#io-channel-cells"')
     + "\nrequired:\n  - compatible\n  - reg\n\nadditionalProperties: false\n"
@@ -478,7 +478,7 @@ DT_BINDING = (
 
 def test_a_dt_binding_gives_one_chunk_per_property() -> None:
     doc = extract_yaml(DT_BINDING, source_url="https://x/ads1x1x.yaml", max_tokens=V2.max_tokens)
-    assert doc.format == "yaml" and doc.title == "TI ADS1x1x ADC"
+    assert doc.format == "yaml" and doc.title == "Acme ADS1x1x ADC"
     chunks = chunk(doc, V2)
     props = [c for c in chunks if c.heading_path[:1] == ("properties",) and len(c.heading_path) == 2]
     assert [c.heading_path for c in props] == [

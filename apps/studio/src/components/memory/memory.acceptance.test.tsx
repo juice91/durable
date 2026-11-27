@@ -874,7 +874,7 @@ describe("in the chat: the card follows a watched turn, never an opened one", ()
 // ----------------------------------------------------------------- the resource id charset
 
 // Mirrors eap_run_store.validate_resource_id (RESOURCE_ID_PATTERN and the dot-only rule). The table
-// is read by the cross-check script in the scratchpad (rm18-resource-ids.py), which runs the Python
+// is read by a one-off cross-check script (not in the repository), which runs the Python
 // validator over every line: keep one JSON entry per line, [id, valid].
 // ID-TABLE-START
 const ID_TABLE: [string, boolean][] = [

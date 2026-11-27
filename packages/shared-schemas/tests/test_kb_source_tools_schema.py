@@ -55,7 +55,7 @@ PUBLIC_LAYERS = (
     "apps/worker/src/eap_worker/platform_tools.py",
     "apps/worker/src/eap_worker/kb_source_tools.py",
 )
-# A hostname such as `https://ti.example/x.pdf` (a test fixture) is not an identifier: it follows `://` or `.`.
+# A hostname such as `https://vendor.example/x.pdf` (a test fixture) is not an identifier: it follows `://` or `.`.
 TI_IDENTIFIER = re.compile(r"(?<![.@])\bti\.[a-z_]+")
 HOST_PREFIX = re.compile(r"://ti\.")
 SUFFIXES = {".py", ".ts", ".tsx", ".json", ".yaml", ".yml", ".md"}

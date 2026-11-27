@@ -1,8 +1,8 @@
-"""RAG P1.A2 acceptance: golden behaviour on real TI excerpts, parity with the external import tool,
+"""RAG P1.A2 acceptance: golden behaviour on real Acme excerpts, parity with the external import tool,
 hostile inputs, the condition evaluator table, chunker v2 rules and the import-linter contract.
 
-The TI excerpts are snapshotted from ~/ti-rag/repos (processor-sdk-doc, mcupsdk-core,
-simplelink-zephyr) so nothing here reads that tree.
+The Acme excerpts are snapshotted from the SDK checkouts (processor-sdk-doc, mcupsdk-core,
+simplelink-zephyr) so nothing here reads those trees.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ try:
 except ImportError:  # imported as a top-level module by the hash-seed subprocess test
     from timing import best_of_3, cap  # type: ignore[no-redef]
 
-URL = "https://ti.example/page.html"
+URL = "https://vendor.example/page.html"
 
 
 def _raised(fn, src):  # noqa: ANN001, ANN202
@@ -72,15 +72,15 @@ The UART Flash tool is part of MCU+SDK installer and can be downloaded from |__S
 
 .. ifconfig:: CONFIG_part_variant in ('AM62X')
 
-    `MCU+SDK Flash Tools Documentation  <https://software-dl.ti.com/mcu-plus-sdk/esd/AM62X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html>`__.
+    `MCU+SDK Flash Tools Documentation  <https://software-dl.vendor.example/mcu-plus-sdk/esd/AM62X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html>`__.
 
 .. ifconfig:: CONFIG_part_variant in ('AM64X')
 
-   `MCU+SDK Flash Tools Documentation  <https://software-dl.ti.com/mcu-plus-sdk/esd/AM64X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html>`__.
+   `MCU+SDK Flash Tools Documentation  <https://software-dl.vendor.example/mcu-plus-sdk/esd/AM64X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html>`__.
 
 .. ifconfig:: CONFIG_part_variant in ('AM62PX')
 
-   `MCU+SDK Flash Tools Documentation  <https://software-dl.ti.com/mcu-plus-sdk/esd/AM62PX/11_01_01_08/exports/docs/api_guide_am62px/TOOLS_FLASH.html>`__.
+   `MCU+SDK Flash Tools Documentation  <https://software-dl.vendor.example/mcu-plus-sdk/esd/AM62PX/11_01_01_08/exports/docs/api_guide_am62px/TOOLS_FLASH.html>`__.
 """
 
 SETUP_RST = """\
@@ -94,7 +94,7 @@ Setup
 Install host dependencies
 *************************
 
-To install host dependencies for building TI U-boot source (standalone)
+To install host dependencies for building Acme U-boot source (standalone)
 on Ubuntu 22.04+, run the following command in the terminal prompt:
 
 .. code-block:: console
@@ -193,7 +193,7 @@ a low-cost, primarily community-supported development platform.
    * - Component
      - Branch
    * - Arago
-     - `Scarthgap <https://git.yoctoproject.org/meta-ti/tree/meta-beagle/README?h=scarthgap>`__
+     - `Scarthgap <https://git.yoctoproject.org/meta-vendor/tree/meta-beagle/README?h=scarthgap>`__
 
 .. toctree::
 
@@ -276,7 +276,7 @@ FLASH_MD = """\
 # Flashing Tools {#TOOLS_FLASH}
 
 \\cond SOC_AM263X || SOC_AM243X
-- \\ref TOOLS_TI_UNIFLASH_TOOL
+- \\ref TOOLS_SDK_UNIFLASH_TOOL
 \\endcond
 - \\ref TOOLS_FLASH_UART_UNIFLASH
 
@@ -305,7 +305,7 @@ SPI_YAML = """\
 # Copyright (c) 2019 Brett Witherspoon
 # SPDX-License-Identifier: Apache-2.0
 
-description: TI SimpleLink CC35xx
+description: Acme SimpleLink CC35xx
 
 compatible: "ti,cc35xx-spi"
 
@@ -317,7 +317,7 @@ properties:
 """
 
 TIMER_YAML = """\
-description: TI SimpleLink CC13xx/CC26xx Timer Node
+description: Acme SimpleLink CC13xx/CC26xx Timer Node
 
 compatible: "ti,cc13xx-cc26xx-timer"
 
@@ -333,7 +333,7 @@ properties:
 
 BOARD_YAML = """\
 identifier: cc1352r_sensortag
-name: TI SimpleLink CC1352R SensorTag
+name: Acme SimpleLink CC1352R SensorTag
 type: mcu
 arch: arm
 ram: 80
@@ -344,20 +344,20 @@ toolchain:
 supported:
   - gpio
   - i2c
-vendor: ti
+vendor: acme
 """
 
-# Output of ~/ti-rag/import/ti_import.py rst_to_markdown for the snapshots above (frozen).
+# Output of the external pre-processing script rst_to_markdown for the snapshots above (frozen).
 ORACLE = {
-    'UART_RST': "# Flash via UART\n\nThis tool uses UART as the transport or interface to send the file to flash to the EVM.\n\nThe UART Flash tool is part of MCU+SDK installer and can be downloaded from {SDK_DOWNLOAD_URL}.\n\n*Applies when: CONFIG_part_variant in ('AM62X')*\n\n[MCU+SDK Flash Tools Documentation](https://software-dl.ti.com/mcu-plus-sdk/esd/AM62X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html).\n\n*Applies when: CONFIG_part_variant in ('AM64X')*\n\n[MCU+SDK Flash Tools Documentation](https://software-dl.ti.com/mcu-plus-sdk/esd/AM64X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html).\n\n*Applies when: CONFIG_part_variant in ('AM62PX')*\n\n[MCU+SDK Flash Tools Documentation](https://software-dl.ti.com/mcu-plus-sdk/esd/AM62PX/11_01_01_08/exports/docs/api_guide_am62px/TOOLS_FLASH.html).\n",
-    'SETUP_RST': "# Setup\n\n## Install host dependencies\n\nTo install host dependencies for building TI U-boot source (standalone) on Ubuntu 22.04+, run the following command in the terminal prompt:\n\n```console\nsudo apt install git xz-utils build-essential autoconf flex bison libssl-dev bc libncurses-dev \\\nswig yamllint libgnutls28-dev\n```\n\n> **Note:** The recommended host machine for building U-Boot is Ubuntu 22.04.\n>\n> ```console\n> pip install dataclasses pyelftools jsonschema yamllint importlib-resources\n> ```\n\n## Getting the Source Code\n\n*Applies when: CONFIG_part_variant in ('AM62LX')*\n\n> **Note:** AM62L devices use TF-A BL-1 boot loader to configure LPDDR4 to enable secondary program loader.\n\nThe easiest way to get access to the source code is by downloading and installing the Processor SDK Linux. Once installed, the source code is in the SDK at the path `<path to tisdk>/board-support`.\n\n## Setup Cross Compile Environment\n\n*[include not available: ../../Overview/GCC_ToolChain.rst]*\n",
-    'BEAGLE_RST': '# BeaglePlay\n\nThe BeaglePlay development board from [BeagleBoard](https://www.beagleboard.org/) uses the {PART_FAMILY_DEVICE_NAMES}. It is a low-cost, primarily community-supported development platform.\n\n**Supported Distributions**\n\n| Component | Branch |\n|---|---|\n| Arago | [Scarthgap](https://git.yoctoproject.org/meta-ti/tree/meta-beagle/README?h=scarthgap) |\n\nFor more information see https://docs.beagle.cc/boards/beagleplay/index.html.\n',
+    'UART_RST': "# Flash via UART\n\nThis tool uses UART as the transport or interface to send the file to flash to the EVM.\n\nThe UART Flash tool is part of MCU+SDK installer and can be downloaded from {SDK_DOWNLOAD_URL}.\n\n*Applies when: CONFIG_part_variant in ('AM62X')*\n\n[MCU+SDK Flash Tools Documentation](https://software-dl.vendor.example/mcu-plus-sdk/esd/AM62X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html).\n\n*Applies when: CONFIG_part_variant in ('AM64X')*\n\n[MCU+SDK Flash Tools Documentation](https://software-dl.vendor.example/mcu-plus-sdk/esd/AM64X/latest/exports/docs/api_guide_am62x/TOOLS_FLASH.html).\n\n*Applies when: CONFIG_part_variant in ('AM62PX')*\n\n[MCU+SDK Flash Tools Documentation](https://software-dl.vendor.example/mcu-plus-sdk/esd/AM62PX/11_01_01_08/exports/docs/api_guide_am62px/TOOLS_FLASH.html).\n",
+    'SETUP_RST': "# Setup\n\n## Install host dependencies\n\nTo install host dependencies for building Acme U-boot source (standalone) on Ubuntu 22.04+, run the following command in the terminal prompt:\n\n```console\nsudo apt install git xz-utils build-essential autoconf flex bison libssl-dev bc libncurses-dev \\\nswig yamllint libgnutls28-dev\n```\n\n> **Note:** The recommended host machine for building U-Boot is Ubuntu 22.04.\n>\n> ```console\n> pip install dataclasses pyelftools jsonschema yamllint importlib-resources\n> ```\n\n## Getting the Source Code\n\n*Applies when: CONFIG_part_variant in ('AM62LX')*\n\n> **Note:** AM62L devices use TF-A BL-1 boot loader to configure LPDDR4 to enable secondary program loader.\n\nThe easiest way to get access to the source code is by downloading and installing the Processor SDK Linux. Once installed, the source code is in the SDK at the path `<path to tisdk>/board-support`.\n\n## Setup Cross Compile Environment\n\n*[include not available: ../../Overview/GCC_ToolChain.rst]*\n",
+    'BEAGLE_RST': '# BeaglePlay\n\nThe BeaglePlay development board from [BeagleBoard](https://www.beagleboard.org/) uses the {PART_FAMILY_DEVICE_NAMES}. It is a low-cost, primarily community-supported development platform.\n\n**Supported Distributions**\n\n| Component | Branch |\n|---|---|\n| Arago | [Scarthgap](https://git.yoctoproject.org/meta-vendor/tree/meta-beagle/README?h=scarthgap) |\n\nFor more information see https://docs.beagle.cc/boards/beagleplay/index.html.\n',
     'VULKAN_RST': '# Vulkan\n\nThe Vulkan® libraries packaged with {SDK_FULL_NAME} offer acceleration for graphics stacks such as Qt and GTK.\n\nVulkan® is a relatively new API. Similar to OpenCL™, Vulkan® has an Installable Client Driver (ICD) Loader. A useful tool is `vulkaninfo`.\n',
     'MAKEFILE_RST': "# Top Level Makefile\n\nPlease run the following command to install all packages required by the makefile targets.\n\n*Applies when: CONFIG_part_variant in ('AM62X')*\n\n> **Important:** - AM62x installer supports `am62xx-evm` and `am62xx-lp-evm` platforms.\n> - No special arguments are needed to build for `am62xxsip-evm`.\n\n*Applies when: CONFIG_part_variant not in ('AM62X', 'AM64X', 'AM62PX')*\n\n```console\nhost# sudo apt-get install build-essential autoconf automake bison flex\n```\n\n*Applies when: CONFIG_part_variant in ('AM62PX', 'AM62X', 'AM64X')*\n\n```console\nhost# sudo apt-get install build-essential libgnutls28-dev python3\n```\n\nFollowing pip packages are also needed for jailhouse\n\n```console\nhost# pip3 install jsonschema pyelftools\n```\n\n*Applies when: CONFIG_sdk in ('JACINTO','j7_foundational')*\n\n## Compiler toolchain\n\nDownload and extract them into your home directory.\n",
 }
 
 
-# --- 1. golden behaviour on real TI rst ---------------------------------------------------------
+# --- 1. golden behaviour on real Acme rst ---------------------------------------------------------
 
 
 def test_uart_flash_page_surfaces_every_ifconfig_condition_when_unconfigured() -> None:
@@ -502,7 +502,7 @@ def test_dropped_directive_warnings_are_counted_once_per_occurrence() -> None:
     assert text.startswith("Text.") and text.endswith("Tail.")
 
 
-# --- 1. golden behaviour on real TI Doxygen Markdown and YAML -------------------------------------
+# --- 1. golden behaviour on real Acme Doxygen Markdown and YAML -------------------------------------
 
 
 def test_bootloader_page_headings_anchors_toc_vars_and_else_branch() -> None:
@@ -584,11 +584,11 @@ def test_board_yaml_scalars_and_lists_keep_their_keys() -> None:
     by = _by_path(doc)
     assert by[("ram",)].text == "ram: 80" and by[("flash",)].text == "flash: 352"
     assert by[("toolchain",)].text == "toolchain:\n- zephyr\n- gnuarmemb"
-    assert by[("name",)].text == "name: TI SimpleLink CC1352R SensorTag"
+    assert by[("name",)].text == "name: Acme SimpleLink CC1352R SensorTag"
     assert [s.anchor for s in doc.sections if s.heading][0] == "identifier"
 
 
-# --- 2. parity with ~/ti-rag/import/ti_import.py (frozen output, see ORACLE above) -----------------
+# --- 2. parity with the external pre-processing script (frozen output, see ORACLE above) ---------------------
 
 
 def _oracle_headings(md: str) -> list[tuple[int, str]]:
@@ -641,7 +641,7 @@ def test_the_known_differences_from_the_external_tool_are_the_intended_ones() ->
     assert "include not available" not in "".join(s.text for s in extract_rst(SETUP_RST).sections)
 
 
-# Frozen from ti_import.doxygen_clean (its `{#ID}` stripped headings, and the `*Applies to:*` lines).
+# Frozen from the external script's Doxygen clean-up (its `{#ID}` stripped headings, and the `*Applies to:*` lines).
 DOXYGEN_ORACLE = {
     "BOOTLOADER_MD": (
         [(1, "BOOTLOADER"), (2, "Features Supported"), (2, "SysConfig Features"), (2, "Example Usage"), (2, "API")],
@@ -869,7 +869,7 @@ def test_raw_directive_and_raw_role_are_dropped_and_counted(src: str) -> None:
 NAMES = {"CONFIG_v": "AM62X", "CONFIG_t": True, "CONFIG_f": False, "CONFIG_n": 3, "CONFIG_s": "abc"}
 
 EVALUATOR_TABLE = [
-    # the conditions the TI corpus actually uses
+    # the conditions the Acme corpus actually uses
     ("CONFIG_v in ('AM62X')", True),
     ("CONFIG_v in ('AM62X', 'AM64X', 'AM62PX', 'AM335X')", True),
     ("CONFIG_v not in ('AM62X', 'AM64X', 'AM62PX', 'AM335X', 'AM437X', 'AM65X', 'AM57X', 'AM62AX')", False),
@@ -986,7 +986,7 @@ def _mcu() -> Document:
 def test_mcu_plus_flashing_the_files_v1_glues_the_command_to_the_next_unrelated_section() -> None:
     chunks = chunk(_mcu(), Cfg(chunker_version=1))
     cmd = next(c for c in chunks if "uart_uniflash.py" in c.text)
-    assert "serial port permissions" in cmd.text  # the TI finding: the command rides with Troubleshooting prose
+    assert "serial port permissions" in cmd.text  # the Acme finding: the command rides with Troubleshooting prose
     assert cmd.heading_path[-1] == "Flashing the files"
 
 
@@ -1015,7 +1015,7 @@ def test_v2_never_merges_a_short_section_into_the_next_unrelated_one() -> None:
     assert "make all" not in chunks[1].text
 
 
-def test_v2_ti_snapshots_never_lose_a_word_to_merging() -> None:
+def test_v2_sdk_snapshots_never_lose_a_word_to_merging() -> None:
     for src in (UART_RST, SETUP_RST, MAKEFILE_RST, BEAGLE_RST):
         doc = extract_rst(src, source_url=URL, title="d")
         text = " ".join(" ".join(c.embed_text.split()) for c in chunk(doc, Cfg(overlap_tokens=0)))  # the heading is in embed_text
@@ -1155,35 +1155,37 @@ def test_hashes_do_not_depend_on_the_python_hash_seed() -> None:
 
 # Frozen from the committed (HEAD) chunker before P1.A2 and checked equal to the working tree: a change here
 # means every existing knowledge base would re-embed.
+# The hashes of the snapshots whose vendor name was later made generic were re-recorded from the new input text,
+# with the extractors and chunker unchanged.
 V1_GOLDEN = {
-    "UART_RST": "e8aee068694a44657ce3df22f75583eaa3f87bfda3e7520340b2f83e2f2be5b4",
-    "SETUP_RST": "bede5961808df72d51abc87e059feccc03dacd5bd3e725e69029fe570e03a114",
+    "UART_RST": "9c79c5f7a29ccf4c50089731285ff31a816f7b143d2f8acc1c13496b0a155cd2",
+    "SETUP_RST": "aa45964828bfbe237cd6d4ce377574a2275264868d3991979c957d263f72e44b",
     "MAKEFILE_RST": "9e1998c7083a8d18449b402b88b145f0c14cb1e061d527e58ce4a7417d384164",
-    "BEAGLE_RST": "b184d92cd635571667ebf328d0d48d86f1e2be1eb8f47eb162e4b2d7ca316540",
+    "BEAGLE_RST": "1655493bd34c9cc89eef18045c954b0d72f7de975ed18dd26171510d32f7e1e3",
     "VULKAN_RST": "14f12c31dc92010b66bd1c6d3bf15e940524ee03614f6394ea84a4206d0b4de3",
     "BOOTLOADER_MD": "fc122443a98625309d17b613fcab8642c4150c9b4344d7c2a1b761ddff13215f",
     "TASKP_MD": "479ddde0ed46b0797c83174a519d43c8050d6633c939b013566cb59dcdc10111",
-    "FLASH_MD": "d991966cbf77157693b9a58381cb9ac6af254ecca9bab49d47803bd2b8c1fd5a",
-    "SPI_YAML": "afc9bc0eb2833fdceee8b1256b587352f5235ba31f746f73aad57a3aa84a06e9",
-    "TIMER_YAML": "994cea15ba72fde73a32d987ce090e9dbb3955bccb03f4fd07eb02fda04f1d73",
-    "BOARD_YAML": "d27e26fa26abe6f1de47386b3e9adbcb34519dd15f417f4d9494772b397508f4",
+    "FLASH_MD": "2881025b3edbd4324f1836d56bac667fe02a85915afa402978f09127934e0150",
+    "SPI_YAML": "9cdbff6498ee0c4ad82c2bafea25550caff52ee7ba509532ad1abbb546c47919",
+    "TIMER_YAML": "bb260ef83c3bf811aaa923264016db83085c63f94a2b09bade61e90735ced526",
+    "BOARD_YAML": "81126d3b584af2ddcd15da231cfce214656db3088ea1ea23c380e01b4a1f1039",
     "MCU_FLASH_MD": "d16a33db0e5ca9bd8d9c497c5082660176b36d492e7871584d2e4d9eb7275054",
     "LONG": "5b181493f91abea33d4e7a4f8a664dd42cae81861938e4a9b8535fd441def6ec",
 }
 
 # Pins the v2 output of the same corpus: a change means the v2 algorithm changed (needs a new version).
 V2_GOLDEN = {
-    "UART_RST": "e8aee068694a44657ce3df22f75583eaa3f87bfda3e7520340b2f83e2f2be5b4",
-    "SETUP_RST": "bede5961808df72d51abc87e059feccc03dacd5bd3e725e69029fe570e03a114",
+    "UART_RST": "9c79c5f7a29ccf4c50089731285ff31a816f7b143d2f8acc1c13496b0a155cd2",
+    "SETUP_RST": "aa45964828bfbe237cd6d4ce377574a2275264868d3991979c957d263f72e44b",
     "MAKEFILE_RST": "9e1998c7083a8d18449b402b88b145f0c14cb1e061d527e58ce4a7417d384164",
-    "BEAGLE_RST": "b184d92cd635571667ebf328d0d48d86f1e2be1eb8f47eb162e4b2d7ca316540",
+    "BEAGLE_RST": "1655493bd34c9cc89eef18045c954b0d72f7de975ed18dd26171510d32f7e1e3",
     "VULKAN_RST": "14f12c31dc92010b66bd1c6d3bf15e940524ee03614f6394ea84a4206d0b4de3",
     "BOOTLOADER_MD": "ed67869246243bc7ab25d855c3af3c8819bc7fe5cc4cae94ce2ba9fb4e830ac4",
     "TASKP_MD": "9dc26edbafb746bb675b6d75d9aa8b0ec156560290036f7b6389e35d28f86616",
-    "FLASH_MD": "6ebf3b9a07121a5252062c6193ee7560eb2454cb6164ebee84986c3cb7bd4413",
-    "SPI_YAML": "afc9bc0eb2833fdceee8b1256b587352f5235ba31f746f73aad57a3aa84a06e9",
-    "TIMER_YAML": "994cea15ba72fde73a32d987ce090e9dbb3955bccb03f4fd07eb02fda04f1d73",
-    "BOARD_YAML": "d27e26fa26abe6f1de47386b3e9adbcb34519dd15f417f4d9494772b397508f4",
+    "FLASH_MD": "914ac53cc541c1acbdede40e49d6897d5e6b2ddb94ec49c1d8c2f205466acb83",
+    "SPI_YAML": "9cdbff6498ee0c4ad82c2bafea25550caff52ee7ba509532ad1abbb546c47919",
+    "TIMER_YAML": "bb260ef83c3bf811aaa923264016db83085c63f94a2b09bade61e90735ced526",
+    "BOARD_YAML": "81126d3b584af2ddcd15da231cfce214656db3088ea1ea23c380e01b4a1f1039",
     "MCU_FLASH_MD": "98f41870d79d53d460d9a35408a0b1975705cc3a0157c8bf6ffeaeb80236d611",
     "LONG": "5b181493f91abea33d4e7a4f8a664dd42cae81861938e4a9b8535fd441def6ec",
 }
@@ -1193,7 +1195,7 @@ def test_v1_output_is_byte_identical_to_the_pre_p1a2_chunker() -> None:
     assert _digest(1) == V1_GOLDEN
 
 
-def test_v2_golden_hashes_for_the_ti_corpus() -> None:
+def test_v2_golden_hashes_for_the_sdk_corpus() -> None:
     assert _digest(2) == V2_GOLDEN
 
 

@@ -1066,7 +1066,7 @@ def test_a_fifo_swapped_in_after_the_scan_does_not_block(tree: Path) -> None:
 
 
 def test_report_json_in_a_missing_directory_is_refused_before_any_upload(tree: Path, tmp_path: Path) -> None:
-    """The TI quality check: `--report-json nonexistent-dir/x.json` uploaded everything, then died
+    """The Acme quality check: `--report-json nonexistent-dir/x.json` uploaded everything, then died
     with a FileNotFoundError traceback and lost the report. It is a usage error (exit 2) up front."""
     api = FakeApi()
     code, out, err = run_cli([str(tree), "--kb", KB, "--report-json", str(tmp_path / "nope" / "x.json")], api)

@@ -1,5 +1,5 @@
 """End to end acceptance of the knowledge-base source sync (brief §19-§20): the real API (in process), the real
-DBOS worker (in process), the fixture-backed Acme Semiconductor fake server behind the real Acme adapter, the
+DBOS worker (in process), the plug-in's fixture-backed fake server behind its real adapter, the
 published example workflow, `eap.kb_ingest` with the real extractor and the `test:hash` embedder.
 
 The operator path, as the guide describes it: tenant secrets through `PUT /secrets/{name}`, a connection with
@@ -20,9 +20,10 @@ import jsonschema
 import pytest
 from sqlalchemy import text
 
-pytest.importorskip("eap_kb_sources_acme")  # the TI plug-in is optional: this runs the real worker against it
+pytest.importorskip("eap_kb_sources_acme")  # the Acme plug-in is optional: this runs the real worker against it
 
-from eap_kb_sources_acme import PROVIDER as TI_PROVIDER, TiProductCatalogAdapter, TokenCache
+from eap_kb_sources_acme import PROVIDER as ACME_PROVIDER, TiProductCatalogAdapter, TokenCache
+from eap_kb_sources_acme.adapter import DEFAULT_ALLOWED_HOSTS
 from eap_kb_sources_acme.fixtures import FakeTiServer, Part, TOKEN_PREFIX, template_part
 from eap_kb_sources.registry import register_adapter
 from eap_secrets import KEY_ENV, generate_key
@@ -102,8 +103,8 @@ class Stack:
         self.call("PUT", "/secrets/conn-client-id", expect=200, json={"value": SENTINEL_ID})
         self.call("PUT", "/secrets/conn-client-secret", expect=200, json={"value": SENTINEL_SECRET})
         conn = self.call("POST", "/settings/connections", expect=201, json={
-            "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://api.vendor.example",
-            "config": {"provider": TI_PROVIDER, "allowed_hosts": ["api.vendor.example", "www.ti.com"]},
+            "name": "vendor", "kind": "oauth2_client_credentials", "base_url": "https://api.vendor.example",
+            "config": {"provider": ACME_PROVIDER, "allowed_hosts": list(DEFAULT_ALLOWED_HOSTS)},
             "credential_refs": REFS}).json()
         self.connection_id = conn["id"]
         assert conn["credential_refs"] == REFS
@@ -115,7 +116,7 @@ class Stack:
         config = {"document_policy": {"types": ["datasheet"]}, "page_size": 3, **(source_config or {})}
         src = self.call("POST", f"/knowledge-bases/{self.kb_id}/sources", expect=201, json={
             "connection_id": self.connection_id, "name": "ti-catalogue", "kind": "product_catalog",
-            "provider": TI_PROVIDER, "config": config}).json()
+            "provider": ACME_PROVIDER, "config": config}).json()
         self.source_id = src["id"]
         created = self.call("POST", "/workflows", expect=201, json={"spec": EXAMPLE}).json()
         self.workflow_id = created["id"]
@@ -224,7 +225,7 @@ def api(worker, worker_settings):
 
 @pytest.fixture
 def make_stack(api, worker, tenant, monkeypatch, caplog):
-    """A factory: the stack of a fresh tenant over a fake TI server (the real adapter, a mock transport)."""
+    """A factory: the stack of a fresh tenant over a fake vendor server (the real adapter, a mock transport)."""
     monkeypatch.setenv(KEY_ENV, generate_key())
     monkeypatch.setenv("EAP_ALLOWED_EMBEDDING_MODELS", "test:*")
     monkeypatch.setenv("EAP_ALLOWED_MODELS", "test:*")
@@ -238,7 +239,7 @@ def make_stack(api, worker, tenant, monkeypatch, caplog):
         else:
             server = FakeTiServer(parts, client_id=SENTINEL_ID, client_secret=SENTINEL_SECRET)
         handler = Slow(server, pause) if pause else server
-        register_adapter("product_catalog", TI_PROVIDER, lambda: TiProductCatalogAdapter(
+        register_adapter("product_catalog", ACME_PROVIDER, lambda: TiProductCatalogAdapter(
             http_factory=lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
             rate_per_second=None, token_cache=TokenCache(), jitter=lambda: 0.0))
         stack = Stack(api, worker, tenant, server)
@@ -248,7 +249,7 @@ def make_stack(api, worker, tenant, monkeypatch, caplog):
         return stack
 
     yield build
-    register_adapter("product_catalog", TI_PROVIDER, TiProductCatalogAdapter)
+    register_adapter("product_catalog", ACME_PROVIDER, TiProductCatalogAdapter)
     cleanup_knowledge(worker.engine, tenant)
     with worker.engine.begin() as conn:
         for table in ("workflow_schedules", "settings_connections", "tenant_secrets", "workflow_versions", "workflows"):

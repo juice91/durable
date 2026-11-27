@@ -4,7 +4,7 @@
 
 Prints the page count, the image-only pages and every distinct heading path. With
 ``--expect-iqmath`` it also asserts the facts snapshotted from C2000Ware's IQmath_Quickstart.pdf
-(``~/ti-rag/repos/c2000ware-core-sdk/libraries/math/IQmath/c28/docs/IQmath_Quickstart.pdf``, which has
+(``libraries/math/IQmath/c28/docs/IQmath_Quickstart.pdf`` in a ``c2000ware-core-sdk`` checkout, which has
 no outline, so every mode uses the font rule) on 2026-11-15; the synthetic test
 ``test_font_rule_snapshot_of_the_iqmath_quickstart`` holds the same shape without the file.
 """

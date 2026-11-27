@@ -14,7 +14,7 @@ from eap_kb_sources.errors import SECRET_MISSING, SourceError
 from eap_kb_sources.providers.github import GithubRepositoryDocsAdapter
 from eap_kb_sources.providers.github.fixtures import TOKEN, FakeGithub
 
-REPO = "TexasInstruments/mcupsdk-core"
+REPO = "example-org/sdk-core"
 CONFIG = {
     "repository": REPO,
     "include": ["docs/**"],

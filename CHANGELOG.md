@@ -184,7 +184,7 @@ All notable changes to this project are documented here. The format follows
 ### Documentation
 
 - **spike:** Architect spike result
-- **kb-sources:** The framework names no provider secret; TI specifics move to a provider page
+- **kb-sources:** The framework names no provider secret; provider specifics move to a provider page
 - **licence:** Apache-2.0 LICENSE and NOTICE, dependency licence tables, licence fields
 - Deploy docs: generic public hostname
 - Pluggable IAM design (interfaces in core, ZITADEL + OpenFGA plug-ins)

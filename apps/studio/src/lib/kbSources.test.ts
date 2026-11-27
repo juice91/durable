@@ -51,9 +51,9 @@ describe("check codes", () => {
 
 describe("connectionPayload", () => {
   it("sends refs, never values, and the token URL in config", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme", baseUrl: "https://api.acme.test", tokenUrl: "https://auth.acme.test/token", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret", tokenSecret: "" });
+    const body = connectionPayload({ name: "vendor", provider: "acme", baseUrl: "https://api.acme.test", tokenUrl: "https://auth.acme.test/token", clientIdSecret: "conn-id", clientSecretSecret: "conn-secret", tokenSecret: "" });
     expect(body).toEqual({
-      name: "ti",
+      name: "vendor",
       kind: "oauth2_client_credentials",
       base_url: "https://api.acme.test",
       config: { provider: "acme", token_url: "https://auth.acme.test/token" },
@@ -62,7 +62,7 @@ describe("connectionPayload", () => {
     });
   });
   it("leaves an empty token URL out", () => {
-    const body = connectionPayload({ name: "ti", provider: "acme", baseUrl: "https://x.test", tokenUrl: " ", clientIdSecret: "a", clientSecretSecret: "b", tokenSecret: "" });
+    const body = connectionPayload({ name: "vendor", provider: "acme", baseUrl: "https://x.test", tokenUrl: " ", clientIdSecret: "a", clientSecretSecret: "b", tokenSecret: "" });
     expect(body.config).toEqual({ provider: "acme" });
   });
 });
@@ -137,7 +137,7 @@ describe("connections client", () => {
     fetchMock.mockResolvedValue(json({ detail: "a source refers to this connection", code: "connection_in_use" }, 409));
     await expect(deleteConnection("c1")).rejects.toMatchObject({ status: 409, code: "connection_in_use" });
     fetchMock.mockResolvedValue(json({ detail: "name", code: "connection_name_conflict" }, 409));
-    await expect(createConnection({ name: "ti", kind: "oauth2_client_credentials", config: { provider: "x" }, credential_refs: {}, enabled: true })).rejects.toMatchObject({ code: "connection_name_conflict" });
+    await expect(createConnection({ name: "vendor", kind: "oauth2_client_credentials", config: { provider: "x" }, credential_refs: {}, enabled: true })).rejects.toMatchObject({ code: "connection_name_conflict" });
   });
 
   it("finds the sources using a connection across knowledge bases", async () => {
@@ -145,10 +145,10 @@ describe("connections client", () => {
       const p = String(url).replace(/^.*?\/api\/v1/, "");
       if (p === "/knowledge-bases") return json({ items: [{ id: "kb1", name: "Docs" }, { id: "kb2", name: "Parts" }], next_after: null });
       if (p === "/knowledge-bases/kb1/sources") return json({ items: [{ id: "s1", name: "a", connection_id: "c9" }] });
-      if (p === "/knowledge-bases/kb2/sources") return json({ items: [{ id: "s2", name: "TI parts", connection_id: "c1" }] });
+      if (p === "/knowledge-bases/kb2/sources") return json({ items: [{ id: "s2", name: "Acme parts", connection_id: "c1" }] });
       return json({}, 404);
     });
-    expect(await sourcesUsingConnection("c1")).toEqual([{ id: "s2", name: "TI parts", knowledgeBaseId: "kb2", knowledgeBaseName: "Parts" }]);
+    expect(await sourcesUsingConnection("c1")).toEqual([{ id: "s2", name: "Acme parts", knowledgeBaseId: "kb2", knowledgeBaseName: "Parts" }]);
   });
 });
 

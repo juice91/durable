@@ -32,7 +32,7 @@ const SOURCE = {
   connection_id: "c1",
   kind: "product_catalog",
   provider: "acme",
-  name: "TI parts",
+  name: "Acme parts",
   enabled: true,
   config: { page_size: 100 },
   last_successful_sync_at: T,
@@ -62,7 +62,7 @@ afterEach(() => cleanup());
 
 async function ready() {
   render(<SourcesTab kbId="kb1" kbName="Parts" />);
-  return (await screen.findByText("TI parts")).closest("li") as HTMLElement;
+  return (await screen.findByText("Acme parts")).closest("li") as HTMLElement;
 }
 
 describe("SourcesTab", () => {
@@ -83,7 +83,7 @@ describe("SourcesTab", () => {
 
   it("adds a source with a connection, name and policy options", async () => {
     render(<SourcesTab kbId="kb1" kbName="Parts" />);
-    await screen.findByText("TI parts");
+    await screen.findByText("Acme parts");
     fireEvent.click(screen.getByRole("button", { name: "Add source" }));
     const sheet = await screen.findByRole("dialog");
     await findSelectOption("ti-prod");
@@ -108,17 +108,17 @@ describe("SourcesTab", () => {
 
   describe("repository sources", () => {
     const GH = { ...CONNECTION, id: "c2", name: "repos", kind: "api_token", base_url: "https://api.github.com", config: { provider: "github" } };
-    const REPO_SOURCE = { ...SOURCE, id: "s3", kind: "repository_docs", provider: "github", name: "TI docs", connection_id: "c2", config: { repository: "o/r" } };
+    const REPO_SOURCE = { ...SOURCE, id: "s3", kind: "repository_docs", provider: "github", name: "Acme docs", connection_id: "c2", config: { repository: "o/r" } };
 
     async function openSheet() {
       mocks.listConnections.mockResolvedValue([CONNECTION, GH]);
       render(<SourcesTab kbId="kb1" kbName="Docs" />);
-      await screen.findByText("TI parts");
+      await screen.findByText("Acme parts");
       fireEvent.click(screen.getByRole("button", { name: "Add source" }));
       const sheet = await screen.findByRole("dialog");
       await findSelectOption("repos");
       fireEvent.change(within(sheet).getByLabelText("Connection"), { target: { value: "c2" } });
-      fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "TI docs" } });
+      fireEvent.change(within(sheet).getByLabelText("Name"), { target: { value: "Acme docs" } });
       return sheet;
     }
 
@@ -127,7 +127,7 @@ describe("SourcesTab", () => {
       expect(within(sheet).queryByLabelText("Page size")).toBeNull();
       const add = within(sheet).getByRole("button", { name: "Add source" });
       expect(add).toBeDisabled();
-      fireEvent.change(within(sheet).getByLabelText("Repository"), { target: { value: "TexasInstruments/mcupsdk-core" } });
+      fireEvent.change(within(sheet).getByLabelText("Repository"), { target: { value: "example-org/sdk-core" } });
       expect(add).toBeDisabled(); // include is required
       fireEvent.change(within(sheet).getByLabelText("Include"), { target: { value: "docs/**\nsource/**/*.md" } });
       fireEvent.change(within(sheet).getByLabelText("Exclude"), { target: { value: "docs/old/**" } });
@@ -140,9 +140,9 @@ describe("SourcesTab", () => {
       expect(mocks.createSource.mock.calls[0]).toEqual([
         "kb1",
         {
-          connection_id: "c2", name: "TI docs", kind: "repository_docs", provider: "github",
+          connection_id: "c2", name: "Acme docs", kind: "repository_docs", provider: "github",
           config: {
-            repository: "TexasInstruments/mcupsdk-core", ref: "main", include: ["docs/**", "source/**/*.md"], exclude: ["docs/old/**"],
+            repository: "example-org/sdk-core", ref: "main", include: ["docs/**", "source/**/*.md"], exclude: ["docs/old/**"],
             map: [
               { match: "docs/am263x/**", metadata: { sdk_family: "mcu-plus-sdk", device: "AM263x" } },
               { match: "**", metadata: { sdk_family: "mcu-plus-sdk" } },
@@ -181,9 +181,9 @@ describe("SourcesTab", () => {
     it("runs a targeted sync of file paths", async () => {
       mocks.listSources.mockResolvedValue([REPO_SOURCE]);
       render(<SourcesTab kbId="kb1" kbName="Docs" />);
-      const row = (await screen.findByText("TI docs")).closest("li") as HTMLElement;
+      const row = (await screen.findByText("Acme docs")).closest("li") as HTMLElement;
       expect(within(row).getByText("GitHub")).toBeInTheDocument();
-      fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI docs" }));
+      fireEvent.click(within(row).getByRole("button", { name: "Run sync for Acme docs" }));
       const sheet = await screen.findByRole("dialog");
       expect(getSelectOption("Full repository", sheet)).toBeTruthy();
       fireEvent.change(within(sheet).getByLabelText("File paths"), { target: { value: "docs/a.md\ndocs/b.rst" } });
@@ -195,7 +195,7 @@ describe("SourcesTab", () => {
 
   it("starts a targeted sync through the workflow and links to the run", async () => {
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Run sync for Acme parts" }));
     const sheet = await screen.findByRole("dialog");
     const start = within(sheet).getByRole("button", { name: "Start sync" });
     expect(start).toBeDisabled(); // targeted needs part numbers
@@ -209,7 +209,7 @@ describe("SourcesTab", () => {
 
   it("refuses more than 100 part numbers", async () => {
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Run sync for Acme parts" }));
     const sheet = await screen.findByRole("dialog");
     fireEvent.change(within(sheet).getByLabelText("Part numbers"), { target: { value: Array.from({ length: 101 }, (_, i) => `P${i}`).join("\n") } });
     expect(within(sheet).getByRole("button", { name: "Start sync" })).toBeDisabled();
@@ -218,7 +218,7 @@ describe("SourcesTab", () => {
 
   it("incremental needs no part numbers; full offers a restart toggle", async () => {
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Run sync for Acme parts" }));
     const sheet = await screen.findByRole("dialog");
     fireEvent.change(within(sheet).getByLabelText("Mode"), { target: { value: "incremental" } });
     expect(within(sheet).queryByLabelText("Part numbers")).toBeNull();
@@ -232,7 +232,7 @@ describe("SourcesTab", () => {
   it("shows a stable error when the run could not start", async () => {
     mocks.startSourceSync.mockRejectedValue(new KbSourceError(404, "sync_workflow_missing", "The KB Source Synchronization workflow is not published yet."));
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Run sync for Acme parts" }));
     const sheet = await screen.findByRole("dialog");
     fireEvent.change(within(sheet).getByLabelText("Mode"), { target: { value: "incremental" } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Start sync" }));
@@ -242,16 +242,16 @@ describe("SourcesTab", () => {
   it("offers to publish the sync workflow when none is published, and disables Run sync until then", async () => {
     mocks.findSyncWorkflow.mockResolvedValue(null);
     const row = await ready();
-    expect(within(row).getByRole("button", { name: "Run sync for TI parts" })).toBeDisabled();
+    expect(within(row).getByRole("button", { name: "Run sync for Acme parts" })).toBeDisabled();
     fireEvent.click(await screen.findByRole("button", { name: "Publish the sync workflow" }));
     await waitFor(() => expect(mocks.publishSyncWorkflow).toHaveBeenCalled());
-    await waitFor(() => expect(within(row).getByRole("button", { name: "Run sync for TI parts" })).toBeEnabled());
+    await waitFor(() => expect(within(row).getByRole("button", { name: "Run sync for Acme parts" })).toBeEnabled());
     expect(screen.queryByRole("button", { name: "Publish the sync workflow" })).toBeNull();
   });
 
   it("lists the syncs with status, the report summary, stop reason and a run link", async () => {
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Show syncs for TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Show syncs for Acme parts" }));
     const item = (await within(row).findByText("completed")).closest("li") as HTMLElement;
     await waitFor(() => expect(item.textContent).toMatch(/discovered 5/));
     for (const text of [/inserted 2/, /updated 1/, /unchanged 2/, /documents queued 3/, /failed 0/, /stopped: budget/]) expect(item.textContent).toMatch(text);
@@ -260,13 +260,13 @@ describe("SourcesTab", () => {
 
   it("disables a source", async () => {
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Disable TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Disable Acme parts" }));
     await waitFor(() => expect(mocks.updateSource).toHaveBeenCalledWith("kb1", "s1", { enabled: false }));
   });
 
   it("has no axe violations, with the run sheet open too", async () => {
     const row = await ready();
-    fireEvent.click(within(row).getByRole("button", { name: "Run sync for TI parts" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Run sync for Acme parts" }));
     await screen.findByRole("dialog");
     await expectNoAxeViolations(document.body);
   }, AXE_TIMEOUT_MS);
