@@ -24,7 +24,7 @@ pytestmark = requires_pg
 API = "/api/v1"
 SENTINEL = "sentinel-client-secret-VALUE-0001"
 REFS = {"client_id": "secret:conn-id", "client_secret": "secret:conn-secret"}
-CONN = {"name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
+CONN = {"name": "vendor", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
         "config": {"provider": "fake"}, "credential_refs": REFS}
 
 
@@ -111,7 +111,7 @@ def test_connection_crud_echoes_refs_never_values(env):
     assert set(made) >= {"id", "name", "kind", "base_url", "config", "credential_refs", "enabled",
                          "last_checked_at", "last_status", "last_error_code", "created_at", "updated_at"}
     assert client.get(f"{API}/settings/connections", headers=h).json()["items"][0]["id"] == made["id"]
-    assert client.get(f"{API}/settings/connections/{made['id']}", headers=h).json()["name"] == "ti"
+    assert client.get(f"{API}/settings/connections/{made['id']}", headers=h).json()["name"] == "vendor"
     patched = client.patch(f"{API}/settings/connections/{made['id']}",
                            json={"enabled": False, "credential_refs": {"client_id": "secret:other"}}, headers=h)
     assert patched.status_code == 200 and patched.json()["enabled"] is False

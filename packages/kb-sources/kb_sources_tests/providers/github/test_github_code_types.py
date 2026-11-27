@@ -15,7 +15,7 @@ from eap_kb_sources.providers.github.adapter import (
     _Config,
     doc_type,
 )
-from eap_kb_sources.providers.github.fixtures import FakeGithub, ti_like_repo
+from eap_kb_sources.providers.github.fixtures import FakeGithub, sdk_like_repo
 
 from .helpers import REPO, MemoryStore, make_adapter, run_segment
 
@@ -63,7 +63,7 @@ def test_code_documents_get_kind_and_language_defaults_a_map_rule_may_override()
 
 
 def test_a_full_walk_submits_code_with_its_mime_type_metadata_and_commit_url():
-    repo = ti_like_repo()
+    repo = sdk_like_repo()
     repo.put("src/app.py", b"def main():\n    return 1\n")
     repo.put("src/web/Card.tsx", b"export const Card = () => null;\n")
     repo.put("src/tests/test_app.py", b"def test_a():\n    pass\n")
@@ -84,7 +84,7 @@ def test_a_full_walk_submits_code_with_its_mime_type_metadata_and_commit_url():
 
 
 def test_a_code_file_over_max_bytes_is_refused_by_size():
-    repo = ti_like_repo()
+    repo = sdk_like_repo()
     repo.put("src/big.py", b"x = 1\n" * 1000)
     repo.commit()
     server, store = FakeGithub(repo), MemoryStore()

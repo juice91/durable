@@ -1,7 +1,7 @@
 # Knowledge-base sources: the operator guide
 
 A tenant connects an external product catalogue, binds it to a knowledge base and keeps both in step. The
-first provider is the Acme Semiconductor Product Information API. What the sync leaves behind is an ordinary
+first catalogue provider is a vendor product information API, shipped as a separate plug-in. What the sync leaves behind is an ordinary
 knowledge base (datasheets) plus a structured product store; agents use it through `retrieve` and never see a
 provider. Design: an internal design note. Acceptance:
 an internal design note. The workflow itself:
@@ -86,7 +86,7 @@ sync with a workflow schedule of this workflow and the input `{"source_id": "...
 
 `GET /knowledge-bases/{kb}/sources/{src}/syncs` lists the sync runs and `.../syncs/{run_id}` returns the report.
 
-Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: GitHub repository documents is built in (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`); other providers are separate packages (`docs/providers/index.md`), for example the Acme Semiconductor product catalogue (`packages/kb-sources-acme/README.md`, source kind `product_catalog`).
+Provider-specific values (hosts, secret field names, probe parts, quotas) are not part of this guide: see the provider page. Providers: GitHub repository documents is built in (`docs/providers/github.md`, source kind `repository_docs`, connection kind `api_token`); other providers are separate packages (`docs/providers/index.md`), for example a vendor product catalogue (source kind `product_catalog`).
 
 ## 5. Staged live tests
 
@@ -147,7 +147,7 @@ package data for secrets, and never put a token or key in an error message or th
 | Code | Meaning | What to do |
 |---|---|---|
 | `secret_missing` | a referenced secret is not set | `PUT /secrets/{name}`; the run is `needs_attention` |
-| `connection_auth_failed` | TI refused the client credentials | rotate the secrets; the run is `needs_attention` |
+| `connection_auth_failed` | the provider refused the client credentials | rotate the secrets; the run is `needs_attention` |
 | `rate_limited` | 429 after the bounded backoff | the cursor is kept; run again later |
 | `not_found` | the part does not exist | counted, the batch goes on |
 | `connection_response_invalid` | malformed JSON or a non-PDF document | counted, the item is skipped |

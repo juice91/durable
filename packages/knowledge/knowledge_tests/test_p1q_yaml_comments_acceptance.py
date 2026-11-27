@@ -45,7 +45,7 @@ def test_comment_on_an_alias_key_line_is_kept_and_the_alias_expands():
 
 
 def test_licence_lines_do_not_leak_but_description_does():
-    got = secs("# SPDX-License-Identifier: Apache-2.0\n# Copyright (c) 2020 TI\n# The real description\n\na: 1\n")
+    got = secs("# SPDX-License-Identifier: Apache-2.0\n# Copyright (c) 2020 Acme\n# The real description\n\na: 1\n")
     assert got[:2] == [(0, "", ""), (1, "a", "The real description\n\na: 1")]
 
 

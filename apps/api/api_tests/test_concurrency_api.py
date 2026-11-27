@@ -109,7 +109,7 @@ def _scorer_resource(client, h):
 
 def _connection_resource(client, h):
     made = client.post(f"{API}/settings/connections", json={
-        "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
+        "name": "vendor", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
         "config": {"provider": "fake"}, "credential_refs": {"client_id": "secret:a", "client_secret": "secret:b"}},
         headers=h)
     assert made.status_code == 201, made.text
@@ -118,7 +118,7 @@ def _connection_resource(client, h):
 
 def _kb_source_resource(client, h):
     conn = client.post(f"{API}/settings/connections", json={
-        "name": "ti", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
+        "name": "vendor", "kind": "oauth2_client_credentials", "base_url": "https://transact.example.com",
         "config": {"provider": "fake"}, "credential_refs": {"client_id": "secret:a", "client_secret": "secret:b"}},
         headers=h).json()
     kb = client.post(f"{API}/knowledge-bases", json={"name": "docs", "embedding_model": "test:hash"}, headers=h).json()

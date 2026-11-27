@@ -22,7 +22,7 @@ waits for the runs to finish and prints three blocks of evidence.
    script says so and exits 1.
 5. Polls until the parent and the child are terminal and prints the evidence.
 
-A targeted run spends about **3 provider (TI product) calls per part** against the daily budget: 30 parts is about 90
+A targeted run spends about **3 provider calls per product part** against the daily budget: 30 parts is about 90
 calls. Choose `CHAOS_PART_NUMBERS` accordingly.
 
 ## Usage

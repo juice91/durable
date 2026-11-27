@@ -14,7 +14,7 @@ def test_datasheet_key_is_deterministic_and_has_no_url_hash():
 
 
 def test_multi_document_relationships_append_the_url_hash():
-    url = "https://www.ti.com/lit/an/slva1.pdf"
+    url = "https://www.vendor.example/lit/an/slva1.pdf"
     key = document_key("src1", "product", "LM358", "application_note", url)
     assert key == f"source:src1:product:LM358:application_note:{hashlib.sha1(url.encode()).hexdigest()[:8]}"
     assert key != document_key("src1", "product", "LM358", "application_note", url + "?v=2")

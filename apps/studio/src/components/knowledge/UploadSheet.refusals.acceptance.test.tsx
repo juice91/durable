@@ -37,7 +37,7 @@ const JPEG = [0xff, 0xd8, 0xff, 0xe0, 0, 0x10];
 const WEBP = [0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50];
 
 function open() {
-  render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="TI" onUploaded={() => undefined} />);
+  render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="Acme" onUploaded={() => undefined} />);
   return screen.getByTestId("knowledge-upload-sheet");
 }
 const drop = (sheet: HTMLElement, files: File[]) =>

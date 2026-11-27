@@ -92,7 +92,7 @@ const PAGES: PageCase[] = [
   { name: "mcp detail", path: "/mcp/m1", params: { id: "m1" }, load: () => import("@/app/mcp/[id]/page"), h1: "Docs", shows: "https://docs.example.test/mcp" },
   { name: "knowledge", path: "/knowledge", load: () => import("@/app/knowledge/page"), h1: "Knowledge", shows: "Product docs" },
   { name: "knowledge base", path: "/knowledge/kb1", params: { id: "kb1" }, load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "#knowledge-document-row" },
-  { name: "knowledge base sources", path: "/knowledge/kb1", params: { id: "kb1" }, search: "tab=sources", load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "TI parts" },
+  { name: "knowledge base sources", path: "/knowledge/kb1", params: { id: "kb1" }, search: "tab=sources", load: () => import("@/app/knowledge/[id]/page"), h1: "Product docs", shows: "Acme parts" },
   { name: "processors", path: "/processors", load: () => import("@/app/processors/page"), h1: "Processors", shows: "#processor-row" },
   { name: "processor detail", path: "/processors/pii_redact", params: { type: "pii_redact" }, load: () => import("@/app/processors/[type]/page"), h1: "PII redaction", shows: "#result-row" },
   { name: "metrics", path: "/metrics", load: () => import("@/app/metrics/page"), h1: "Metrics", shows: "#recent-failure" },

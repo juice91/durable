@@ -67,7 +67,7 @@ const statuses = (sheet: HTMLElement) => within(sheet).getAllByTestId("knowledge
 describe("UploadSheet", () => {
   function renderUpload() {
     const onUploaded = vi.fn();
-    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="TI SDK" onUploaded={onUploaded} />);
+    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="Acme SDK" onUploaded={onUploaded} />);
     return { sheet: screen.getByTestId("knowledge-upload-sheet"), onUploaded };
   }
 
@@ -215,7 +215,7 @@ describe("KnowledgeBaseDialog: Advanced extraction", () => {
 
   async function fillBasics() {
     render(<KnowledgeBaseDialog onCreated={() => undefined} onClose={() => undefined} />);
-    fireEvent.change(screen.getByTestId("knowledge-create-name"), { target: { value: "TI SDK" } });
+    fireEvent.change(screen.getByTestId("knowledge-create-name"), { target: { value: "Acme SDK" } });
     const picker = await screen.findByTestId("knowledge-embedding-model");
     await waitFor(() => expect(picker).not.toBeDisabled());
     fireEvent.change(picker, { target: { value: "test:hash" } });
@@ -225,7 +225,7 @@ describe("KnowledgeBaseDialog: Advanced extraction", () => {
     await fillBasics();
     fireEvent.click(screen.getByTestId("knowledge-create-submit"));
     await waitFor(() => expect(sent("POST", /^\/knowledge-bases$/)).toHaveLength(1));
-    expect(sent("POST", /^\/knowledge-bases$/)[0].body).toEqual({ name: "TI SDK", description: null, embedding_model: "test:hash" });
+    expect(sent("POST", /^\/knowledge-bases$/)[0].body).toEqual({ name: "Acme SDK", description: null, embedding_model: "test:hash" });
   });
 
   it("sends chunking.extract with exactly the fields that are set", async () => {
@@ -237,7 +237,7 @@ describe("KnowledgeBaseDialog: Advanced extraction", () => {
     fireEvent.click(screen.getByTestId("knowledge-create-submit"));
     await waitFor(() => expect(sent("POST", /^\/knowledge-bases$/)).toHaveLength(1));
     expect(sent("POST", /^\/knowledge-bases$/)[0].body).toEqual({
-      name: "TI SDK", description: null, embedding_model: "test:hash",
+      name: "Acme SDK", description: null, embedding_model: "test:hash",
       chunking: { extract: { markdown_flavor: "doxygen", rst_config: { CONFIG_part_variant: "AM62X" }, rst_tags: ["am62x", "linux"] } },
     });
   });
@@ -290,9 +290,9 @@ describe("the retrieve span shows a PDF hit's page", () => {
       id: "s1", parent_id: null, kind: "retrieve", name: "retrieve", start: T0, end: T0, status: "ok", input: null, output: null, truncated: {},
       attributes: {
         query: "uart divisor", hits: [
-          { n: 1, title: "TRM", url: "https://ti.example/trm.pdf#page=212", ref: "https://ti.example/trm.pdf#page=212", kb_id: "kb1", chunk_id: "c1", doc_version: 1, score: 0.9 },
+          { n: 1, title: "TRM", url: "https://vendor.example/trm.pdf#page=212", ref: "https://vendor.example/trm.pdf#page=212", kb_id: "kb1", chunk_id: "c1", doc_version: 1, score: 0.9 },
           { n: 2, title: "TRM2", url: null, ref: "kb:trm2.pdf", kb_id: "kb1", chunk_id: "c2", doc_version: 1, score: 0.8, page: 40, page_end: 41 },
-          { n: 3, title: "Guide", url: "https://ti.example/guide.html#uart", kb_id: "kb1", chunk_id: "c3", score: 0.7 },
+          { n: 3, title: "Guide", url: "https://vendor.example/guide.html#uart", kb_id: "kb1", chunk_id: "c3", score: 0.7 },
         ],
       },
     };

@@ -1,4 +1,4 @@
-"""Rate limit and daily quota. `TokenBucket` paces calls (TI: 5 per second); `DailyBudget` counts
+"""Rate limit and daily quota. `TokenBucket` paces calls (for example 5 per second); `DailyBudget` counts
 calls per bucket per UTC day and lives in the source checkpoint (`checkpoint["daily_budget"]`), so a
 sync that spends the day's quota stops with a usable checkpoint and the next run (the next day, or a
 raised limit) continues. `Budget` is what an adapter is handed: spend before every provider call."""

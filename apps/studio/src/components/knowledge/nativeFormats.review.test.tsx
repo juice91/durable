@@ -101,7 +101,7 @@ describe("PDF reading off the main thread (review MAJOR 1)", () => {
     });
     let answer: (value: { status: number; body: unknown }) => void = () => undefined;
     on("PUT", /\/documents\//, () => new Promise((resolve) => { answer = resolve; }));
-    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="TI SDK" onUploaded={() => undefined} />);
+    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="Acme SDK" onUploaded={() => undefined} />);
     const sheet = screen.getByTestId("knowledge-upload-sheet");
     fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), { dataTransfer: { files: [new File(["%PDF-1.7"], "trm.pdf")] } });
     fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));

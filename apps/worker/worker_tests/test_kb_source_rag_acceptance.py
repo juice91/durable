@@ -1,4 +1,4 @@
-"""The RAG proof of the composition rule (design: "the TI task is a workflow of tools feeding knowledge-base RAG").
+"""The RAG proof of the composition rule (design: "the Acme task is a workflow of tools feeding knowledge-base RAG").
 
 A targeted sync with the fake catalogue hands a real PDF datasheet to `eap.kb_ingest` (the in-process worker
 ingests it with the real extractor and the `test:hash` embedder); an agent bound to that knowledge base answers

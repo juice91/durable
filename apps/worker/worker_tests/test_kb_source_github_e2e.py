@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import text
 
 from eap_kb_sources.providers.github import GithubRepositoryDocsAdapter
-from eap_kb_sources.providers.github.fixtures import TOKEN, FakeGithub, ti_like_repo
+from eap_kb_sources.providers.github.fixtures import TOKEN, FakeGithub, sdk_like_repo
 from eap_kb_sources.registry import register_adapter
 from eap_secrets import KEY_ENV, generate_key
 from worker_tests.conftest import wait_for
@@ -32,7 +32,7 @@ from worker_tests.test_workflow_run_acceptance import auth_header
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "packages" / "knowledge"))
 from knowledge_tests.pdf_fixtures import build_pdf  # noqa: E402
 
-REPO = "TexasInstruments/mcupsdk-core"
+REPO = "example-org/sdk-core"
 SENTINELS = (TOKEN,)
 DOCS = 30
 CONFIG = {
@@ -118,7 +118,7 @@ def make_stack(api, worker, tenant, monkeypatch, caplog):  # noqa: F811
 
 def repo_with_real_pdfs():
     """The fixture repository with PDFs the real extractor can read (the fixture's are only signature-valid)."""
-    repo = ti_like_repo()
+    repo = sdk_like_repo()
     for path in [p for p in repo.files if p.endswith(".pdf")]:
         name = path.rsplit("/", 1)[1]
         repo.put(path, build_pdf([[(f"{name} Technical Reference", 18)], [("Boot modes", 14), (f"{name} supports UART boot.", 10)]], title=name))

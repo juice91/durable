@@ -95,7 +95,7 @@ describe("caps and accept list (pure)", () => {
 describe("UploadSheet: the API's refusals show on the row", () => {
   async function failWith(status: number, detail: string, file: File) {
     on("PUT", /\/documents\//, () => ({ status, body: { detail } }));
-    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="TI" onUploaded={() => undefined} />);
+    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="Acme" onUploaded={() => undefined} />);
     const sheet = screen.getByTestId("knowledge-upload-sheet");
     fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), { dataTransfer: { files: [file] } });
     fireEvent.click(within(sheet).getByTestId("knowledge-upload-submit"));
@@ -241,7 +241,7 @@ describe("KnowledgeBaseDialog: Advanced extraction is saved only when set", () =
 
 describe("axe and phone layout", () => {
   it("the upload Sheet has no axe violations and no fixed widths", async () => {
-    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="TI" onUploaded={() => undefined} />);
+    render(<UploadSheet open onOpenChange={() => undefined} kbId="kb1" kbName="Acme" onUploaded={() => undefined} />);
     const sheet = screen.getByTestId("knowledge-upload-sheet");
     fireEvent.drop(within(sheet).getByTestId("knowledge-upload-dropzone"), { dataTransfer: { files: [new File(["x"], "a.pdf"), fileOfSize("b.docx", 10)] } });
     expect(sheet.innerHTML).not.toMatch(/(?<![\w:-])(min-)?w-\[\d{3,}px\]/);

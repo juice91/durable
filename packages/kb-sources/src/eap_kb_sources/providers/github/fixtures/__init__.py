@@ -16,8 +16,8 @@ adapter's integrity check works against it. Every response carries `x-ratelimit-
 remaining count is spent (`limit`, default 5000 with a token, 60 without) every call answers 403 with
 `x-ratelimit-remaining: 0`; `reset` is the epoch time it returns. `requests` records `(host, path, query,
 authorized)` for every call (never the token). `script(path, [responders])` queues responses for one path.
-`ti_like_repo()` builds the acceptance repository: 30 documents (md, rst, yaml, pdf) in nested paths named
-after the TI SDK repositories, one symlink, one oversize file.
+`sdk_like_repo()` builds the acceptance repository: 30 documents (md, rst, yaml, pdf) in nested paths named
+after the Acme SDK repositories, one symlink, one oversize file.
 """
 
 from __future__ import annotations
@@ -227,13 +227,13 @@ class FakeGithub:
         return out
 
 
-# ------------------------------------------------------------------------------ the TI-like repository
+# ------------------------------------------------------------------------------ the SDK-like repository
 
 FAMILIES = ("am263x", "am243x", "am64x")
 
 
-def ti_like_repo(name: str = "TexasInstruments/mcupsdk-core") -> Repo:
-    """30 documents in a nested layout like the TI SDK repositories, plus `docs/api_guide/current.md` (a symlink) and
+def sdk_like_repo(name: str = "example-org/sdk-core") -> Repo:
+    """30 documents in a nested layout like the Acme SDK repositories, plus `docs/api_guide/current.md` (a symlink) and
     `docs/big/huge.md` (about 2 MiB, above a test's `max_bytes`), committed as the head."""
     repo = Repo(name)
     n = 0

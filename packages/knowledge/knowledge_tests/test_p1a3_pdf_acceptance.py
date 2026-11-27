@@ -268,9 +268,9 @@ def test_javascript_and_launch_actions_are_never_executed_or_returned():
 
 # ------------------------------------------------------------------------------- real-data parity
 
-# Facts snapshotted from the TI C28x IQmath_Quickstart.pdf (C2000Ware, 85 pages, outline "C28x IQmath
+# Facts snapshotted from the Acme C28x IQmath_Quickstart.pdf (C2000Ware, 85 pages, outline "C28x IQmath
 # Library" > "Chapter 3. Using the IQmath Library"): section 3.9 "Selecting the GLOBAL_Q format" is on
-# page 23, with its `#define GLOBAL_Q` snippet. The document is rebuilt here, so no test reads ~/ti-rag.
+# page 23, with its `#define GLOBAL_Q` snippet. The document is rebuilt here, so no test reads that file.
 IQMATH_PAGES = 85
 IQMATH_GLOBAL_Q_PAGE = 23
 
@@ -291,7 +291,7 @@ def iqmath_like_pdf() -> bytes:
 
 
 def test_iqmath_parity_page_count_headings_and_global_q_on_page_23():
-    result = extract_pdf(iqmath_like_pdf(), source_url="https://ti.example/IQmath_Quickstart.pdf")
+    result = extract_pdf(iqmath_like_pdf(), source_url="https://vendor.example/IQmath_Quickstart.pdf")
     assert result.pages == 85 and result.image_only_pages == ()
     assert result.document.title == "Fixed Point Math Library"
     hits = [s for s in result.document.sections if "GLOBAL_Q" in s.text]
@@ -301,4 +301,4 @@ def test_iqmath_parity_page_count_headings_and_global_q_on_page_23():
     chunks = chunk(result.document, ChunkingConfig(min_tokens=0))
     found = [c for c in chunks if "#define GLOBAL_Q" in c.text]
     assert len(found) == 1 and found[0].page == 23
-    assert found[0].anchor == "https://ti.example/IQmath_Quickstart.pdf#page=23"
+    assert found[0].anchor == "https://vendor.example/IQmath_Quickstart.pdf#page=23"

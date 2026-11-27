@@ -65,11 +65,11 @@ def make_source(engine, tenant, *, config=None, kb_id=None):
     kb_id = kb_id or create_kb(KnowledgeStore(engine), tenant)
     conn = ConnectionStore(engine).create(
         tenant, name=f"c-{uuid.uuid4().hex[:6]}", kind="oauth2_client_credentials", base_url=None, config={},
-        credential_refs={"client_secret": "secret:ti-secret"},
+        credential_refs={"client_secret": "secret:vendor-secret"},
     )
     source = SourceStore(engine).create(
-        tenant, knowledge_base_id=kb_id, connection_id=conn.id, name="TI parts", kind="product_catalog",
-        provider="ti_catalog", config=config or {"part_prefix": "LM", "api_key": "sk-abcdefghijklmnop1234", "limit": 5},
+        tenant, knowledge_base_id=kb_id, connection_id=conn.id, name="Acme parts", kind="product_catalog",
+        provider="acme_catalog", config=config or {"part_prefix": "LM", "api_key": "sk-abcdefghijklmnop1234", "limit": 5},
     )
     return kb_id, source
 
@@ -106,7 +106,7 @@ def test_get_knowledge_base_lists_sources_without_secrets(engine, tenant):
     make_sync(engine, tenant, source, status="incomplete")
     out = run(tools.get_knowledge_base(engine, tenant, kb_id))
     (src,) = out["sources_list"]
-    assert src["name"] == "TI parts" and src["provider"] == "ti_catalog" and src["kind"] == "product_catalog"
+    assert src["name"] == "Acme parts" and src["provider"] == "acme_catalog" and src["kind"] == "product_catalog"
     assert src["last_sync_status"] == "incomplete" and src["last_sync_mode"] == "incremental"
     assert src["config"] == {"part_prefix": "LM", "limit": 5}  # the credential-looking key is gone
     assert src["records"] == 0 and src["documents"] == 0

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -123,8 +124,10 @@ def test_other_formats_chunk_byte_identically(fmt: str, version: int) -> None:
 
 # --- yaml / json ------------------------------------------------------------------------------------
 
-TI_ADS1X1X_BASE = Path("~/ti-rag/repos/simplelink-zephyr/dts/bindings/adc/ti,ads1x1x-base.yaml").expanduser()
-ADS_URL = "https://github.com/TexasInstruments/simplelink-zephyr/blob/main/dts/bindings/adc/ti,ads1x1x-base.yaml"
+# Optional: a directory that holds the upstream SDK checkouts. Unset, only the snapshot below is tested.
+CORPUS_REPOS = os.environ.get("EAP_TEST_CORPUS_REPOS", "")
+ADS1X1X_BASE = Path(CORPUS_REPOS, "simplelink-zephyr/dts/bindings/adc/ti,ads1x1x-base.yaml").expanduser()
+ADS_URL = "https://github.com/example-org/simplelink-zephyr/blob/main/dts/bindings/adc/ti,ads1x1x-base.yaml"
 ADS_SNAPSHOT = """\
 # Common fields for Acme Semiconductor ADS1x1x
 
@@ -137,22 +140,22 @@ properties:
 io-channel-cells:
   - input
 """
-# The TI quality run's chunking config (chunker v2), and v1.
-TI_V2 = ChunkingConfig(max_tokens=512, min_tokens=64, overlap_tokens=64, chunker_version=2)
-TI_V1 = ChunkingConfig(max_tokens=512, min_tokens=64, overlap_tokens=64, chunker_version=1)
+# The Acme quality run's chunking config (chunker v2), and v1.
+CORPUS_V2 = ChunkingConfig(max_tokens=512, min_tokens=64, overlap_tokens=64, chunker_version=2)
+CORPUS_V1 = ChunkingConfig(max_tokens=512, min_tokens=64, overlap_tokens=64, chunker_version=1)
 
 
 def test_versions_bump_yaml_only():
     assert EXTRACTOR_VERSIONS == {"rst": 1, "pdf": 1, "yaml": 3, "json": 1, "markdown-doxygen": 1, "code": 1}
 
 
-@pytest.mark.parametrize("config", [TI_V2, TI_V1], ids=["v2", "v1"])
-@pytest.mark.parametrize("source", ["snapshot", "ti-repo"])
+@pytest.mark.parametrize("config", [CORPUS_V2, CORPUS_V1], ids=["v2", "v1"])
+@pytest.mark.parametrize("source", ["snapshot", "sdk-repo"])
 def test_ads1x1x_base_is_one_chunk_with_comment_and_facts(source: str, config: ChunkingConfig) -> None:
-    if source == "ti-repo":
-        if not TI_ADS1X1X_BASE.is_file():
-            pytest.skip("the TI checkout is not on this host")
-        text = TI_ADS1X1X_BASE.read_text()
+    if source == "sdk-repo":
+        if not CORPUS_REPOS or not ADS1X1X_BASE.is_file():
+            pytest.skip("the Acme checkout is not on this host")
+        text = ADS1X1X_BASE.read_text()
     else:
         text = ADS_SNAPSHOT
     doc = extract_yaml(text, source_url=ADS_URL, max_tokens=config.max_tokens)
@@ -299,7 +302,7 @@ def test_json_without_comments_is_unchanged_apart_from_the_title():
         (1, "properties", "properties:\n  reg:\n    maxItems: 1", "properties"),
     ]
     # Chunk texts are the same as with no title; only the embed prefix gains the title.
-    for config in (TI_V1, TI_V2):
+    for config in (CORPUS_V1, CORPUS_V2):
         titled, untitled = chunk(doc, config), chunk(replace(doc, title=""), config)
         assert [c.text for c in titled] == [c.text for c in untitled]
         assert all(c.embed_text.startswith("path: x.json") for c in titled)

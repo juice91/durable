@@ -2,8 +2,7 @@
 
 The adapter lives in `packages/kb-sources/src/eap_kb_sources/providers/github/`; `provider = "github"` is a value in connection and
 source rows (source kind `repository_docs`, connection kind `api_token`), never a tool or route. It turns the documentation files
-of a repository (for the TI SDK corpus: `processor-sdk-doc`, `mcupsdk-core`, `c2000ware-core-sdk`, `mcu_plus_sdk_am263x`,
-`simplelink-zephyr`) into knowledge-base documents, synchronised by the same published "KB Source Synchronization" workflow as any
+of a repository (for example a vendor SDK's documentation) into knowledge-base documents, synchronised by the same published "KB Source Synchronization" workflow as any
 source. Design: an internal design note. The generic steps are in `docs/kb-sources.md`.
 
 ## Secrets
@@ -31,11 +30,11 @@ not read a repository; a wrong repository name shows up as `not_found` in the fi
 ## Source config
 
 ```json
-{"repository": "TexasInstruments/mcupsdk-core", "ref": "main",
- "include": ["docs_src/docs/api_guide/**", "docs_src/docs/**/*.md"], "exclude": ["**/node_modules/**"],
+{"repository": "example-org/sdk-docs", "ref": "main",
+ "include": ["docs/api_guide/**", "docs/**/*.md"], "exclude": ["**/node_modules/**"],
  "map": [
-   {"match": "docs_src/docs/api_guide/am263x/**", "metadata": {"sdk_family": "mcu-plus-sdk", "device": "AM263x"}},
-   {"match": "**", "metadata": {"sdk_family": "mcu-plus-sdk"}}
+   {"match": "docs/api_guide/device-a/**", "metadata": {"sdk_family": "example-sdk", "device": "device-a"}},
+   {"match": "**", "metadata": {"sdk_family": "example-sdk"}}
  ],
  "max_bytes": 5242880,
  "document_policy": {"types": ["md", "rst", "html", "txt", "yaml", "yml", "json", "pdf"], "delete_missing": false},
@@ -58,12 +57,12 @@ Globs follow the importer (`scripts/kb_import.py`): over the POSIX path from the
 Metadata values are flat (string, number, boolean); a rule may set at most 11 keys, and `source`, `source_id`, `external_id`,
 `relationship`, `path` and `eap` are reserved (the adapter adds `path`, the platform stamps the rest; a document holds 16 keys).
 The map is a list because the database does not keep an object's key order. Studio's Sources sheet takes the importer's YAML form and
-sends this list, for example from `~/ti-rag/import/map-mcu.yaml`:
+sends this list, for example from a `map.yaml` file:
 
 ```yaml
-api_guide/device/am263x/**:  {sdk_family: mcu-plus-sdk, device: AM263x}
-api_guide/device/am243x/**:  {sdk_family: mcu-plus-sdk, device: AM243x}
-"**":                        {sdk_family: mcu-plus-sdk}
+api_guide/device/device-a/**:  {sdk_family: example-sdk, device: device-a}
+api_guide/device/device-b/**:  {sdk_family: example-sdk, device: device-b}
+"**":                          {sdk_family: example-sdk}
 ```
 
 ## What a sync does
