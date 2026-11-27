@@ -11,6 +11,24 @@ Studio is the web console. A FastAPI control plane records runs and puts them on
 worker executes every agent, tool call and workflow as a durable workflow, one recorded step at a
 time. The API and the worker never call each other; they meet in Postgres.
 
+## Quick start
+
+Try the whole platform on one machine with Docker Compose. You need Docker with Compose 2.24 or later,
+about 8 GB of memory for the first build and 5 GB of disk.
+
+```sh
+git clone https://github.com/juice91/durable.git
+cd durable
+cp .env.example .env              # optional: add a model provider key
+docker compose up -d --wait       # first run builds the images (about 10 minutes)
+docker compose exec api setup-link
+```
+
+Open the printed link, choose a username and password, and you are in Studio.
+
+[docs/quickstart-compose.md](./docs/quickstart-compose.md) covers model providers, upgrades, backups and
+reset. To change the code instead, use the [development setup](#development-setup).
+
 ## Why Durable
 
 | Problem | How Durable handles it |
@@ -36,7 +54,9 @@ time. The API and the worker never call each other; they meet in Postgres.
 | **Guardrails** | Declarative processors on input and output: PII redaction, RE2 blocklists, length limits, moderation. |
 | **Evals** | Datasets, scorers and experiments, with comparison across agent versions. |
 | **Observability** | Traces, tenant-tagged logs, metrics, external OTLP trace ingest, and a trace view in Studio. |
-| **Multi-tenancy** | Tenant-scoped data everywhere. A dev bearer for local work, and tenant API keys with scopes (`agui:run`, `mcp`, `manage`, `otlp`). |
+| **Multi-tenancy** | Tenant-scoped data everywhere. Tenant API keys with scopes (`agui:run`, `mcp`, `manage`, `otlp`, `run`) and personal API keys. |
+| **Sign-in and access** | A built-in admin account, ZITADEL or Cloudflare Access; optional roles and per-resource grants with OpenFGA. |
+| **Webhooks and external agents** | Signed inbound webhooks that start a run, and run-only MCP and A2A servers for external agents. Both are off by default. |
 | **AG-UI** | The durable event log is the source of truth; AG-UI is an output adapter for external frontends (`examples/copilotkit-agui`). |
 | **Architect** | A built-in agent that turns a plain-language request into an agent or workflow draft and publishes it once a person approves. |
 
@@ -86,46 +106,55 @@ with the Grafana LGTM stack, and any LiteLLM-compatible (OpenAI-compatible) mode
 Deliberately not used:
 
 - **The Pydantic AI AG-UI adapter.** Durable converts to AG-UI from its own durable event log, so a client can replay a run after it reconnects.
-- **fasta2a / A2A.** Not needed yet.
+- **fasta2a.** The A2A server applies the platform's own rules for external runs.
 - **The Logfire service.** Traces go through OpenTelemetry to the Grafana LGTM stack instead.
 
-## Quick start
+## Development setup
 
-Prerequisites: Python 3.13, [uv](https://docs.astral.sh/uv/), Node with pnpm 9, and Docker (for
-Postgres and the Grafana LGTM stack).
+For contributors: the API, the worker and Studio run from your checkout, and Docker runs only Postgres and
+the Grafana LGTM stack. You need Python 3.13, [uv](https://docs.astral.sh/uv/), Node with pnpm 9, Docker,
+`curl` and `jq`. If the quick-start stack is running, stop it first (`docker compose down`): both use port 3000.
 
-```bash
-git clone https://github.com/juice91/durable.git && cd durable
-uv sync
-pnpm install
-
-cp .env.example .env            # local Postgres credentials
+```sh
+uv sync --all-packages --frozen
+pnpm install --frozen-lockfile
 cp .dev.env.example .dev.env    # model gateway settings and optional overrides
+```
 
+To sign in to Studio with the built-in admin account, add these two lines to `.dev.env`:
+
+```sh
+EAP_IAM_IDENTITY=localadmin,apikey,devloopback
+EAP_IAM_MEMBERSHIP=localadmin
+```
+
+Then start the stack:
+
+```sh
 bash scripts/dev-up.sh          # postgres, lgtm, worker, api, studio; migrations run after postgres
 bash scripts/dev-status.sh      # one line per service
 ```
 
-Then open Studio at <http://localhost:3000>. The API listens on `127.0.0.1:8000`, Grafana on
-`127.0.0.1:3002`, and Postgres on `127.0.0.1:54329`. In dev mode the API accepts
-`Authorization: Bearer dev:<tenant>:<user>`.
+The first start prints a setup link: open it and create the account. Studio is at <http://localhost:3000>,
+the API on `127.0.0.1:8000`, Grafana on `127.0.0.1:3002` and Postgres on `127.0.0.1:54329`. In dev mode the
+API also accepts `Authorization: Bearer dev:<tenant>:<user>` from this machine.
 
 Without a model gateway you can still run agents with the scripted test models (`test:ticket`,
 `test:hash`, `test:retrieve`, `test:moderation` and others in `apps/worker/src/eap_worker/models.py`).
-The default model allowlist is `test:*`, and the test suites use these models, so no test calls a
-real LLM.
+The default model allowlist of the development stack is `test:*`, and the test suites use these models,
+so no test calls a real LLM.
 
 Stop the app services with `bash scripts/dev-down.sh`; `--all` also stops the Docker services.
 
-## A first agent in five minutes
+### A first agent in five minutes
 
-With the dev stack running, create an agent that uses the scripted `test:ticket` model and the
+With the development stack running, create an agent that uses the scripted `test:ticket` model and the
 built-in `tickets.create` tool, publish it, start a run and stream it. These calls follow the API
 end-to-end test `apps/api/api_tests/test_run_e2e.py`.
 
 ```bash
 API=http://127.0.0.1:8000/api/v1
-AUTH='Authorization: Bearer dev:demo:alice'
+AUTH='Authorization: Bearer dev:studio:alice'   # the built-in admin's tenant
 
 # 1. Create the agent (its draft).
 AGENT_ID=$(curl -s -X POST "$API/agents" -H "$AUTH" -H 'Content-Type: application/json' -d '{
@@ -195,8 +224,12 @@ packages/
   pricing/         Model price table and cost calculation (eap_pricing)
   mcp-runtime/     In-platform MCP server runtime (eap_mcp_runtime)
   blob-store/      Attachment storage, S3 compatible (eap_blob_store)
+  iam/             Identity, policy and membership interfaces (eap_iam)
+  inbound-auth/    Verification of inbound webhook signatures (eap_inbound)
+plugins/           IAM implementations, one distribution each (iam-*)
 config/            Model price tables
 examples/          copilotkit-agui, workflow definitions
+compose.yaml       The quick start: the whole platform with Docker Compose
 infrastructure/    Docker Compose file for the dev Postgres and LGTM services
 deploy/            Container images (deploy/docker), Kubernetes manifests (deploy/k8s), deploy scripts
 tests/             Crash-injection matrix (recovery), AG-UI smoke test, deploy and dev-script tests
@@ -229,13 +262,35 @@ Security scans and the CLA check have their own workflows in `.github/workflows/
 
 ## Configuration
 
-Settings are `EAP_*` environment variables; [.dev.env.example](./.dev.env.example) documents them
-with their defaults. The ones you will touch first:
+Settings are `EAP_*` environment variables. The Compose quick start reads `.env`
+([.env.example](./.env.example)); the development stack also reads `.dev.env`, and
+[.dev.env.example](./.dev.env.example) documents the settings with their defaults.
+
+### Sign-in
+
+`EAP_STUDIO_AUTH` says how Studio signs people in. Nothing falls back to another mode.
+
+| Mode | Who it is for | What it needs |
+| --- | --- | --- |
+| `local` | One administrator, with the built-in account. The default of the Compose file and the Kubernetes manifests. | Nothing external. |
+| `zitadel` | Several users and roles. | A ZITADEL instance ([plug-in settings](./plugins/iam-zitadel/README.md)). |
+| `access` | Optional: a single tenant with Cloudflare Access in front. | Cloudflare Access in front of Studio and the API. |
+
+Each mode goes with an API identity provider; [docs/admin-account.md](./docs/admin-account.md) compares
+them and describes how to switch.
+
+### Access control and exposure
+
+The shipped Compose file and Kubernetes ConfigMap select the `openaccess` policy: every signed-in user is an admin, which suits a trial only. To enforce roles and per-resource grants, run your own OpenFGA server: see [Switching to OpenFGA](./docs/iam.md#switching-to-openfga).
+
+To expose Studio and the API, see [docs/expose.md](./docs/expose.md) (any Ingress or reverse proxy with TLS).
+
+### Common settings
 
 | Variable | Purpose |
 | --- | --- |
 | `EAP_DATABASE_URL`, `DBOS_SYSTEM_DATABASE_URL` | Application and DBOS system databases (set in `.env`). |
-| `EAP_AUTH_MODE` | `dev` (local bearer) or `api_key` (tenant keys only). Unset refuses to start. |
+| `EAP_AUTH_MODE` | `dev` (adds a loopback-only development bearer) or `production`; `api_key` is a deprecated alias. Unset refuses to start. |
 | `EAP_ALLOWED_MODELS`, `EAP_ALLOWED_EMBEDDING_MODELS` | Model allowlists, checked at publish, at run start and before every call. Unset means `test:*` only. |
 | `EAP_LITELLM_BASE_URL`, `LITELLM_API_KEY` (or `EAP_LITELLM_API_KEY_CMD`) | OpenAI-compatible model gateway. |
 | `EAP_APP_VERSION`, `EAP_EXECUTOR_ID` | DBOS application version and worker identity; recovery is bound to both. |
@@ -254,6 +309,12 @@ The index is [docs/design/README.md](./docs/design/README.md).
 
 | Guide | What it covers |
 | --- | --- |
+| [Quick start](./docs/quickstart-compose.md) | The whole platform with Docker Compose: providers, upgrade, backup and reset. |
+| [Admin account](./docs/admin-account.md) | The built-in account, the Studio sign-in modes and switching to ZITADEL. |
+| [Identity and access](./docs/iam.md) | Identity providers, policy engines, roles, grants and API keys. |
+| [Expose](./docs/expose.md) | Publishing Studio and the API behind an Ingress or reverse proxy. |
+| [Webhooks](./docs/webhooks.md) | Starting a workflow run with a signed HTTP request. |
+| [External access](./docs/external-access.md) | Letting external agents run exported workflows over MCP or A2A. |
 | [AG-UI](./docs/ag-ui.md) | Serving published agents and workflows over AG-UI 1.0 to CopilotKit or any AG-UI client, including resume and reconnect. |
 | [Architect](./docs/architect.md) | The built-in agent that drafts agents and workflows from a plain-language request and what it can operate. |
 | [CI](./docs/ci.md) | The CI jobs and how a pull request selects only the tests its change affects. |
@@ -265,21 +326,21 @@ The index is [docs/design/README.md](./docs/design/README.md).
 | [MCP servers](./docs/mcp-servers.md) | Managed MCP servers: idle stop, the Test action and keep-running. |
 | [Observability](./docs/observability/) | Sending external OpenTelemetry traces to the platform with a tenant API key. |
 | [Providers](./docs/providers/) | Model providers (Anthropic discovery, Cloudflare Workers AI) and knowledge-source provider plug-ins (GitHub). |
-| [Tools](./docs/tools/) | The built-in tools: `clock.now`, `feed.parse`, `html.extract`, `http.request`, `json.query`, `text.check`. |
+| [Tools](./docs/tools/) | The built-in tools: `clock.now`, `feed.parse`, `html.extract`, `http.request`, `json.query`, `text.check`, `workflow.history` and AT Protocol rich text. |
 | [Workflows](./docs/workflows/) | Loops, step output size, durability across a worker restart, AI explanations and worked examples. |
 
 ## Status and roadmap
 
 **Shipped** (on `main`): everything in the Features table, including versioned agents and
 workflows, model fallback chains, conversations, built-in and MCP tools, knowledge bases with
-source sync, memory, guardrails, evals, observability with OTLP ingest, tenant API keys, AG-UI,
-the Architect, and the crash-injection suite.
+source sync, memory, guardrails, evals, observability with OTLP ingest, built-in and ZITADEL sign-in,
+roles and resource grants (OpenFGA), API keys, inbound webhooks, external agents over MCP and A2A,
+AG-UI, the Architect, and the crash-injection suite.
 
 **Planned, not implemented:**
 
-- Enterprise identity through OIDC (ZITADEL) as a plug-in, with roles and resource grants.
 - Workflow authoring and verification: per-node workflow editing, an engine-level dry run, re-run from step N, tool mocks, publish gates.
-- Connect and embed: inbound webhooks, notification connectors, OAuth connections, a client SDK.
+- Connect and embed: workflows that wait for an inbound event, notification connectors, OAuth connections, a client SDK.
 - Operations: alerts, bundles, and promotion between environments.
 
 ## FAQ
