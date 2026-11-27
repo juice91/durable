@@ -23,6 +23,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from eap_api.mcp_servers import managed
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.mcp_servers.models import McpRuntimeModel, McpServerModel, McpServerSecretModel
 from eap_mcp_runtime import McpRuntime, RuntimeHandle
 from eap_run_store.definition_errors import DefinitionConflict, DefinitionError, DefinitionNotFound
@@ -123,14 +125,16 @@ def runtime_body(
     }
 
 
-class McpRuntimeService:
+class McpRuntimeService(AccessBound):
     """The runtime lifecycle of a tenant's managed servers, on one database session and the runtime adapter.
 
     `db` may be None for the operations that open sessions of their own (`resolve_target`, `start_and_wait`)."""
 
     def __init__(
-        self, db: Session | None, engine: Engine, runtime: McpRuntime, log_failure: Callable[..., None]
+        self, db: Session | None, engine: Engine, runtime: McpRuntime, log_failure: Callable[..., None],
+        access: Access | None = None,
     ) -> None:
+        self._access = access  # None: no caller to check (the internal collaborators of other services have none)
         self.log_failure = log_failure  # eap_observability's, given by the provider (its package root imports the web)
         self._db = db
         self._engine = engine
@@ -239,6 +243,7 @@ class McpRuntimeService:
     def get_runtime(self, tenant_id: str, server_id: uuid.UUID) -> dict[str, Any]:
         """`{state, message, reachable, last_error, ...}`; a `starting`, `running` or `idle` row is compared
         with the pod first. `reachable` false means the cluster could not be asked (the stored state is shown)."""
+        acl.require(self._access, "read", "mcp_server", str(server_id))
         _server, row = self._managed_row(tenant_id, server_id)
         reachable, message = self.reconcile(row) if row.state in ("starting", "running", "idle") else (True, "")
         return runtime_body(row, reachable, message, runtime_env(self._db, row))
@@ -247,6 +252,7 @@ class McpRuntimeService:
         """Start (a pending, stopped, idle or failed pod; otherwise a no-op), stop (scale to zero) or restart
         (stop, then start). 409 for an external server or a disabled one (start, restart); BadGateway when the
         adapter (or the sealed env) fails: the row is then `failed` with `last_error` set."""
+        acl.require(self._access, "edit", "mcp_server", str(server_id))
         server, row = self._managed_row(tenant_id, server_id)
         if action != "stop" and not server.enabled:
             raise DefinitionConflict("the server is disabled")
@@ -267,6 +273,7 @@ class McpRuntimeService:
     def logs(self, tenant_id: str, server_id: uuid.UUID, tail: int) -> dict[str, Any]:
         """`{lines, tail}`: the last `tail` log lines of the pod, with every sealed env value (any encoding) and
         `token=`, `key=`, `secret=`, `password=` assignments masked."""
+        acl.require(self._access, "edit", "mcp_server", str(server_id))
         db = self._db
         server, row = self._managed_row(tenant_id, server_id)
         try:

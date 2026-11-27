@@ -40,6 +40,7 @@ from eap_api.routes.tools import ToolRunCreate, _tool_run_body
 from eap_api.schemas import ErrorDetail
 from eap_api.service_deps.connections import (  # noqa: F401  (get_outbound_policy and RuntimeDep: tests and callers import them here)
     McpConnectionServiceDep,
+    McpTestServiceDep,
     McpRuntimeServiceDep,
     McpServerServiceDep,
     PolicyDep,
@@ -184,7 +185,7 @@ def get_runtime_logs(
 
 @router.post("/mcp-servers/{server_id}/test")
 async def run_mcp_server_test(
-    server_id: uuid.UUID, request: Request, principal: PrincipalDep, policy: PolicyDep, runtime: RuntimeDep
+    server_id: uuid.UUID, principal: PrincipalDep, service: McpTestServiceDep
 ) -> JSONResponse:
     """Connect over Streamable HTTP, initialize and list tools, within a bounded time
     (EAP_MCP_TEST_TIMEOUT_SECONDS, default 10, at most 30). Answers 200 with
@@ -196,7 +197,6 @@ async def run_mcp_server_test(
     `runtime: {state (before), started, waited_ms, idle_minutes}`; a start still going when the time is up
     answers `error_code: "runtime_starting"` (not stored), a `failed` runtime `runtime_not_running` with
     `runtime.last_error`."""
-    service = build_mcp_connection_service(get_database_engine(request), policy, runtime)
     return JSONResponse(content=await service.test(principal.tenant_id, server_id))
 
 

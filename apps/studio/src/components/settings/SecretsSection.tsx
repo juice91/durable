@@ -1,19 +1,52 @@
 "use client";
 
+import { useCan, usePermissions } from "@/lib/permissions";
 import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { ResourceAccessPanel } from "@/components/access/ResourceAccessPanel";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Button } from "@/components/ui/Button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/Dialog";
 import { toast } from "@/components/ui/Toaster";
 import { ApiError } from "@/lib/api";
 import { routes } from "@/lib/routes";
 import { deleteSecret, listSecrets, putSecret, secretRef, type SecretInfo } from "@/lib/secrets";
+import { useAccessEnabled } from "@/lib/useIam";
 
 const inputClass = "w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
+/** What "why can't I?" asks about on the secrets list. */
+const SECRET_ACTIONS = ["create"] as const;
+
 function errorText(reason: unknown, fallback: string): string {
   return reason instanceof Error && reason.message ? reason.message : fallback;
+}
+
+/** A secret row's actions: Access for who may change access (an admin), Delete for who may delete this secret. */
+function SecretActions({ secret, accessEnabled, onAccess, onDelete, onEditable }: { secret: SecretInfo; accessEnabled: boolean; onAccess: () => void; onDelete: () => void; onEditable: () => void }) {
+  const permissions = usePermissions("secret", secret.name, ["archive", "edit"]);
+  const manages = useCan("tenant", null, "manage_settings");
+  const editable = !permissions.loading && permissions.can("edit");
+  useEffect(() => {
+    if (editable) onEditable();
+  }, [editable, onEditable]);
+  const used = (secret.used_by ?? []).length > 0;
+  return (
+    <>
+      {accessEnabled && manages ? (
+        <Button variant="ghost" size="sm" aria-label={`Access to ${secret.name}`} onClick={onAccess}>
+          Access
+        </Button>
+      ) : null}
+      {permissions.can("archive") ? (
+        <Button variant="secondary" size="sm" disabled={used} title={used ? "Change the servers using this secret first" : undefined} aria-label={`Delete ${secret.name}`} onClick={onDelete}>
+          Delete
+        </Button>
+      ) : null}
+    </>
+  );
 }
 
 /**
@@ -32,6 +65,12 @@ export function SecretsSection() {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const accessEnabled = useAccessEnabled();
+  const mayCreate = useCan("secret", null, "create");
+  // An owner who may not create secrets may still replace a value of their own.
+  const [editsOne, setEditsOne] = useState(false);
+  const markEditable = useCallback(() => setEditsOne(true), []);
+  const [accessOf, setAccessOf] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const loadSeq = useRef(0);
 
@@ -152,52 +191,63 @@ export function SecretsSection() {
                   </span>
                 ) : null}
               </span>
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={(secret.used_by ?? []).length > 0}
-                title={(secret.used_by ?? []).length > 0 ? "Change the servers using this secret first" : undefined}
-                aria-label={`Delete ${secret.name}`}
-                onClick={() => {
+              <SecretActions
+                secret={secret}
+                accessEnabled={accessEnabled}
+                onAccess={() => setAccessOf(secret.name)}
+                onEditable={markEditable}
+                onDelete={() => {
                   setDeleteError(null);
                   setDeleting(secret.name);
                 }}
-              >
-                Delete
-              </Button>
+              />
             </li>
           ))}
         </ul>
       )}
-      <form ref={formRef} onSubmit={add} aria-label="Add secret" data-testid="secrets-form" className="flex min-w-0 flex-col gap-3 border-t border-border pt-3">
-        <div className="grid min-w-0 gap-3 md:grid-cols-2">
-          <div className="space-y-1">
-            <label htmlFor="secret-name" className="block text-sm font-medium text-foreground">
-              Secret name
-            </label>
-            <input id="secret-name" name="secret-ref-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" data-1p-ignore data-lpignore="true" data-form-type="other" spellCheck={false} placeholder="slack-token" className={`${inputClass} font-mono`} />
+      <PermissionNotice kind="secret" id={null} actions={SECRET_ACTIONS} />
+      {mayCreate || editsOne ? (
+        <form ref={formRef} onSubmit={add} aria-label="Add secret" data-testid="secrets-form" className="flex min-w-0 flex-col gap-3 border-t border-border pt-3">
+          <div className="grid min-w-0 gap-3 md:grid-cols-2">
+            <div className="space-y-1">
+              <label htmlFor="secret-name" className="block text-sm font-medium text-foreground">
+                Secret name
+              </label>
+              <input id="secret-name" name="secret-ref-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" data-1p-ignore data-lpignore="true" data-form-type="other" spellCheck={false} placeholder="slack-token" className={`${inputClass} font-mono`} />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="secret-value" className="block text-sm font-medium text-foreground">
+                Secret value
+              </label>
+              <input id="secret-value" name="secret-ref-value" type="password" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="new-password" data-1p-ignore data-lpignore="true" data-form-type="other" spellCheck={false} className={`${inputClass} font-mono`} />
+            </div>
           </div>
-          <div className="space-y-1">
-            <label htmlFor="secret-value" className="block text-sm font-medium text-foreground">
-              Secret value
-            </label>
-            <input id="secret-value" name="secret-ref-value" type="password" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="new-password" data-1p-ignore data-lpignore="true" data-form-type="other" spellCheck={false} className={`${inputClass} font-mono`} />
+          {formError ? (
+            <p role="alert" data-testid="secrets-form-error" className="text-label text-destructive-text">
+              {formError}
+            </p>
+          ) : null}
+          <div>
+            <Button type="submit" variant="primary" size="sm" disabled={saving || !name.trim() || !value}>
+              Add secret
+            </Button>
           </div>
-        </div>
-        {formError ? (
-          <p role="alert" data-testid="secrets-form-error" className="text-label text-destructive-text">
-            {formError}
-          </p>
-        ) : null}
-        <div>
-          <Button type="submit" variant="primary" size="sm" disabled={saving || !name.trim() || !value}>
-            Add secret
-          </Button>
-        </div>
-      </form>
+        </form>
+      ) : null}
       <p role="status" data-testid="secrets-status" className="min-h-5 text-label text-muted-foreground">
         {status}
       </p>
+      {accessOf ? (
+        <Dialog open onOpenChange={(open) => (open ? undefined : setAccessOf(null))}>
+          <DialogContent className="max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Access to {accessOf}</DialogTitle>
+              <DialogDescription>Who holds which relation on this secret. Its value is never shown.</DialogDescription>
+            </DialogHeader>
+            <ResourceAccessPanel kind="secret" id={accessOf} />
+          </DialogContent>
+        </Dialog>
+      ) : null}
       {deleting ? (
         <ConfirmDialog
           title={`Delete ${deleting}?`}

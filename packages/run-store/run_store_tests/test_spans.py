@@ -197,6 +197,32 @@ def test_external_spans_are_grouped_by_trace_listed_and_tenant_scoped(store, ten
             conn.execute(text("DELETE FROM spans WHERE tenant_id = :t"), {"t": other})
 
 
+def test_list_is_limited_to_the_runs_of_the_visible_agents_and_workflows(engine, run_store, event_log, store, tenant):
+    """Per-resource access (IAM P2b): platform spans of a run the caller may read, and external spans (tenant data)."""
+    run_id = _finished_agent_run(engine, run_store, event_log, tenant)
+    store.replace_for_run(tenant, run_id, flat_spans(TraceReader(engine).read(tenant, run_id)))
+    store.insert_external(tenant, "key1", [_external("1" * 32, "a" * 16)])
+    with engine.connect() as conn:
+        agent_id = conn.execute(text("SELECT agent_id FROM runs WHERE id = :r"), {"r": str(run_id)}).scalar_one()
+    try:
+        def kinds(**visible):
+            return sorted({i["source"] for i in store.list(tenant, visible)[0]}), len(store.list(tenant, visible)[0])
+
+        assert kinds() == (["external", "platform"], 5)  # no restriction
+        assert kinds(visible_agent_ids=(str(agent_id),)) == (["external", "platform"], 5)
+        assert kinds(visible_agent_ids=(str(uuid4()),)) == (["external"], 1)  # another agent's run is hidden
+        assert kinds(visible_agent_ids=()) == (["external"], 1)  # fail closed: nothing readable
+        assert kinds(visible_workflow_ids=()) == (["external", "platform"], 5)  # an agent run is not a workflow's
+        # the histogram counts the same runs
+        now = datetime.now(timezone.utc)
+        start, end = now - timedelta(days=1), now + timedelta(days=1)
+        runs = lambda **v: sum(b["runs"] for b in store.runs_histogram(tenant, start, end, "day", v))  # noqa: E731
+        assert runs() == 1 and runs(visible_agent_ids=(str(agent_id),)) == 1 and runs(visible_agent_ids=()) == 0
+    finally:
+        with store.engine.begin() as conn:
+            conn.execute(text("DELETE FROM spans WHERE tenant_id = :t AND source = 'external'"), {"t": tenant})
+
+
 def test_external_run_id_is_stable_and_differs_per_tenant():
     from eap_run_store.spans import external_run_id
 

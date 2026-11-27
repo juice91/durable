@@ -60,6 +60,8 @@ export interface WorkingMemoryEditorProps {
   starter: string;
   /** Why edits would be refused (the API checks the latest published version), or null. */
   editBlocked?: string | null;
+  /** The caller may change the note (the server's decision on the agent). */
+  mayChange?: boolean;
   /** Bump to reload (a `memory_updated` event was seen). */
   refreshKey?: number;
   onDirtyChange?: (dirty: boolean) => void;
@@ -115,6 +117,7 @@ export function WorkingMemoryEditor({
   hint,
   compact = false,
   headingLevel = 3,
+  mayChange = true,
 }: WorkingMemoryEditorProps) {
   const [note, setNote] = useState<WorkingMemoryNote | null>(null);
   const [loading, setLoading] = useState(false);
@@ -284,7 +287,7 @@ export function WorkingMemoryEditor({
     <section data-testid="memory-working" aria-label="Working memory" className="min-w-0 space-y-2">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <Heading className={headingClass}>Working memory</Heading>
-        {target && !editing && !loading && !loadError ? (
+        {mayChange && target && !editing && !loading && !loadError ? (
           <div className="flex shrink-0 gap-1">
             <Button size="sm" onClick={startEdit} disabled={Boolean(editBlocked) || Boolean(mismatch)} data-testid={note ? "memory-working-edit" : "memory-working-create"}>
               {note ? "Edit" : "Create"}

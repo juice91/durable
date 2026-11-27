@@ -6,6 +6,7 @@ import { useAccount } from "@/components/account/useAccount";
 import { Badge } from "@/components/ui/Badge";
 import { accountLinks, formatUntil, roleMeaning, signInMethod } from "@/lib/account";
 import { actorLabel, EMPTY_AUDIT_FILTERS, listAudit, type AuditRow } from "@/lib/audit";
+import { PersonalApiKeys } from "./PersonalApiKeys";
 import { displayName, providerLabel } from "@/lib/iam";
 
 function Block({ id, testId, title, description, children }: { id: string; testId: string; title: string; description?: string; children: React.ReactNode }) {
@@ -71,7 +72,7 @@ function RecentActivity() {
   );
 }
 
-/** Settings → Profile: who you are, your roles, this session, the account pages and your recent activity. */
+/** Settings → Profile: who you are, your roles, this session, the account pages, your recent activity and your personal API keys. */
 export function ProfileSection() {
   const { me, picture, expiresAt } = useAccount();
   if (!me) return <p role="status" className="text-label text-muted-foreground">Loading your profile…</p>;
@@ -129,8 +130,7 @@ export function ProfileSection() {
         </Block>
       ) : null}
       <RecentActivity />
-      {/* SLOT "API keys": a later change adds personal API keys here. Renders nothing until then. */}
-      <div data-slot="profile-api-keys" data-testid="profile-api-keys-slot" />
+      <PersonalApiKeys me={me} />
     </div>
   );
 }

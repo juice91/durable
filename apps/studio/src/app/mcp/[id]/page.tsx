@@ -1,5 +1,6 @@
 "use client";
 
+import { usePermissions } from "@/lib/permissions";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -11,7 +12,10 @@ import { McpTestResult } from "@/components/mcp/McpTestResult";
 import { RuntimePanel } from "@/components/mcp/RuntimePanel";
 import { McpToolSheet } from "@/components/mcp/McpToolSheet";
 import { describeUsage, useMcpUsage } from "@/components/mcp/mcpUsage";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { ResourceAccessPanel } from "@/components/access/ResourceAccessPanel";
 import { PageHeader } from "@/components/frame/PageHeader";
+import { useAccessEnabled } from "@/lib/useIam";
 import { DataList } from "@/components/shared/DataList";
 import { EmptyState } from "@/components/shared/EmptyState";
 import { Badge } from "@/components/ui/Badge";
@@ -29,6 +33,9 @@ import {
 } from "@/lib/mcpServers";
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
+
+/** What "why can't I?" asks about on an MCP server page. */
+const MCP_ACTIONS = ["run", "edit", "archive"] as const;
 
 function errorMessage(reason: unknown, fallback: string): string {
   if (reason instanceof ApiError) return describeMcpApiMessage(reason.message);
@@ -54,6 +61,7 @@ function Section({ title, testId, actions, children }: { title: string; testId: 
  * the last test run here), the agents that use it, and Delete with those references listed.
  */
 export default function McpServerDetailPage() {
+  const accessEnabled = useAccessEnabled();
   const params = useParams();
   const router = useRouter();
   const id = typeof params.id === "string" ? params.id : "";
@@ -103,6 +111,9 @@ export default function McpServerDetailPage() {
       cancelled = true;
     };
   }, []);
+
+  const permissions = usePermissions("mcp_server", server?.id, ["edit", "archive", "run"]);
+  const mayEdit = permissions.can("edit");
 
   const withBusy = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -217,7 +228,7 @@ export default function McpServerDetailPage() {
         ]}
         documentTitle={server?.name}
         actions={
-          server ? (
+          server && permissions.can("archive") ? (
             <Button variant="ghost" className="text-destructive-text" disabled={busy} onClick={openDelete} data-testid="mcp-delete">
               Delete
             </Button>
@@ -233,27 +244,35 @@ export default function McpServerDetailPage() {
         ) : null}
         {!server && !loadError ? <p className="text-body text-muted-foreground" role="status">Loading MCP server…</p> : null}
 
+        {server ? <PermissionNotice kind="mcp_server" id={server.id} actions={MCP_ACTIONS} /> : null}
+
         {server ? (
           <Tabs defaultValue="overview" className="flex min-w-0 flex-col gap-6">
             <TabsList aria-label="MCP server sections">
               <TabsTrigger value="overview" data-testid="mcp-tab-overview">Overview</TabsTrigger>
               <TabsTrigger value="run" data-testid="mcp-tab-run">Run</TabsTrigger>
               {server.runtime === "managed" ? <TabsTrigger value="runtime" data-testid="mcp-tab-runtime">Runtime</TabsTrigger> : null}
+              {accessEnabled ? <TabsTrigger value="access" data-testid="mcp-tab-access">Access</TabsTrigger> : null}
             </TabsList>
+            {accessEnabled ? (
+              <TabsContent value="access">
+                <ResourceAccessPanel kind="mcp_server" id={server.id} />
+              </TabsContent>
+            ) : null}
             {server.runtime === "managed" ? (
               <TabsContent value="runtime">
-                <RuntimePanel serverId={server.id} enabled={server.enabled} onChanged={() => void load()} />
+                <RuntimePanel serverId={server.id} enabled={server.enabled} onChanged={() => void load()} mayEdit={mayEdit} />
               </TabsContent>
             ) : null}
             <TabsContent value="run">
-              <McpRunTab server={server} tools={tools} onLoadTools={() => void testServer(server)} loadingTools={busy} />
+              <McpRunTab server={server} tools={tools} onLoadTools={() => void testServer(server)} loadingTools={busy} mayLoad={mayEdit} mayRun={permissions.can("run")} />
             </TabsContent>
             <TabsContent value="overview" className="flex min-w-0 flex-col gap-8">
             <Section
               title="Connection"
               testId="mcp-connection"
               actions={
-                <>
+                !mayEdit ? undefined : <>
                   <Button size="sm" disabled={busy} onClick={() => void toggleEnabled(server)}>{server.enabled ? "Disable" : "Enable"}</Button>
                   <Button size="sm" disabled={busy} onClick={() => setEditing(true)}>Edit</Button>
                   <Button size="sm" variant="primary" disabled={busy} onClick={() => void testServer(server)}>Test connection</Button>
@@ -278,7 +297,7 @@ export default function McpServerDetailPage() {
                 {busy ? <p className="mt-3 text-caption text-muted-foreground" aria-live="polite">Working…</p> : null}
                 <ConflictNotice state={conflict} className="mt-3" onReload={(current) => current && setServer(current)} />
                 {actionError ? <p role="alert" data-testid="mcp-action-error" className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
-                {test ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={test} showTools={false} onRetry={() => void testServer(server)} retrying={busy} /></div> : null}
+                {test ? <div className="mt-4 border-t border-border pt-4"><McpTestResult result={test} showTools={false} onRetry={mayEdit ? () => void testServer(server) : undefined} retrying={busy} /></div> : null}
               </div>
             </Section>
 
@@ -309,7 +328,7 @@ export default function McpServerDetailPage() {
                       : {
                           title: "Test the connection to list its tools",
                           description: "Tools are discovered from the server when you test it.",
-                          action: <Button variant="primary" disabled={busy} onClick={() => void testServer(server)}>Test connection</Button>,
+                          action: mayEdit ? <Button variant="primary" disabled={busy} onClick={() => void testServer(server)}>Test connection</Button> : undefined,
                         }
                 }
               />

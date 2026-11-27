@@ -1,6 +1,6 @@
 # eap-iam
 
-The core interfaces of the pluggable IAM design (`docs/superpowers/specs/2026-11-22-iam-design.md`): the
+The core interfaces of the pluggable IAM design (an internal design note): the
 `IdentityProvider`, `PolicyEngine` and `MembershipSource` Protocols, the `Principal`, `ResourceRef`, `Decision` and
 `IdFilter` types, the ordered provider chain, plug-in discovery over the entry-point groups `eap.iam.identity`,
 `eap.iam.policy` and `eap.iam.membership`, and the start-up rules (`require_iam_configured`).

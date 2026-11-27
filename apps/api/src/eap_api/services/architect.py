@@ -36,6 +36,8 @@ from sqlalchemy.exc import IntegrityError
 from eap_api import model_discovery
 from eap_api.ports import RunStarter, RunWaitTimeout
 from eap_api.schemas import RunCreate
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict, InvalidInput, NotFound
 from eap_api.services.mcp_connection import McpConnectionService
 from eap_api.services.model_catalog import model_items
@@ -443,14 +445,21 @@ def _no_versions() -> DefinitionError:
 # -------------------------------------------------------------------------------------- service
 
 
-class ArchitectService:
+class ArchitectService(AccessBound):
     """The Architect's operations. Collaborators come through the constructor: the engine (the Architect's
     definitions are written in one transaction), the knowledge store (the allowlist's knowledge bases), the
-    run starter (drafter runs) and the MCP connection service (live tool discovery for the allowlist)."""
+    run starter (drafter runs) and the MCP connection service (live tool discovery for the allowlist).
+
+    Per-resource authorisation (IAM design 8): drafting is the right to create an agent or workflow (editors); saving a
+    definition is `create` (a new one, registered to its creator) or `edit` of the existing one, and publishing it
+    `publish` on it; the built-in agents' model is a tenant setting (admin). The drafter runs the service starts itself
+    are the platform's own and are not checked."""
 
     def __init__(
-        self, engine: Engine, knowledge: KnowledgeStore, runs: RunStarter, mcp: McpConnectionService | None = None
+        self, engine: Engine, knowledge: KnowledgeStore, runs: RunStarter, mcp: McpConnectionService | None = None,
+        access: Access | None = None,
     ) -> None:
+        self._access = access  # None: no caller to check
         self.engine = engine
         self.knowledge = knowledge
         self.runs = runs
@@ -460,6 +469,7 @@ class ArchitectService:
 
     def ensure_seed(self, tenant_id: str, user_id: str) -> tuple[dict[str, Any], bool]:
         """The tenant's built-in agents (see the module function `ensure_seed`)."""
+        acl.require(self._access, "create", "agent", None)
         return ensure_seed(self.engine, tenant_id, user_id)
 
     def seed_model(self) -> str | None:
@@ -489,6 +499,7 @@ class ArchitectService:
         """Set the model of the tenant's three built-in agents (and the helpers that exist): each row's draft
         gets the new model and is published as the user (`created_via` "architect-page"), in one transaction.
         A row whose draft already equals its latest version after the change publishes nothing."""
+        acl.require(self._access, "manage_settings", "tenant", None)
         if model_id not in {i["id"] for i in model_items(ModelPolicy.from_env()) if not i["wildcard"]}:
             raise InvalidInput(f"The model {model_id!r} is not available.", code="model_not_allowed")
         provider, _, name = model_id.partition(":")
@@ -517,6 +528,7 @@ class ArchitectService:
 
     def state(self, tenant_id: str) -> dict[str, Any]:
         """Seed state plus the agents and workflows the Architect made (see the route's docstring)."""
+        acl.require(self._access, "read", "tenant", None)
         with self.engine.connect() as conn:
             built = {r.slug: r for r in conn.execute(
                 text("SELECT id, slug, draft_spec FROM agents WHERE tenant_id = :t AND builtin AND slug IN (:a, :d, :w)"),
@@ -558,6 +570,7 @@ class ArchitectService:
         """The tenant's allowlist: what a created agent may use. `mcp_servers` limits the live MCP discovery
         to those server names (a save only needs the servers its spec names); None discovers every enabled one.
         Called from a worker thread (a sync route), never from the event loop."""
+        acl.require(self._access, "read", "tenant", None)
         allowed = allowed_tool_ids()
         tools = tuple(
             offered for decl in TOOL_DECLARATIONS.values()
@@ -629,6 +642,7 @@ class ArchitectService:
         self, tenant_id: str, user_id: str, description: str, current: ArchitectAgentSpec | None
     ) -> dict[str, Any]:
         """Run the drafter once and wait for its structured answer, cut down to the allowlist."""
+        acl.require(self._access, "create", "agent", None)
         ids, _ = self.ensure_seed(tenant_id, user_id)
         allowlist = self.build_allowlist(tenant_id)
         parsed, assumptions, raw, run_id, model = self.run_drafter(
@@ -656,6 +670,7 @@ class ArchitectService:
         self, tenant_id: str, user_id: str, description: str, current: ArchitectWorkflowSpec | None
     ) -> dict[str, Any]:
         """`draft_agent` for a workflow (the built-in workflow drafter)."""
+        acl.require(self._access, "create", "workflow", None)
         ids, _ = self.ensure_seed(tenant_id, user_id)
         allowlist = self.build_allowlist(tenant_id, mcp_servers=set())
         parsed, assumptions, raw, run_id, model = self.run_drafter(
@@ -732,6 +747,12 @@ class ArchitectService:
                 if slug in RESERVED_AGENT_IDS:
                     raise InvalidInput(f"{slug!r} is a built-in id; choose another id.", code="reserved_id")
                 row = conn.execute(kind.by_slug, {"t": tenant_id, "s": slug}).mappings().first()
+            if row is None:
+                acl.require(self._access, "create", kind.label, None)
+            else:
+                acl.require(self._access, "edit", kind.label, str(row["id"]))
+                if publish:
+                    acl.require(self._access, "publish", kind.label, str(row["id"]))
             if row is not None:
                 if row["builtin"]:
                     raise InvalidInput(f"{slug!r} is a built-in agent; it is not edited here.", code="reserved_id")
@@ -745,6 +766,7 @@ class ArchitectService:
                     )
             elif expected_version is not None:
                 raise _no_versions()
+            created = row is None
             params = {"t": tenant_id, "name": name, "spec": json.dumps(spec_json)}
             if row is not None:
                 row_id = str(row["id"])
@@ -762,6 +784,8 @@ class ArchitectService:
                 result = op(conn, tenant_id, row_id, created_by=user_id, created_via=PAGE_MARKER)
                 warnings = result.warnings
             version = conn.execute(kind.latest, {"d": row_id, "t": tenant_id}).scalar()
+        if created:
+            acl.register(self._access, kind.label, row_id)  # before the response: the creator owns what it made
         return {
             "id": slug, f"{kind.label}_id": row_id, "version": version, "published": bool(publish),
             "warnings": warnings,

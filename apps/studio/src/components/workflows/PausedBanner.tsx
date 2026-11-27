@@ -1,5 +1,7 @@
 "use client";
 
+import { usePermissions } from "@/lib/permissions";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Badge } from "@/components/ui/Badge";
@@ -14,6 +16,8 @@ export function pausedAfter(pauseStepId: string): string {
 }
 
 interface PausedBannerProps {
+  /** The run's workflow: `approve` on it decides who may continue or stop. */
+  workflowId?: string | null;
   runId: string;
   /** The synthetic waiting step id, `<step>_pause`. */
   stepId: string;
@@ -22,11 +26,15 @@ interface PausedBannerProps {
   onDecided?: () => void;
 }
 
+const APPROVE_ACTION = ["approve"] as const;
+
 /**
  * A step-by-step run waiting after a step: Continue approves the pause step, Stop rejects it (the
  * run fails with cancelled_by_user) after a confirm. The step's output is open beside it.
  */
-export function PausedBanner({ runId, stepId, deadline, onRefresh, onDecided }: PausedBannerProps) {
+export function PausedBanner({ runId, stepId, deadline, onRefresh, onDecided, workflowId = null }: PausedBannerProps) {
+  const permissions = usePermissions("workflow", workflowId ?? undefined, APPROVE_ACTION);
+  const mayDecide = !workflowId || permissions.can("approve");
   const step = pausedAfter(stepId);
   const [busy, setBusy] = useState<null | "approve" | "reject">(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,14 +82,18 @@ export function PausedBanner({ runId, stepId, deadline, onRefresh, onDecided }: 
       </div>
       <p className="text-caption text-muted-foreground">The output of {step} is open in the step panel. Continue runs the next step.</p>
       {error ? <p role="alert" data-testid="workflow-paused-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">{error}</p> : null}
-      <div className="flex flex-wrap gap-2">
-        <button type="button" onClick={() => void decide("approve")} disabled={busy !== null} aria-busy={busy === "approve"} className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
-          Continue
-        </button>
-        <button type="button" onClick={() => setConfirmStop(true)} disabled={busy !== null} className="rounded-md border border-destructive px-4 py-1.5 text-sm font-medium text-destructive-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
-          Stop
-        </button>
-      </div>
+      {mayDecide ? (
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => void decide("approve")} disabled={busy !== null} aria-busy={busy === "approve"} className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
+            Continue
+          </button>
+          <button type="button" onClick={() => setConfirmStop(true)} disabled={busy !== null} className="rounded-md border border-destructive px-4 py-1.5 text-sm font-medium text-destructive-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
+            Stop
+          </button>
+        </div>
+      ) : workflowId ? (
+        <PermissionNotice kind="workflow" id={workflowId} actions={APPROVE_ACTION} />
+      ) : null}
       {confirmStop ? (
         <ConfirmDialog
           title="Stop this run?"

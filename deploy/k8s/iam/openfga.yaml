@@ -26,7 +26,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: openfga}
       # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
-      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      # at the next deploy, under the drain. Placeholder text is harmless without up.sh.
       annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_OPENFGA@@"}
     spec:
       # Service-link env vars (OPENFGA_PORT=tcp://ip:PORT) would be read by the app as configuration and crash it.

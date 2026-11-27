@@ -1,9 +1,12 @@
 "use client";
 
+import { useKnowledgePermissions } from "@/components/knowledge/useKnowledgePermissions";
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { RefreshCw, Trash2, Upload } from "lucide-react";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { ResourceAccessPanel } from "@/components/access/ResourceAccessPanel";
 import { PageHeader } from "@/components/frame/PageHeader";
 import { DocumentSheet } from "@/components/knowledge/DocumentSheet";
 import { DocumentsTab } from "@/components/knowledge/DocumentsTab";
@@ -45,6 +48,10 @@ import {
   KNOWLEDGE_TRACE_TAB_PARAM,
   parseKnowledgeTab,
 } from "@/lib/routes/knowledge";
+import { useAccessEnabled } from "@/lib/useIam";
+
+/** What "why can't I?" asks about on a knowledge base page. */
+const KNOWLEDGE_ACTIONS = ["run", "edit", "archive"] as const;
 
 function isReindexInput(input: string): boolean {
   try {
@@ -61,6 +68,7 @@ function KnowledgeBaseDetailView() {
   const tab = parseKnowledgeTab(searchParams?.get(KNOWLEDGE_TAB_PARAM));
   const id = typeof params.id === "string" ? params.id : "";
   const docSheet = useUrlSheet(KNOWLEDGE_DOC_PARAM, { history: "push" });
+  const accessEnabled = useAccessEnabled();
 
   const [kb, setKb] = useState<KnowledgeBaseDetail | null>(null);
   const [notFound, setNotFound] = useState(false);
@@ -74,6 +82,8 @@ function KnowledgeBaseDetailView() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [runsRefresh, setRunsRefresh] = useState(0);
   const kbSeq = useRef(0);
+  const permissions = useKnowledgePermissions(id);
+  const mayEdit = permissions.can("edit");
 
   const loadKb = useCallback(async () => {
     if (!id) return;
@@ -219,25 +229,31 @@ function KnowledgeBaseDetailView() {
           },
         ]}
         documentTitle={kb?.name}
-        tabs={knowledgeTabs(id, tab)}
+        tabs={knowledgeTabs(id, tab, accessEnabled)}
         tabsLabel="Knowledge base sections"
         actions={
           kb ? (
             <>
-              <Button variant="primary" onClick={() => setUploadOpen(true)} data-testid="knowledge-upload">
-                <Upload strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-                Upload
-              </Button>
-              <Button onClick={() => setReindexOpen(true)} disabled={kb.status === "reindexing"} data-testid="knowledge-reindex">
-                <RefreshCw strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-                <span className="hidden sm:inline">Reindex</span>
-                <span className="sr-only sm:hidden">Reindex</span>
-              </Button>
-              <Button variant="ghost" className="text-destructive-text" onClick={() => setDeleteOpen(true)} data-testid="knowledge-delete">
-                <Trash2 strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-                <span className="hidden sm:inline">Delete</span>
-                <span className="sr-only sm:hidden">Delete</span>
-              </Button>
+              {mayEdit ? (
+                <>
+                  <Button variant="primary" onClick={() => setUploadOpen(true)} data-testid="knowledge-upload">
+                    <Upload strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                    Upload
+                  </Button>
+                  <Button onClick={() => setReindexOpen(true)} disabled={kb.status === "reindexing"} data-testid="knowledge-reindex">
+                    <RefreshCw strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                    <span className="hidden sm:inline">Reindex</span>
+                    <span className="sr-only sm:hidden">Reindex</span>
+                  </Button>
+                </>
+              ) : null}
+              {permissions.can("archive") ? (
+                <Button variant="ghost" className="text-destructive-text" onClick={() => setDeleteOpen(true)} data-testid="knowledge-delete">
+                  <Trash2 strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                  <span className="hidden sm:inline">Delete</span>
+                  <span className="sr-only sm:hidden">Delete</span>
+                </Button>
+              ) : null}
             </>
           ) : null
         }
@@ -254,6 +270,7 @@ function KnowledgeBaseDetailView() {
         {kb ? (
           <>
             {kb.description ? <p className="text-body text-muted-foreground">{kb.description}</p> : null}
+            <PermissionNotice kind="knowledge_base" id={kb.id} actions={KNOWLEDGE_ACTIONS} />
             <dl data-testid="knowledge-summary" className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-3">
               <div className="min-w-0 rounded-lg border border-border bg-surface p-3">
                 <dt className="text-caption text-muted-foreground">Embedding model</dt>
@@ -296,10 +313,10 @@ function KnowledgeBaseDetailView() {
                     : <>The reindex with <span className="font-mono">{kb.pending_embedding_model}</span> failed: {describeIngestError(kb.error)}</>}
                 </span>
                 {reindexRunId ? <TraceLink runId={reindexRunId} className="text-label text-info-text hover:underline" data-testid="knowledge-reindex-trace">Trace</TraceLink> : null}
-                {kb.status === "reindex_failed" ? (
+                {mayEdit && kb.status === "reindex_failed" ? (
                   <Button size="sm" onClick={() => void retryReindex()} disabled={reindexBusy} data-testid="knowledge-reindex-retry">Retry reindex</Button>
                 ) : null}
-                <Button size="sm" variant="ghost" onClick={() => void cancelPendingReindex()} disabled={reindexBusy} data-testid="knowledge-reindex-cancel">Cancel reindex</Button>
+                {mayEdit ? <Button size="sm" variant="ghost" onClick={() => void cancelPendingReindex()} disabled={reindexBusy} data-testid="knowledge-reindex-cancel">Cancel reindex</Button> : null}
               </div>
             ) : null}
             {actionError ? <p role="alert" data-testid="knowledge-action-error" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{actionError}</p> : null}
@@ -323,6 +340,7 @@ function KnowledgeBaseDetailView() {
             {tab === "search" ? <SearchTab kbId={kb.id} /> : null}
             {tab === "sources" ? <SourcesTab kbId={kb.id} kbName={kb.name} /> : null}
             {tab === "runs" ? <IngestRunsTab kbId={kb.id} documents={docs.documents} refreshKey={runsRefresh} /> : null}
+            {tab === "access" ? <ResourceAccessPanel kind="knowledge_base" id={kb.id} /> : null}
           </>
         ) : null}
       </div>

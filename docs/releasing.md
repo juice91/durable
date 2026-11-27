@@ -12,7 +12,7 @@ One platform version, [SemVer](https://semver.org/) `MAJOR.MINOR.PATCH`. The roo
 source of truth. `scripts/release/bump.py` writes the same version into every workspace `pyproject.toml` (apps,
 packages, plugins; spikes keep their own), `apps/studio/package.json` and the package entries of `uv.lock`, and CI
 runs `bump.py --check`, which fails when any of them disagrees. Images report `platform_version` as
-`<version>+<commit>`; the `+<commit>` part is added at build time and is never part of the file version.
+`<version>+<commit>`; the `+<commit>` part is added at build time and is never part of the file version. New workspace members start at the current platform version, not `0.1.0`.
 
 The platform is **0.x** until its HTTP API, the stored definitions and the plug-in interfaces are declared stable.
 Before 1.0:
@@ -85,7 +85,8 @@ carries the version and `CHANGELOG.md`, and leaves out `CHANGELOG.internal.md` a
 replacement rules and its residual-string scan (the same scan it runs on the whole history). **A hit blocks the
 export**, so the notes of a public release never carry an internal name, host or address: GitHub keeps edit history
 for releases, so an internal string must never be published and removed afterwards. Pull request links are
-removed from the public notes (they point at private pull requests).
+removed from the public notes (they point at private pull requests). A release the public repository skips (it has no
+tag there) keeps its section, and the export re-points the compare links so that none needs the missing tag.
 
 If the export is blocked, fix the offending pull request title (rename the PR, then edit its line in
 `CHANGELOG.md`) or add a replacement rule, and run the export again.

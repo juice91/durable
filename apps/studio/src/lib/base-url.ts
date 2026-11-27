@@ -1,7 +1,9 @@
+import type { StudioAuthConfig } from "./auth/config";
+
 /**
  * Where the browser reaches the API. Unset keeps the local-development default; an EMPTY value means
  * same-origin (requests go to `/api/v1/...` on the origin that served Studio), which is how the public
- * Cloudflare Tunnel hostname and the Next.js `/api/:path*` rewrite (next.config.ts) work.
+ * hostname behind an ingress and the Next.js `/api/:path*` rewrite (next.config.ts) work.
  *
  * Exception, chosen at RUNTIME: when Studio is served from a loopback origin (the SSH tunnel to the studio pod,
  * `http://127.0.0.1:13000`) the Next rewrite would reach the API from the studio pod, which the API does not trust.
@@ -18,8 +20,10 @@ export interface RuntimeConfig {
   loopbackApiUrl?: string;
   /** The dev bearer for a loopback page, published at runtime by the Studio server (see credentials.ts). */
   devBearer?: string;
-  /** The OIDC settings when the server runs `EAP_STUDIO_AUTH=zitadel` (lib/auth/config.ts); absent for `access`. */
-  auth?: { mode: "zitadel"; issuer: string; clientId: string; projectId: string };
+  /** How Studio signs in under `EAP_STUDIO_AUTH=zitadel` or `local` (lib/auth/config.ts); absent otherwise. */
+  auth?: StudioAuthConfig;
+  /** `EAP_STUDIO_AUTH=local`: the /setup page works even where another credential wins (the loopback page). */
+  localSetup?: boolean;
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost"]);

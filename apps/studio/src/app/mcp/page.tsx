@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan, usePermissions } from "@/lib/permissions";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -36,6 +38,28 @@ function errorMessage(reason: unknown, fallback: string): string {
 const SERVER_ROW = { testId: "mcp-server-row" } as const;
 
 const TRANSPORT_LABEL: Record<McpServer["transport"], string> = { streamable_http: "Streamable HTTP" };
+
+/** What "why can't I?" asks about on the list. */
+const CREATE_ACTIONS = ["create"] as const;
+
+/** One server's actions in the list: the ones the caller may take on it. */
+function ServerRowActions({ server, busy, onTest, onToggle, onEdit, onDelete }: { server: McpServer; busy: boolean; onTest: () => void; onToggle: () => void; onEdit: () => void; onDelete: () => void }) {
+  const permissions = usePermissions("mcp_server", server.id, ["edit", "archive"]);
+  return (
+    <>
+      {permissions.can("edit") ? (
+        <>
+          <Button size="sm" disabled={busy} onClick={onTest}>Test connection</Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onToggle}>{server.enabled ? "Disable" : "Enable"}</Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={onEdit}>Edit</Button>
+        </>
+      ) : null}
+      {permissions.can("archive") ? (
+        <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy} onClick={onDelete}>Delete</Button>
+      ) : null}
+    </>
+  );
+}
 
 /**
  * MCP Servers: the remote servers Studio's agents CONNECT to (client registrations), not servers we
@@ -80,7 +104,8 @@ export default function McpServersPage() {
   const openCreate = useCallback(() => setForm({ mode: "create" }), []);
   // `c` goes through the global shortcut provider (one listener, one guard), only while no dialog is open.
   const openAddMenu = useCallback(() => setAddMenuOpen(true), []);
-  useCreateAction(form === null && confirmDelete === null ? openAddMenu : null);
+  const mayCreate = useCan("mcp_server", null, "create");
+  useCreateAction(mayCreate && form === null && confirmDelete === null ? openAddMenu : null);
   const openCatalog = useCallback(() => router.push(routes.mcpBrowse()), [router]);
 
   const replaceServer = (server: McpServer) =>
@@ -270,10 +295,14 @@ export default function McpServersPage() {
       cell: (server) => (
         <div className="flex items-center justify-end gap-1" data-testid="mcp-row-actions">
           {busy[server.id] ? <span className="text-caption text-muted-foreground" aria-live="polite">Working…</span> : null}
-          <Button size="sm" disabled={busy[server.id]} onClick={() => void testServer(server)}>Test connection</Button>
-          <Button size="sm" variant="ghost" disabled={busy[server.id]} onClick={() => void toggleEnabled(server)}>{server.enabled ? "Disable" : "Enable"}</Button>
-          <Button size="sm" variant="ghost" disabled={busy[server.id]} onClick={() => setForm({ mode: "edit", server })}>Edit</Button>
-          <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy[server.id]} onClick={() => openDeleteDialog(server)}>Delete</Button>
+          <ServerRowActions
+            server={server}
+            busy={busy[server.id]}
+            onTest={() => void testServer(server)}
+            onToggle={() => void toggleEnabled(server)}
+            onEdit={() => setForm({ mode: "edit", server })}
+            onDelete={() => openDeleteDialog(server)}
+          />
         </div>
       ),
     },
@@ -286,24 +315,27 @@ export default function McpServersPage() {
         titleRef={headingRef}
         titleProps={{ tabIndex: -1, className: "focus:outline-none" }}
         actions={
-          <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <Button variant="primary" aria-keyshortcuts="c" data-testid="mcp-add-server">
-                <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-                Add server
-                <ChevronDown strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-                <Kbd className="hidden md:inline-flex">C</Kbd>
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={openCatalog}>From the catalog</DropdownMenuItem>
-              <DropdownMenuItem onSelect={openCreate}>Remote server by URL</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          mayCreate ? (
+            <DropdownMenu open={addMenuOpen} onOpenChange={setAddMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="primary" aria-keyshortcuts="c" data-testid="mcp-add-server">
+                  <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                  Add server
+                  <ChevronDown strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+                  <Kbd className="hidden md:inline-flex">C</Kbd>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={openCatalog}>From the catalog</DropdownMenuItem>
+                <DropdownMenuItem onSelect={openCreate}>Remote server by URL</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null
         }
       />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
         <McpSectionTabs current="servers" />
+        {mayCreate ? null : <PermissionNotice kind="mcp_server" id={null} actions={CREATE_ACTIONS} />}
         <p className="text-body text-muted-foreground">MCP servers that agents connect to: remote endpoints you register, and servers run here from the catalog. Test one and see the tools it offers.</p>
 
         {notice ? <p role="status" data-testid="mcp-notice" className="rounded-md border border-border bg-muted/40 p-3 text-body text-foreground">{notice}</p> : null}
@@ -329,7 +361,7 @@ export default function McpServersPage() {
           onRetry={() => void load()}
           empty={{
             title: "No servers yet. Install one from the Catalog or register a remote server.",
-            action: (
+            action: !mayCreate ? undefined : (
               <div className="flex flex-wrap items-center justify-center gap-2">
                 <Button variant="primary" asChild><Link href={routes.mcpBrowse()}>Install from the Catalog</Link></Button>
                 <Button onClick={openCreate}>Register a remote server</Button>

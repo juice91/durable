@@ -1,5 +1,6 @@
 "use client";
 
+import { ApiError } from "@/lib/api";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { MoreHorizontal, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -55,6 +56,8 @@ function summary(conversation: Conversation): string {
 }
 
 export interface ConversationRailProps {
+  /** The caller may start, rename, clone and delete conversations of this agent. */
+  mayChange?: boolean;
   /** The selected agent; the rail lists its conversations only. Empty: nothing to list. */
   agentId: string;
   /** The conversation shown in the thread, highlighted and marked aria-current. */
@@ -78,6 +81,7 @@ export interface ConversationRailProps {
  * also clones the conversation (its finished turns, as a new thread) and deletes it (confirmed; RM.18).
  */
 export function ConversationRail({
+  mayChange = true,
   agentId,
   selectedId,
   refreshKey = 0,
@@ -245,8 +249,9 @@ export function ConversationRail({
       setEditingId(null);
       setRenameError(null);
       onRenamed?.(renamed);
-    } catch {
-      setRenameError("Failed to rename the conversation.");
+    } catch (reason) {
+      // A refusal says why; anything else keeps the short message.
+      setRenameError(reason instanceof ApiError && reason.status === 403 ? reason.message : "Failed to rename the conversation.");
     } finally {
       savingRef.current = false;
     }
@@ -310,10 +315,12 @@ export function ConversationRail({
       aria-label="Conversations"
       className="flex min-h-0 w-full min-w-0 flex-1 flex-col"
     >
-      <Button ref={newButtonRef} onClick={onNew} disabled={!agentId} className="mb-2 w-full justify-start">
-        <Plus aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} />
-        New conversation
-      </Button>
+      {mayChange ? (
+        <Button ref={newButtonRef} onClick={onNew} disabled={!agentId} className="mb-2 w-full justify-start">
+          <Plus aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} />
+          New conversation
+        </Button>
+      ) : null}
       <h2 className="mb-1 px-2 text-caption font-semibold uppercase tracking-wide text-muted-foreground">Recent</h2>
 
       {error && (
@@ -388,43 +395,47 @@ export function ConversationRail({
                   <span className={cn("block truncate text-label text-foreground", selected && "font-semibold")}>{label}</span>
                   <span className="block truncate text-caption text-muted-foreground">{summary(conversation)}</span>
                 </button>
-                <button
-                  type="button"
-                  aria-label={`Rename ${label}`}
-                  onClick={() => startRename(conversation)}
-                  // Full-strength muted text (>= 4.5:1 on every surface in both themes); no opacity, which drops it under.
-                  className={cn("shrink-0 rounded-md px-2 py-1.5 text-caption text-muted-foreground hover:text-foreground", focusRing)}
-                >
-                  Rename
-                </button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
+                {mayChange ? (
+                  <>
                     <button
                       type="button"
-                      aria-label={`Actions for ${label}`}
-                      data-testid="conversation-actions"
-                      className={cn("inline-flex size-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground hover:bg-fill-hover hover:text-foreground", focusRing)}
+                      aria-label={`Rename ${label}`}
+                      onClick={() => startRename(conversation)}
+                      // Full-strength muted text (>= 4.5:1 on every surface in both themes); no opacity, which drops it under.
+                      className={cn("shrink-0 rounded-md px-2 py-1.5 text-caption text-muted-foreground hover:text-foreground", focusRing)}
                     >
-                      <MoreHorizontal aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} className="size-icon" />
+                      Rename
                     </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onSelect={() => startRename(conversation)}>Rename</DropdownMenuItem>
-                    <DropdownMenuItem data-testid="conversation-clone" disabled={cloningId !== null} onSelect={() => void startClone(conversation)}>
-                      Clone conversation
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      destructive
-                      data-testid="conversation-delete"
-                      onSelect={() => {
-                        setDeleteError(null);
-                        setDeleting(conversation);
-                      }}
-                    >
-                      Delete conversation
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={`Actions for ${label}`}
+                          data-testid="conversation-actions"
+                          className={cn("inline-flex size-7 shrink-0 items-center justify-center self-center rounded-md text-muted-foreground hover:bg-fill-hover hover:text-foreground", focusRing)}
+                        >
+                          <MoreHorizontal aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} className="size-icon" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onSelect={() => startRename(conversation)}>Rename</DropdownMenuItem>
+                        <DropdownMenuItem data-testid="conversation-clone" disabled={cloningId !== null} onSelect={() => void startClone(conversation)}>
+                          Clone conversation
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          destructive
+                          data-testid="conversation-delete"
+                          onSelect={() => {
+                            setDeleteError(null);
+                            setDeleting(conversation);
+                          }}
+                        >
+                          Delete conversation
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </>
+                ) : null}
               </li>
             );
           })}

@@ -61,3 +61,11 @@ paths = [
   '''packages/agent-runtime/runtime_tests/test_side_effects\.py''',
   '''packages/shared-schemas/tests/test_system_context\.py''',
 ]
+
+[[allowlists]]
+description = "Fake keys in tests: made-up 'pos_' key prefixes used as principal ids (test_integration.py) and a filler API key used to test that a new key is shown once (ExternalAccessPage.test.tsx)."
+targetRules = ["generic-api-key"]
+paths = [
+  '''plugins/iam-openfga/iam_openfga_tests/test_integration\.py''',
+  '''apps/studio/src/components/externalAccess/ExternalAccessPage\.test\.tsx''',
+]

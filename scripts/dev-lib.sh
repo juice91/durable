@@ -23,6 +23,59 @@ ensure_env() {
     export EAP_LOKI_URL="${EAP_LOKI_URL:-http://127.0.0.1:3100}"
 }
 
+# The built-in admin account in development (docs/admin-account.md), when EAP_IAM_IDENTITY lists localadmin: a signing
+# key is generated once into the ignored .dev/ directory unless one is set, and Studio signs in with it. The shared
+# functions are loaded only then, so the other helpers here need nothing outside scripts/.
+load_local_admin() {
+    # shellcheck source-path=SCRIPTDIR source=../deploy/scripts/local-admin.sh
+    source "${REPO_ROOT}/deploy/scripts/local-admin.sh"
+}
+
+ensure_local_admin_env() {
+    [[ ",${EAP_IAM_IDENTITY:-}," == *localadmin* ]] || return 0
+    load_local_admin
+    if [[ -z "${EAP_LOCAL_AUTH_SIGNING_KEY:-}" ]]; then
+        local key_file="${DEV_DIR}/local-auth-signing-key"
+        if [[ ! -s "$key_file" ]]; then
+            mkdir -p "$DEV_DIR"
+            (umask 077 && local_admin_new_key >"$key_file")
+            echo "[dev-up] Generated a sign-in signing key in .dev/local-auth-signing-key"
+        fi
+        EAP_LOCAL_AUTH_SIGNING_KEY=$(<"$key_file")
+        export EAP_LOCAL_AUTH_SIGNING_KEY
+    fi
+    export EAP_IAM_MEMBERSHIP="${EAP_IAM_MEMBERSHIP:-localadmin}"
+    export EAP_STUDIO_AUTH="${EAP_STUDIO_AUTH:-local}"
+}
+
+# With no sign-in method chosen (no EAP_STUDIO_AUTH) and an API that accepts the dev bearer, Studio on a loopback page
+# uses that bearer, so a clean checkout runs without any setting, whether or not it has apps/studio/.env.development.
+# It is no credential: the API takes it in dev mode and from a loopback peer only (docs/iam.md). Set
+# EAP_STUDIO_LOOPBACK_DEV_BEARER to another one, or to nothing to turn this off.
+ensure_studio_dev_env() {
+    [[ "${EAP_AUTH_MODE:-}" == dev && -z "${EAP_STUDIO_AUTH:-}" ]] || return 0
+    [[ ",${EAP_IAM_IDENTITY:-devloopback}," == *,devloopback,* ]] || return 0
+    export EAP_STUDIO_LOOPBACK_DEV_BEARER="${EAP_STUDIO_LOOPBACK_DEV_BEARER-Bearer dev:acme:alice}"
+}
+
+# The end of dev-up: how to create the admin account, while there is none.
+print_dev_setup() {
+    [[ ",${EAP_IAM_IDENTITY:-}," == *localadmin* ]] || return 0
+    load_local_admin
+    local url="http://localhost:3000" output status=0 code
+    output=$(cd "$REPO_ROOT" && uv run python -m eap_iam_localadmin setup-code 2>/dev/null) || status=$?
+    if ((status == 3)); then
+        echo "[dev-up] The admin account exists: sign in at ${url} (forgotten password: uv run python -m eap_iam_localadmin reset-password, with EAP_DATABASE_URL set)"
+        return 0
+    fi
+    code=$(local_admin_parse_code "$output")
+    if [[ -z "$code" ]]; then
+        echo "[dev-up] Could not make a setup code; see ${LOG_DIR}/api.log" >&2
+        return 0
+    fi
+    local_admin_setup_block "$url" "$code" "bash scripts/dev-up.sh api"
+}
+
 # Ensure directories exist
 ensure_dirs() {
     mkdir -p "$RUN_DIR" "$LOG_DIR"

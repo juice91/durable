@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-iam-openfga"
-version = "0.3.0"
+version = "0.5.0"
 description = "IAM policy plug-in (enterprise): OpenFGA as the policy engine, the authorization model, bootstrap, reconcile and backfill"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -1,5 +1,6 @@
 "use client";
 
+import { usePermissions } from "@/lib/permissions";
 import React from "react";
 import Link from "next/link";
 import type { AgentSpec } from "@/lib/api";
@@ -56,6 +57,9 @@ export interface MemoryInspectorProps {
   draftStore?: WorkingMemoryDraftStore;
 }
 
+/** What the inspector asks about. */
+const NOTE_ACTIONS = ["run", "edit"] as const;
+
 /**
  * The memory card's expanded view for the open conversation: working memory (view and edit), the
  * observations (delete newest or all), what recall brought into the last turn, and "Memory
@@ -63,6 +67,8 @@ export interface MemoryInspectorProps {
  */
 export function MemoryInspector({ agentId, conversationId, resourceId, spec, publishedSpec, activity, draftStore }: MemoryInspectorProps) {
   const memory = memoryOf(spec);
+  // A conversation's notes are changed with `run` on its agent, a user's notes with `edit`.
+  const permissions = usePermissions("agent", agentId, NOTE_ACTIONS);
   if (!memory) return null;
   if (!conversationId) {
     return (
@@ -88,6 +94,7 @@ export function MemoryInspector({ agentId, conversationId, resourceId, spec, pub
         <WorkingMemoryEditor
           target={target}
           unavailable={unavailable}
+          mayChange={permissions.can(scope === "resource" ? "edit" : "run")}
           format={workingFormat(shape)}
           starter={workingStarter(shape)}
           editBlocked={editBlockedReason(publishedSpec, scope)}
@@ -108,7 +115,7 @@ export function MemoryInspector({ agentId, conversationId, resourceId, spec, pub
           }
         />
       ) : null}
-      {memory.observational ? <ObservationsList conversationId={conversationId} refreshKey={activity.revision} /> : null}
+      {memory.observational ? <ObservationsList conversationId={conversationId} refreshKey={activity.revision} mayDelete={permissions.can("run")} /> : null}
       {memory.semantic_recall ? (
         <section data-testid="memory-recall" aria-label="Recall in the last turn" className="min-w-0 space-y-1">
           <h3 className="text-label font-semibold text-foreground">Recall (last turn)</h3>

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_run_store.definition_errors import DefinitionNotFound
 from eap_run_store.mcp_catalog import MAX_SEARCH_LIMIT, CatalogStore  # noqa: F401  (MAX_SEARCH_LIMIT: the route's bound)
 from eap_schemas import CatalogEntry
@@ -34,21 +36,28 @@ def entry_json(entry: CatalogEntry) -> dict[str, Any]:
     }
 
 
-class McpCatalogService:
-    def __init__(self, store: CatalogStore) -> None:
+class McpCatalogService(AccessBound):
+    """The mirrored public registry: read-only and not tenant data, so any member of the tenant may read it (`read` on the
+    tenant); installing an entry is a `create` of an MCP server, checked by McpServerService."""
+
+    def __init__(self, store: CatalogStore, access: Access | None = None) -> None:
         self._store = store
+        self._access = access  # None: no caller to check
 
     def search(self, q: str | None, limit: int, after: str | None, source: str | None) -> dict[str, Any]:
         """`{items: [entry], next_after}`: `next_after` is the last name when the page is full, else null."""
+        acl.require(self._access, "read", "tenant", None)
         entries = self._store.search(q, limit, after, source=source)
         next_after = entries[-1].name if len(entries) == limit else None
         return {"items": [entry_json(e) for e in entries], "next_after": next_after}
 
     def get(self, name: str) -> dict[str, Any]:
+        acl.require(self._access, "read", "tenant", None)
         entry = self._store.get(name)
         if entry is None:
             raise DefinitionNotFound("catalog entry not found")
         return entry_json(entry)
 
     def get_entry(self, name: str) -> CatalogEntry | None:
+        acl.require(self._access, "read", "tenant", None)
         return self._store.get(name)

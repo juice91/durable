@@ -1,5 +1,6 @@
 // Architect client (/api/v1/architect/*) and the pure form helpers the Architect page uses.
 // Errors from these routes are flat `{detail, code, ...}`; ArchitectError keeps `code` and the rest.
+import { refusedMessage } from "./access";
 import { apiHeaders, ApiError, BASE_URL } from "./api";
 
 export interface CreatedItem {
@@ -101,6 +102,7 @@ async function call<T>(method: "GET" | "POST" | "PUT", path: string, body?: unkn
     else if (Array.isArray(detail)) message = detail.map((item) => String((item as { msg?: unknown }).msg ?? "")).join(", ");
     if (typeof rawCode === "string") code = rawCode;
     extra = rest;
+    message = (await refusedMessage(response.status, data)) ?? message;
   } catch {
     // Not JSON: keep the status text.
   }

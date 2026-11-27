@@ -85,6 +85,7 @@ from typing import Annotated, Literal
 from eap_worker.feed_tool import feed_parse
 from eap_worker.html_extract_tool import html_extract
 from eap_worker.json_query_tool import json_query
+from eap_worker.grants import PERMISSION_DENIED, denial_for_secrets, record_denial
 from eap_worker.secret_refs import SecretRefNotFound, secret_store
 
 log = logging.getLogger("eap_worker.http_tool")
@@ -631,7 +632,14 @@ async def http_request(
         return _error("max_response_bytes_too_large", "max_response_bytes above 262144 needs a reducer")
     request = {"headers": headers, "query": query, "json": json, "body": body}
     used: list[str] = []
-    if http_request_secret_names({"headers": headers, "query": query, "json": json, "body": body}):
+    names = http_request_secret_names({"headers": headers, "query": query, "json": json, "body": body})
+    if names:
+        # Agent-bound grants: every name must be in the run's start-time set (the agent's, or the workflow's for a workflow
+        # step), checked before any value is read: a refusal says nothing about whether a secret exists.
+        denial = await asyncio.to_thread(denial_for_secrets, ctx.deps.tenant_id, getattr(ctx.deps, "run_id", None), names)
+        if denial is not None:
+            await asyncio.to_thread(record_denial, ctx.deps.tenant_id, getattr(ctx.deps, "run_id", None), denial)
+            return _error(PERMISSION_DENIED, denial.message)
         try:
             lookup = secret_lookup(ctx)
             request, used = await asyncio.to_thread(resolve_request, request, lookup)

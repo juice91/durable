@@ -10,9 +10,10 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from eap_iam import ROLE_ADMIN, MembershipSource, Principal, scopes_for_roles
+from eap_iam import ROLE_ADMIN, MembershipSource, PolicyUnavailable, Principal, ResourceRef, scopes_for_roles
 from eap_run_store import ApiKeyLimitExceeded, ApiKeyRecord, ApiKeyStore
 
+from eap_api.services.authz import AuthzService
 from eap_api.services.errors import Conflict, Forbidden, InvalidInput, NotFound, Unavailable
 
 API_KEY_NOT_FOUND_DETAIL = "API key not found"
@@ -21,7 +22,7 @@ MAX_EXPIRY_DAYS = 365
 DEFAULT_SCOPES = ("mcp",)
 # The identity providers that authenticate a person. The loopback dev bearer is a user kind too, but it is a
 # developer's shell, not a person's identity: its keys would have no real owner.
-PERSON_PROVIDERS = frozenset({"zitadel", "cfaccess"})
+PERSON_PROVIDERS = frozenset({"zitadel", "cfaccess", "localadmin"})
 NOT_A_PERSON_DETAIL = (
     "Personal API keys belong to a signed-in person. Sign in to Studio (not an API key or the dev bearer) to manage yours."
 )
@@ -41,14 +42,27 @@ def owner_email(principal: Principal) -> str | None:
 
 
 class PersonalApiKeyService:
-    def __init__(self, store: ApiKeyStore, membership: MembershipSource | None) -> None:
+    def __init__(self, store: ApiKeyStore, membership: MembershipSource | None, authz: AuthzService | None = None) -> None:
         self._store = store
+        self._authz = authz  # the policy engine: a person must be able to read the tenant to hold a key in it
         self._membership = membership if membership is not None and getattr(membership, "configured", True) else None
 
     @staticmethod
     def _require_person(principal: Principal) -> None:
         if principal.kind != "user" or principal.provider not in PERSON_PROVIDERS:
             raise Forbidden(NOT_A_PERSON_DETAIL, code="not_a_person")
+
+    async def _require_member(self, principal: Principal) -> None:
+        """Person-only keys are the caller's own, so the policy check the design implies is membership: whoever the engine
+        will not let read the tenant holds no key in it (`not_a_member`, as the membership source answers)."""
+        if self._authz is None:
+            return
+        try:
+            allowed = (await self._authz.check(principal, "read", ResourceRef("tenant", None, principal.tenant_id))).allowed
+        except PolicyUnavailable:
+            raise Unavailable("Authorization could not be checked; try again", code="unavailable") from None
+        if not allowed:
+            raise Forbidden(NOT_A_MEMBER_DETAIL, code="not_a_member")
 
     async def _roles(self, principal: Principal) -> frozenset[str]:
         """The caller's roles now. Without a membership source nothing records roles for a person, and the
@@ -69,6 +83,7 @@ class PersonalApiKeyService:
         """The new key (`.record`, and the plaintext `.key` shown once). 403: not a person, not a member, or a scope
         beyond the owner's roles; 422: a bad expiry or name; 409: past the per-person or tenant cap."""
         self._require_person(principal)
+        await self._require_member(principal)
         allowed = scopes_for_roles(await self._roles(principal))
         beyond = [s for s in dict.fromkeys(scopes) if s not in allowed]
         if beyond:
@@ -97,12 +112,14 @@ class PersonalApiKeyService:
 
     async def list(self, principal: Principal) -> list[ApiKeyRecord]:
         self._require_person(principal)
+        await self._require_member(principal)
         return await asyncio.to_thread(self._store.list_owned, principal.tenant_id, principal.subject)
 
     async def revoke(self, principal: Principal, key_id: str) -> None:
         """Revoke one of the caller's own keys (idempotent). Another person's key, a tenant key and an unknown id
         are all the same 404, so a caller learns nothing about keys that are not theirs."""
         self._require_person(principal)
+        await self._require_member(principal)
         revoked = await asyncio.to_thread(self._store.revoke_owned, principal.tenant_id, principal.subject, key_id)
         if revoked is None:
             raise NotFound(API_KEY_NOT_FOUND_DETAIL)

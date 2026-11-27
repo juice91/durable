@@ -1,4 +1,5 @@
 // Tool test runs: POST /api/v1/tools/{tool_id}/runs, error mapping, and how a finished run reads.
+import { refusedMessage } from "./access";
 import { apiHeaders, BASE_URL } from "./api";
 import type { Run, RunEvent, RunStatus } from "./runs";
 
@@ -69,6 +70,12 @@ export function mapToolRunError(
   return new ToolRunError(status, fallbacks[status] ?? `HTTP ${status}`, {});
 }
 
+/** `mapToolRunError`, with a refusal of the policy engine said in words. */
+export async function toolRunFailure(status: number, body: unknown, fallbacks?: Record<number, string>): Promise<ToolRunError> {
+  const refused = await refusedMessage(status, body);
+  return refused ? new ToolRunError(status, refused, {}) : mapToolRunError(status, body, fallbacks);
+}
+
 export async function startToolRun(
   toolId: string,
   input: Record<string, unknown>,
@@ -90,7 +97,7 @@ export async function startToolRun(
     } catch {
       // Non-JSON error body: fall back to the status message.
     }
-    throw mapToolRunError(response.status, data);
+    throw await toolRunFailure(response.status, data);
   }
   return response.json();
 }

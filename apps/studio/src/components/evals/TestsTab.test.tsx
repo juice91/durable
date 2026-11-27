@@ -129,6 +129,14 @@ function renderAt(href: string) {
   );
 }
 
+/** Opens "Run suite". The button is on screen, disabled, while the suite loads: wait until it can be clicked. */
+async function openRunDialog() {
+  const button = await screen.findByTestId("eval-suite-run");
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+  return screen.findByTestId("eval-run-dialog");
+}
+
 beforeEach(() => {
   vi.mocked(api.agents.get).mockReset().mockResolvedValue(agent());
   vi.mocked(api.versions.list).mockReset().mockResolvedValue(versions);
@@ -193,14 +201,15 @@ describe("Tests tab: a suite", () => {
     }));
     vi.mocked(startEvalRun).mockImplementation(async (_a, body) => ({ run_id: body.run_id, warnings: [] }) as never);
     renderAt(routes.agentTests(AGENT, { suite: SUITE }));
-    fireEvent.click(await screen.findByTestId("eval-suite-run"));
-    const dialog = await screen.findByTestId("eval-run-dialog");
+    const dialog = await openRunDialog();
     expect(within(dialog).getByTestId("eval-run-target")).toHaveValue("2");
     expect(await within(dialog).findByTestId("eval-run-warning")).toHaveTextContent("send_email");
     expect(within(dialog).getByTestId("eval-run-start")).toHaveTextContent("Run anyway");
     // The draft has no side-effect tools: a plain Run.
     fireEvent.change(within(dialog).getByTestId("eval-run-target"), { target: { value: "draft" } });
-    await waitFor(() => expect(within(dialog).getByTestId("eval-run-start")).toHaveTextContent(/^Run$/));
+    // The button already reads "Run", disabled, while the draft's tools are checked.
+    await waitFor(() => expect(within(dialog).getByTestId("eval-run-start")).toBeEnabled());
+    expect(within(dialog).getByTestId("eval-run-start")).toHaveTextContent(/^Run$/);
     fireEvent.click(within(dialog).getByTestId("eval-run-start"));
     await waitFor(() => expect(startEvalRun).toHaveBeenCalled());
     const body = vi.mocked(startEvalRun).mock.calls[0][1];
@@ -213,8 +222,7 @@ describe("Tests tab: a suite", () => {
     vi.mocked(api.agents.get).mockResolvedValue(agent(kb));
     vi.mocked(api.versions.list).mockResolvedValue([{ ...versions[0], spec: spec() }, { ...versions[1], spec: spec(kb) }]);
     renderAt(routes.agentTests(AGENT, { suite: SUITE }));
-    fireEvent.click(await screen.findByTestId("eval-suite-run"));
-    const dialog = await screen.findByTestId("eval-run-dialog");
+    const dialog = await openRunDialog();
     // v2 (latest) has no knowledge.
     expect(within(dialog).queryByTestId("eval-knowledge-note")).not.toBeInTheDocument();
     fireEvent.change(within(dialog).getByTestId("eval-run-target"), { target: { value: "1" } });

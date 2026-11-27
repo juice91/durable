@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api, type Agent, type AgentVersion } from "@/lib/api";
@@ -71,6 +72,7 @@ function useMemoryAgent(agentId: string): { agent: Agent | null; versions: Agent
 export function MemoryTab({ agentId }: { agentId: string }) {
   const router = useRouter();
   const search = useSearchParams();
+  const mayEdit = useCan("agent", agentId, "edit");
   const resource = search?.get("resource") || null;
   const { agent, versions, error: agentError } = useMemoryAgent(agentId);
   const [users, setUsers] = useState<KnownUser[] | null>(null);
@@ -288,9 +290,11 @@ export function MemoryTab({ agentId }: { agentId: string }) {
               <h2 id="memory-user-title" className="min-w-0 truncate font-mono text-title font-semibold text-foreground" data-testid="memory-user-title">
                 {resource}
               </h2>
-              <Button variant="destructive" onClick={() => setForgetting(true)} data-testid="memory-forget-user">
-                Forget user
-              </Button>
+              {mayEdit ? (
+                <Button variant="destructive" onClick={() => setForgetting(true)} data-testid="memory-forget-user">
+                  Forget user
+                </Button>
+              ) : null}
             </div>
             {perConversation ? (
               <p className="text-caption text-muted-foreground" data-testid="memory-per-conversation">
@@ -301,6 +305,7 @@ export function MemoryTab({ agentId }: { agentId: string }) {
             {working ? (
               <WorkingMemoryEditor
                 key={resource}
+                mayChange={mayEdit}
                 target={{ scope: "resource", agentId, resourceId: resource }}
                 format={workingFormat(working)}
                 starter={workingStarter(working)}

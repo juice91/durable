@@ -1,5 +1,7 @@
 "use client";
 
+import { AGENT_PERMISSIONS } from "./agentPermissions";
+import { usePermissions } from "@/lib/permissions";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Link2, MessagesSquare, PanelRight } from "lucide-react";
@@ -30,8 +32,14 @@ import { CHAT_PANES_FIT_PX, chatPanelWidth, configOpenByDefault, threadsAutoColl
 import { readConfigOpen, writeConfigOpen } from "./agentPageModel";
 import { copyText } from "@/lib/clipboard";
 import { agentHasMemory } from "@/components/memory/memoryModel";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useAccessEnabled } from "@/lib/useIam";
 
 export const CONFIG_TITLE = "Config";
+/** What "why can't I?" asks about on an agent page. */
+const AGENT_ACTIONS = ["run", "edit", "publish"] as const;
+/** The Architect answers everyone's chat, so its page does not explain `run`. */
+const ARCHITECT_ACTIONS = ["edit", "publish"] as const;
 
 /** The frame's size right now (client only: called from effects and the panel's registration). */
 function currentFrameSize(sidebarCollapsed: boolean) {
@@ -46,14 +54,19 @@ const TABS: { id: AgentTab; label: string; testId: string }[] = [
   { id: "memory", label: "Memory", testId: "agent-tab-memory" },
   // AC.16: the agent's test suites, eval runs and compare (no Evaluation nav group).
   { id: "tests", label: "Tests", testId: "agent-tab-tests" },
+  // IAM P2c: only when the policy engine keeps grants (not under `openaccess`).
+  { id: "access", label: "Access", testId: "agent-tab-access" },
 ];
 
 /**
  * The header's tabs: Memory only when the agent has memory, or while its page is open (an agent
- * without memory is sent from there to Chat by the Memory tab itself).
+ * without memory is sent from there to Chat by the Memory tab itself); Access only when
+ * fine-grained access is on, or while its page is open (the page then says it is off).
  */
-export function visibleTabs(hasMemory: boolean, tab: AgentTab): typeof TABS {
-  return TABS.filter((item) => item.id !== "memory" || hasMemory || tab === "memory");
+export function visibleTabs(hasMemory: boolean, tab: AgentTab, access = false): typeof TABS {
+  return TABS.filter(
+    (item) => (item.id !== "memory" || hasMemory || tab === "memory") && (item.id !== "access" || access || tab === "access"),
+  );
 }
 
 function loadErrorMessage(error: unknown): string {
@@ -78,6 +91,8 @@ export interface AgentLayoutProps {
 export function AgentLayout({ agentId, children }: AgentLayoutProps) {
   const pathname = usePathname();
   const tab: AgentTab = agentTabOf(pathname) ?? "chat";
+  const accessEnabled = useAccessEnabled();
+  const mayArchive = usePermissions("agent", agentId, AGENT_PERMISSIONS).can("archive");
   const [agent, setAgent] = useState<Agent | null>(null);
   const [versions, setVersions] = useState<AgentVersion[] | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -343,7 +358,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
       />
       <IconButton label="Copy link" size="sm" onClick={copyLink} icon={icon(Link2)} data-testid="agent-copy-link" />
       <ConnectAgUiAction target={{ kind: "agent", id: agentId }} name={agent?.name ?? null} />
-      {agent ? <AgentArchiveMenu agent={agent} onChanged={setAgent} /> : null}
+      {agent && mayArchive ? <AgentArchiveMenu agent={agent} onChanged={setAgent} /> : null}
       <span role="status" className="sr-only">
         {copyStatus}
       </span>
@@ -361,7 +376,7 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
             crumbs={crumbs}
             documentTitle={agent?.name}
             actions={actions}
-            tabs={visibleTabs(agentHasMemory(agent, versions), tab).map((item) => ({
+            tabs={visibleTabs(agentHasMemory(agent, versions), tab, accessEnabled).map((item) => ({
               href: item.id === "chat" && chatHref ? chatHref : routes.agentTab(agentId, item.id),
               label: item.label,
               active: item.id === tab,
@@ -399,7 +414,8 @@ export function AgentLayout({ agentId, children }: AgentLayoutProps) {
             </div>
           ) : (
             <>
-              {agent?.archived ? <ArchivedBanner agent={agent} onChanged={setAgent} /> : null}
+              {agent?.archived ? <ArchivedBanner agent={agent} onChanged={setAgent} mayUnarchive={mayArchive} /> : null}
+              {agent ? <PermissionNotice kind="agent" id={agentId} actions={agent.builtin_role === "architect" ? ARCHITECT_ACTIONS : AGENT_ACTIONS} className="flex min-w-0 flex-col gap-2 px-4 pt-2 empty:hidden" /> : null}
               <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">{children}</div>
             </>
           )}

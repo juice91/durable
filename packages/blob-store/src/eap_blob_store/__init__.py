@@ -4,7 +4,7 @@
 chosen by `EAP_BLOB_BACKEND`:
 
 - `fs` (default): `FsBlobStore`, a directory (`EAP_BLOB_DIR`, default `./.blobs`). Dev and tests.
-- `s3`: `S3BlobStore`, any S3-compatible endpoint (Cloudflare R2 in the deployment). Variables:
+- `s3`: `S3BlobStore`, any S3-compatible endpoint (MinIO, AWS S3). Variables:
   `EAP_BLOB_S3_ENDPOINT`, `EAP_BLOB_S3_BUCKET`, `EAP_BLOB_S3_REGION` (default `us-east-1`),
   `EAP_BLOB_S3_ACCESS_KEY`, `EAP_BLOB_S3_SECRET_KEY`.
 

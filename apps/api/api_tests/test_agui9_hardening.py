@@ -232,10 +232,19 @@ def _api_routes(app) -> list[tuple[str, str]]:
 
 # Routes that answer without credentials on purpose.
 PUBLIC = {"/healthz"}
+# The inbound webhook route is public by design: its HMAC signature is its only gate and no key, bearer or JWT is read
+# (test_webhooks_p1 pins the route table; test_the_hook_route_takes_no_key below sweeps it with every credential).
+HOOKS_PREFIX = "/api/v1/hooks/"
+# The built-in admin's setup and sign-in come before there is any credential: their password, refresh token or setup code
+# in the body is it, and no key, bearer or JWT is read (test_the_local_sign_in_routes_take_no_key sweeps them).
+LOCAL_AUTH_PATH = "/api/v1/auth/local"
 
 
 def _non_agui_api_routes(app) -> list[tuple[str, str]]:
-    return [(m, p) for m, p in _api_routes(app) if p not in PUBLIC and not is_agui_path(p)]
+    return [
+        (m, p) for m, p in _api_routes(app)
+        if p not in PUBLIC and not is_agui_path(p) and not p.startswith((HOOKS_PREFIX, LOCAL_AUTH_PATH))
+    ]
 
 
 def _sweep(c, headers) -> dict[tuple[str, str], int]:
@@ -263,9 +272,40 @@ def test_router_sweep_a_key_works_on_no_route_outside_ag_ui(client, tenant, monk
     assert _sweep(client, {}) == {}  # and no route is open without credentials
 
 
+def test_the_hook_route_takes_no_key(client, tenant, monkeypatch):
+    """The one public route answers a key, a dev bearer or nothing alike: the uniform 404 of an unknown trigger."""
+    key = _create_key(client, tenant)
+    hooks = [(m, p) for m, p in _api_routes(client.app) if p.startswith(HOOKS_PREFIX)]
+    assert [m for m, _ in hooks] == ["POST"]
+    for mode in ("dev", "api_key"):
+        monkeypatch.setenv("EAP_AUTH_MODE", mode)
+        for headers in ({}, _bearer(key), get_auth_header(tenant, "alice")):
+            r = client.post(hooks[0][1], content=b"{}", headers=headers)
+            assert (r.status_code, r.json()) == (404, {"detail": "not found"}), (mode, headers)
+
+
+def test_the_local_sign_in_routes_take_no_key(client, tenant, monkeypatch):
+    """Without the localadmin provider they are not there, whatever the credential: never a 2xx."""
+    key = _create_key(client, tenant)
+    routes = [(m, p) for m, p in _api_routes(client.app) if p.startswith(LOCAL_AUTH_PATH)]
+    assert len(routes) == 6
+    body = {"username": "a", "password": "b", "current_password": "b", "new_password": "c", "setup_code": "d",
+            "refresh_token": "e"}
+    fields = {"setup": ("setup_code", "username", "password"), "sign-in": ("username", "password"),
+              "password": ("username", "current_password", "new_password"), "refresh": ("refresh_token",),
+              "sign-out": ("refresh_token",)}
+    for mode in ("dev", "api_key"):
+        monkeypatch.setenv("EAP_AUTH_MODE", mode)
+        for headers in ({}, _bearer(key), get_auth_header(tenant, "alice")):
+            for method, path in routes:
+                sent = {name: body[name] for name in fields.get(path.rsplit("/", 1)[1], ())}
+                r = client.request(method, path, headers=headers, **({"json": sent} if sent else {}))
+                assert r.status_code == 404, (mode, method, path, r.status_code)
+
+
 def test_every_agui_route_authenticates(client):
-    """Only /ag-ui/* and /healthz are outside the sweep, and every /ag-ui/* route asks for
-    credentials (agui_principal) before anything else."""
+    """Only /ag-ui/*, /healthz, the hook route and the local sign-in routes are outside the sweep, and every /ag-ui/*
+    route asks for credentials (agui_principal) before anything else."""
     agui = [(m, p) for m, p in _api_routes(client.app) if is_agui_path(p)]
     assert {m for m, _ in agui} == {"GET", "POST", "DELETE"} and len(agui) >= 3
     for method, path in agui:
@@ -294,6 +334,13 @@ DOC_PATHS = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
 # The MCP control endpoint is the one other ASGI route: it authenticates every request itself (a tenant
 # API key, or the dev bearer in dev mode; 401 without a credential), see eap_api.mcp_control.
 MCP_CONTROL_PATH = "/api/v1/mcp"
+# And the run surface for external agents: off (404) unless switched on, then `run` keys only (test_external_mcp).
+MCP_EXTERNAL_PATH = "/api/v1/external/mcp"
+# And the A2A server for external agents: the public Agent Card and the JSON-RPC interface (test_external_a2a).
+A2A_PATHS = tuple(
+    f"/api/v1/external/a2a/{{endpoint_id}}{base}{leaf}" for base in ("", "/skills/{skill}")
+    for leaf in ("/rpc", "/.well-known/agent-card.json")
+)
 
 
 def _all_routes(routes, prefix: str = "", in_schema: bool = True):
@@ -324,8 +371,12 @@ def test_the_sweep_sees_every_route(client):
     # OpenAPI drops a path converter: `/x/{name:path}` is `/x/{name}` in the schema.
     route_ops = {(m.lower(), re.sub(r"\{(\w+):\w+\}", r"{\1}", path)) for path, r in api for m in r.methods - {"HEAD", "OPTIONS"}}
     assert route_ops == schema_ops and len(route_ops) > 50
-    assert {path for path, r, _ in routes if not isinstance(r, APIRoute)} <= set(DOC_PATHS) | {MCP_CONTROL_PATH}
+    mounted = {MCP_CONTROL_PATH, MCP_EXTERNAL_PATH, *A2A_PATHS}
+    assert {path for path, r, _ in routes if not isinstance(r, APIRoute)} <= set(DOC_PATHS) | mounted
     assert client.post(MCP_CONTROL_PATH, json={}).status_code == 401
+    assert client.post(MCP_EXTERNAL_PATH, json={}).status_code == 404
+    for path in A2A_PATHS:
+        assert client.get(path.format(endpoint_id="0" * 32, skill="s")).status_code == 404, path
 
 
 def test_api_key_mode_serves_no_docs_or_schema(client, monkeypatch):

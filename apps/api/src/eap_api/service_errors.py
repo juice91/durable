@@ -20,6 +20,8 @@ from eap_api.services.errors import (
     NotFound,
     PayloadTooLarge,
     ServiceError,
+    TooManyRequests,
+    Unauthorized,
     Unavailable,
 )
 
@@ -27,9 +29,11 @@ _STATUS: tuple[tuple[type[ServiceError], int], ...] = (
     (NotFound, 404),
     (Conflict, 409),
     (InvalidInput, 422),
+    (Unauthorized, 401),
     (PayloadTooLarge, 413),
     (Forbidden, 403),
     (Unavailable, 503),
+    (TooManyRequests, 429),
 )
 
 
@@ -47,12 +51,16 @@ def to_http_exception(exc: ServiceError) -> HTTPException:
 
 def service_error_response(exc: ServiceError) -> JSONResponse:
     status = status_of(exc)
+    # What the policy engine refused (the caller's own request), added to either body shape.
+    refused = {"refused": exc.refused} if isinstance(exc, Forbidden) and exc.refused is not None else {}
     if exc.detail_object is not None and not (isinstance(exc, Conflict) and exc.current is not None):
-        return JSONResponse(status_code=status, content={"detail": exc.detail_object})
-    body: dict[str, Any] = {"detail": exc.message, "code": exc.code}
+        return JSONResponse(status_code=status, content={"detail": exc.detail_object, **refused})
+    body: dict[str, Any] = {"detail": exc.message, "code": exc.code, **refused}
     if exc.details is not None:
         body["errors"] = exc.details
     headers: dict[str, str] = {}
+    if isinstance(exc, TooManyRequests):
+        headers["Retry-After"] = str(exc.retry_after)
     if isinstance(exc, Conflict) and exc.current is not None:
         status = 412
         body["current_revision"] = exc.current_revision

@@ -1,4 +1,6 @@
 "use client";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan } from "@/lib/permissions";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -13,12 +15,16 @@ import { navCrumb } from "@/lib/nav";
 import { Button } from "@/components/ui/Button";
 import { useCreateAction } from "@/components/shortcuts/ShortcutsProvider";
 
+/** What "why can't I?" asks about on the list. */
+const CREATE_ACTIONS = ["create"] as const;
+
 function AgentsPageBody() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const scope = scopeFromParams(searchParams ? new URLSearchParams(searchParams.toString()) : null);
   // `c` is "New agent" (decision "Keyboard shortcuts").
-  useCreateAction(() => router.push(routes.agentNew()));
+  const mayCreate = useCan("agent", null, "create");
+  useCreateAction(mayCreate ? () => router.push(routes.agentNew()) : null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -66,12 +72,15 @@ function AgentsPageBody() {
       <PageHeader
         crumbs={[navCrumb("agents", { current: true })]}
         actions={
-          <Button asChild variant="primary" size="sm">
-            <Link href={routes.agentNew()} aria-keyshortcuts="c">New agent</Link>
-          </Button>
+          mayCreate ? (
+            <Button asChild variant="primary" size="sm">
+              <Link href={routes.agentNew()} aria-keyshortcuts="c">New agent</Link>
+            </Button>
+          ) : null
         }
       />
       <div className="min-w-0 px-4 py-6 md:px-6">
+        {mayCreate ? null : <PermissionNotice kind="agent" id={null} actions={CREATE_ACTIONS} className="mb-3 flex min-w-0 flex-col gap-2 empty:hidden" />}
         <AgentsListUI
           agents={agents}
           loading={loading}

@@ -64,11 +64,16 @@ export function formatWhen(iso: string | null | undefined): string {
 }
 
 /** The knowledge base page's tabs: Documents · Search · Ingest runs · Sources. */
-export function knowledgeTabs(kbId: string, active: KnowledgeTab): LinkTab[] {
-  return [
+export function knowledgeTabs(kbId: string, active: KnowledgeTab, access = false): LinkTab[] {
+  const tabs: LinkTab[] = [
     { href: routes.knowledgeBase(kbId), label: "Documents", active: active === "documents", testId: "knowledge-tab-documents" },
     { href: routes.knowledgeBase(kbId, { tab: "search" }), label: "Search", active: active === "search", testId: "knowledge-tab-search" },
     { href: routes.knowledgeBase(kbId, { tab: "runs" }), label: "Ingest runs", active: active === "runs", testId: "knowledge-tab-runs" },
     { href: routes.knowledgeBase(kbId, { tab: "sources" }), label: "Sources", active: active === "sources", testId: "knowledge-tab-sources" },
   ];
+  // IAM P2c: only when the policy engine keeps grants, or while it is open.
+  if (access || active === "access") {
+    tabs.push({ href: routes.knowledgeBase(kbId, { tab: "access" }), label: "Access", active: active === "access", testId: "knowledge-tab-access" });
+  }
+  return tabs;
 }

@@ -2,6 +2,7 @@
 // lib/conversations.startTurn, a refusal keeps the raw `detail`, so a 422 can be shown next to the
 // field, model or version it is about (runOptions.classifyTurnError).
 import { BASE_URL, apiHeaders } from "@/lib/api";
+import { refusedMessage } from "@/lib/access";
 import type { StartedTurn } from "@/lib/conversations";
 import { turnBody, type TurnOptions } from "./runOptions";
 
@@ -51,13 +52,13 @@ export async function startTurnWithOptions(
     },
   );
   if (!response.ok) {
-    let detail: unknown = null;
+    let body: { detail?: unknown } | null = null;
     try {
-      detail = (await response.json())?.detail ?? null;
+      body = await response.json();
     } catch {
       // Not JSON: the status is all there is.
     }
-    throw new TurnStartError(response.status, detail);
+    throw new TurnStartError(response.status, (await refusedMessage(response.status, body)) ?? body?.detail ?? null);
   }
   return response.json();
 }

@@ -1,6 +1,6 @@
 """AG-UI `resume[]` entries as approval decisions (AGUI.8, D15).
 
-Plan: docs/plans/2026-11-13-milestone-ag-ui.md, D15, the Event mapping (D9) and "### AGUI.8".
+Plan: an internal design note, D15, the Event mapping (D9) and "### AGUI.8".
 
 Interrupt ids (built by `translate`):
 - a workflow approval step: `approval:{run_id}:{step_id}` (`run_id` the workflow run);

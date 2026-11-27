@@ -3,6 +3,7 @@ import "./globals.css";
 import { inter, jetbrainsMono } from "./fonts";
 import { AppShell } from "@/components/frame/AppShell";
 import { AuthGate } from "@/components/auth/AuthGate";
+import { NoSignInMethod } from "@/components/auth/NoSignInMethod";
 import { runtimeConfigScript, runtimeSettings } from "@/lib/runtimeConfigScript";
 import { StudioKeyboard } from "@/components/shortcuts/StudioKeyboard";
 import { ThemeProvider } from "@/components/theme/ThemeProvider";
@@ -21,7 +22,7 @@ export default async function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { config, oidc } = runtimeSettings((await headers()).get("host"));
+  const { config, signIn, localSetup } = runtimeSettings((await headers()).get("host"));
   // No theme class here: the head script sets `dark` and `color-scheme` from the stored preference
   // or the OS before paint, which is why <html> suppresses the hydration warning. <body> does too:
   // browser extensions (Grammarly's data-gr-* attributes, for example) write to it before React
@@ -35,11 +36,15 @@ export default async function RootLayout({
       </head>
       <body suppressHydrationWarning>
         <ThemeProvider>
-          <AuthGate enabled={oidc}>
-            <AppShell>
-              <StudioKeyboard>{children}</StudioKeyboard>
-            </AppShell>
-          </AuthGate>
+          {signIn === "unavailable" ? (
+            <NoSignInMethod />
+          ) : (
+            <AuthGate enabled={signIn === "oidc"} local={signIn === "local"} localSetup={localSetup}>
+              <AppShell>
+                <StudioKeyboard>{children}</StudioKeyboard>
+              </AppShell>
+            </AuthGate>
+          )}
         </ThemeProvider>
       </body>
     </html>

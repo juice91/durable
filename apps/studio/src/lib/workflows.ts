@@ -6,10 +6,10 @@
 // /api/v1/workflows/runs/{run_id}/steps/{step_id}/approve|reject with {"comment"?}.
 // Cancel (loops D12, LP.12): POST /api/v1/runs/{run_id}/cancel, no body.
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
-import { revisionKey, track, trackAll, writeResource } from "./revisions";
+import { ifMatch, revisionKey, track, trackAll, writeResource } from "./revisions";
 import type { Run, RunStatus } from "./runs";
 import type { JsonSchema } from "./tools";
-import { mapToolRunError } from "./toolRuns";
+import { toolRunFailure } from "./toolRuns";
 import { createRunLedger } from "./toolRunLedger";
 
 export type ConditionOp = "eq" | "ne" | "gt" | "lt" | "contains" | "exists";
@@ -287,6 +287,24 @@ export function listWorkflowVersions(id: string): Promise<WorkflowVersion[]> {
   return getJson<WorkflowVersion[]>(`/api/v1/workflows/${enc(id)}/versions`);
 }
 
+export interface PublishedWorkflowVersion extends WorkflowVersion {
+  warnings?: { code: string; path: string; message: string }[];
+}
+
+/**
+ * Publish the draft as the next version (`POST /workflows/{id}/versions`). Sends the revision this
+ * tab last read as `If-Match` (the API checks it when it supports it): 412 throws ConflictError,
+ * 409 (the draft equals the latest version) an ApiError with status 409.
+ */
+export async function publishWorkflow(id: string): Promise<PublishedWorkflowVersion> {
+  const response = await fetch(`${BASE_URL}/api/v1/workflows/${enc(id)}/versions`, {
+    method: "POST",
+    headers: { ...apiHeaders(), ...ifMatch(revisionKey.workflow(id)) },
+  });
+  if (!response.ok) throw await apiErrorFromResponse(response);
+  return response.json();
+}
+
 export function getWorkflowVersion(id: string, version: number): Promise<WorkflowVersion> {
   return getJson<WorkflowVersion>(`/api/v1/workflows/${enc(id)}/versions/${version}`);
 }
@@ -333,7 +351,7 @@ export async function startWorkflowRun(
     } catch {
       // Non-JSON error body: the status fallback is used.
     }
-    throw mapToolRunError(response.status, data, WORKFLOW_RUN_FALLBACKS);
+    throw await toolRunFailure(response.status, data, WORKFLOW_RUN_FALLBACKS);
   }
   return response.json();
 }

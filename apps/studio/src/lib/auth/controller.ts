@@ -1,6 +1,7 @@
 // Runs the sign-in for the page: the renew timer, the one-renew-then-login rule on a 401, and sign-out.
-// Everything here is inert unless the server published a zitadel config (`window.__EAP_RUNTIME_CONFIG__.auth`).
-import type { StudioAuthConfig } from "./config";
+// Everything here is inert unless the server published a sign-in config (`window.__EAP_RUNTIME_CONFIG__.auth`).
+import type { ZitadelAuthConfig } from "./config";
+import { localAuth, resetLocalAuthForTests } from "./local";
 import { createOidcClient, safeReturnTo, type OidcClient } from "./oidc";
 import { getTokens, setTokens } from "./session";
 
@@ -13,7 +14,8 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let installed = false;
 let onGiveUp: ((message: string) => void) | null = null;
 
-export function authConfig(): StudioAuthConfig | undefined {
+/** The ZITADEL settings of this page, when it signs in through ZITADEL. */
+export function authConfig(): ZitadelAuthConfig | undefined {
   if (typeof window === "undefined") return undefined;
   const auth = window.__EAP_RUNTIME_CONFIG__?.auth;
   return auth && auth.mode === "zitadel" ? auth : undefined;
@@ -33,7 +35,21 @@ export function oidc(): OidcClient | null {
   return client;
 }
 
+/** What the renew timer, the 401 rule and sign-out need from whichever sign-in the page uses; null for none. */
+export interface SessionClient {
+  renew(): Promise<boolean>;
+  justLoggedIn(): boolean;
+  beginLogin(returnTo: string): Promise<void>;
+  logout(): Promise<void>;
+}
+
+export function sessionClient(): SessionClient | null {
+  // A page with another credential (the loopback bearer) may still run the setup, but its session is not the admin's.
+  return window.__EAP_RUNTIME_CONFIG__?.auth?.mode === "local" ? localAuth() : oidc();
+}
+
 export function resetAuthForTests(): void {
+  resetLocalAuthForTests();
   client = null;
   installed = false;
   onGiveUp = null;
@@ -54,7 +70,7 @@ export async function startLogin(returnTo: string): Promise<void> {
 function scheduleRenew(): void {
   if (timer) clearTimeout(timer);
   const tokens = getTokens();
-  const auth = oidc();
+  const auth = sessionClient();
   if (!tokens || !auth) return;
   const delay = Math.max(MIN_RENEW_DELAY_MS, (tokens.expiresAt - Date.now()) * RENEW_AT);
   timer = setTimeout(async () => {
@@ -69,6 +85,8 @@ export function keepFresh(): void {
 }
 
 function isApiUrl(url: string): boolean {
+  // The sign-in routes answer 401 for a wrong password or a spent refresh token: nothing to renew there.
+  if (url.includes("/api/v1/auth/local/")) return false;
   return url.startsWith("/api/") || /^https?:\/\/[^/]+\/api\//.test(url);
 }
 
@@ -81,13 +99,13 @@ function requestUrl(input: RequestInfo | URL): string {
  * fails (or the repeat is 401 again) the page goes to the login. A body that cannot be replayed (a stream) is not repeated.
  */
 export function installAuthFetch(): void {
-  if (installed || typeof window === "undefined" || !oidc()) return;
+  if (installed || typeof window === "undefined" || !sessionClient()) return;
   installed = true;
   const original = window.fetch.bind(window);
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await original(input, init);
     if (response.status !== 401 || !isApiUrl(requestUrl(input)) || getTokens() === null) return response;
-    const auth = oidc();
+    const auth = sessionClient();
     if (!auth) return response;
     const replayable = !(init?.body && typeof init.body === "object" && "getReader" in init.body) && !(input instanceof Request);
     if (replayable && (await auth.renew()) && getTokens()) {
@@ -109,5 +127,5 @@ export function installAuthFetch(): void {
 
 export async function signOut(): Promise<void> {
   if (timer) clearTimeout(timer);
-  await oidc()?.logout();
+  await sessionClient()?.logout();
 }

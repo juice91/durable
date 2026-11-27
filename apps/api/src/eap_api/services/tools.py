@@ -16,6 +16,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from eap_api.ports import RunLauncher
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, Unavailable
 from eap_api.services.run_filters import plain_refusals
 from eap_observability.context import current_trace_context
@@ -70,17 +72,25 @@ def tool_response(declaration: ToolDeclaration, allowed_tools: frozenset[str] | 
 
 
 @plain_refusals
-class ToolService:
-    def __init__(self, run_store: RunStore | None = None, launcher: RunLauncher | None = None) -> None:
+class ToolService(AccessBound):
+    """The platform tool registry: any member reads it (`read` on the tenant); running one directly is the tenant's
+    `run` (editors)."""
+
+    def __init__(
+        self, run_store: RunStore | None = None, launcher: RunLauncher | None = None, access: Access | None = None
+    ) -> None:
+        self._access = access  # None: no caller to check
         self.run_store = run_store
         self.launcher = launcher
 
     def list(self) -> list[dict]:
         """Platform tool declarations and their current allowlist state (tenant-agnostic)."""
+        acl.require(self._access, "read", "tenant", None)
         allowed_tools = _allowed_tool_ids()
         return [tool_response(declaration, allowed_tools) for declaration in TOOL_DECLARATIONS.values()]
 
     def get(self, tool_id: str) -> dict:
+        acl.require(self._access, "read", "tenant", None)
         declaration = TOOL_DECLARATIONS.get(tool_id)
         if declaration is None:
             raise NotFound(TOOL_NOT_FOUND)
@@ -100,6 +110,7 @@ class ToolService:
         failed with ENQUEUE_FAILED_ERROR, if it is still queued, so it is not left queued with no
         workflow; a retry with the same run_id and input re-queues it and enqueues again. If DBOS did
         accept the enqueue that raised, the workflow runs anyway and its status replaces `failed`."""
+        acl.require(self._access, "run", "tenant", None)
         assert self.run_store is not None and self.launcher is not None
         run_store, launcher = self.run_store, self.launcher
         declaration = TOOL_DECLARATIONS.get(tool_id)

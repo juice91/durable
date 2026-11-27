@@ -40,23 +40,27 @@ CATALOG = Catalog(
 )
 
 
-def cli(fake, *args, backfill=False, catalog=CATALOG):
+# A deployment that still lists the legacy `cfaccess` provider (single tenant) keys rights on e-mail subjects.
+LEGACY_ENV = {**ENV, "EAP_IAM_IDENTITY": "apikey,cfaccess,devloopback"}
+
+
+def cli(fake, *args, backfill=False, catalog=CATALOG, env=LEGACY_ENV):
     out = io.StringIO()
     http = httpx2.AsyncClient(transport=fake.transport())
-    code = asyncio.run(amain(list(args), backfill=backfill, env=ENV, out=out, catalog=catalog, http=http))
+    code = asyncio.run(amain(list(args), backfill=backfill, env=env, out=out, catalog=catalog, http=http))
     return code, out.getvalue()
 
 
 def test_desired_links_cover_every_resource_and_owners_are_explicit():
     links, legacy, skipped = desired_tuples(CATALOG.rows)
     assert len(links) == 9 and all(t.relation == "tenant" for t in links) and legacy == 0 and skipped == 0
-    both, legacy, _ = desired_tuples(CATALOG.rows, ["zitadel:u1", "owner@example.com"], creators=True)
+    both, legacy, _ = desired_tuples(CATALOG.rows, ["zitadel:u1", "owner@example.com"], creators=True, email_subjects=True)
     owners = {t for t in both if t.relation == "owner"}
     # two explicit owners on 9 resources, plus the two creators who are real principals
-    assert len([t for t in owners if t.user in ("user:zitadel:u1", "user:owner@example.com")]) == 18
+    assert len([t for t in owners if t.user in ("user:zitadel%3Au1", "user:owner@example.com")]) == 18
     assert TupleKey("user:boss@example.com", "owner", "agent:studio/a1") in owners
-    assert TupleKey("user:zitadel:u9", "owner", "workflow:studio/w1") in owners
-    assert not any(t.user in ("user:operator", "user:studio:operator", "user:dev:alice") for t in owners)
+    assert TupleKey("user:zitadel%3Au9", "owner", "workflow:studio/w1") in owners
+    assert not any(t.user in ("user:operator", "user:studio%3Aoperator", "user:dev%3Aalice") for t in owners)
     assert legacy == 3
 
 
@@ -86,10 +90,10 @@ def test_backfill_adds_owners_for_the_account_and_the_real_creators_only():
     code, text = cli(fake, "--apply", "--owner", "zitadel:u1", "--owner", "owner@example.com", backfill=True)
     assert code == 0
     owners = {t for t in fake.tuples if t[1] == "owner"}
-    assert ("user:zitadel:u1", "owner", "secret:studio/crm_token") in owners
+    assert ("user:zitadel%3Au1", "owner", "secret:studio/crm_token") in owners
     assert ("user:owner@example.com", "owner", "api_key:studio/pos_abc") in owners
     assert ("user:boss@example.com", "owner", "agent:studio/a1") in owners
-    assert not any(u in ("user:operator", "user:dev:alice") for u, _, _ in owners)
+    assert not any(u in ("user:operator", "user:dev%3Aalice") for u, _, _ in owners)
     assert "legacy creator" in text
     fake.calls.clear()
     cli(fake, "--apply", "--owner", "zitadel:u1", "--owner", "owner@example.com", backfill=True)
@@ -99,14 +103,14 @@ def test_backfill_adds_owners_for_the_account_and_the_real_creators_only():
 def test_the_link_reconcile_never_removes_a_grant_or_a_revoked_owner_and_never_adds_owners():
     fake = FakeOpenFga()
     fake.tuples |= {
-        ("user:zitadel:r", "runner", "workflow:studio/w1"),
-        ("tenant:studio#editor", "usable_by", "secret:studio/crm_token"),
-        ("user:zitadel:u1", "owner", "agent:studio/a1"),
+        ("user:zitadel%3Ar", "runner", "workflow:studio/w1"),
+        ("tenant:studio#editor", "legacy_usable_by", "secret:studio/crm_token"),
+        ("user:zitadel%3Au1", "owner", "agent:studio/a1"),
     }
     cli(fake, "--apply", "--prune")
-    assert ("user:zitadel:r", "runner", "workflow:studio/w1") in fake.tuples
-    assert ("tenant:studio#editor", "usable_by", "secret:studio/crm_token") in fake.tuples
-    assert ("user:zitadel:u1", "owner", "agent:studio/a1") in fake.tuples
+    assert ("user:zitadel%3Ar", "runner", "workflow:studio/w1") in fake.tuples
+    assert ("tenant:studio#editor", "legacy_usable_by", "secret:studio/crm_token") in fake.tuples
+    assert ("user:zitadel%3Au1", "owner", "agent:studio/a1") in fake.tuples
     assert len([t for t in fake.tuples if t[1] == "owner"]) == 1
 
 
@@ -114,7 +118,7 @@ def test_orphans_are_reported_and_deleted_only_with_prune_and_apply():
     fake = FakeOpenFga()
     fake.tuples |= {
         ("tenant:studio", "tenant", "agent:studio/gone"),
-        ("user:zitadel:r", "runner", "agent:studio/gone"),
+        ("user:zitadel%3Ar", "runner", "agent:studio/gone"),
         ("tenant:elsewhere", "tenant", "agent:elsewhere/untouched"),  # a tenant the catalog does not list
         ("workflow:studio/w1", "parent", "run:studio/r1"),  # runs are not this tool's
     }
@@ -123,7 +127,7 @@ def test_orphans_are_reported_and_deleted_only_with_prune_and_apply():
     assert ("tenant:studio", "tenant", "agent:studio/gone") in fake.tuples
     _, text = cli(fake, "--apply", "--prune")
     assert ("tenant:studio", "tenant", "agent:studio/gone") not in fake.tuples
-    assert ("user:zitadel:r", "runner", "agent:studio/gone") not in fake.tuples
+    assert ("user:zitadel%3Ar", "runner", "agent:studio/gone") not in fake.tuples
     assert ("tenant:elsewhere", "tenant", "agent:elsewhere/untouched") in fake.tuples
     assert ("workflow:studio/w1", "parent", "run:studio/r1") in fake.tuples
 
@@ -178,3 +182,58 @@ def test_the_run_store_catalog_satisfies_the_core_catalog_protocol():
     from eap_run_store.iam_catalog import RunStoreCatalog
 
     assert isinstance(RunStoreCatalog(object()), ResourceCatalog)  # structural: no engine is touched by constructing it
+
+
+def test_ids_with_colons_are_neither_missing_nor_orphans_on_the_next_run():
+    fake = FakeOpenFga()
+    catalog = Catalog(E("secret", "ns:tok%1", creator="zitadel:u9"))
+    code, _ = cli(fake, "--apply", backfill=True, catalog=catalog)
+    assert code == 0 and ("user:zitadel%3Au9", "owner", "secret:studio/ns%3Atok%251") in fake.tuples
+    code, text = cli(fake, "--apply", "--prune", backfill=True, catalog=catalog)
+    assert code == 0 and "(to add): 0" in text and "no longer in the catalog: 0" in text and len(fake.tuples) == 2
+
+
+def test_an_owner_openfga_cannot_hold_stops_the_run_before_any_write(capsys):
+    fake = FakeOpenFga()
+    code, _ = cli(fake, "--apply", "--owner", "has space", backfill=True)
+    assert code == 2 and not fake.tuples and "not a valid OpenFGA user id" in capsys.readouterr().err
+
+
+# ---- F1: without `cfaccess` no right is keyed on an e-mail address --------------------------------------------------
+
+
+def test_without_cfaccess_the_backfill_writes_no_owner_for_an_email_creator():
+    fake = FakeOpenFga()
+    code, text = cli(fake, "--apply", "--owner", "zitadel:u1", backfill=True, env=ENV)
+    assert code == 0
+    users = {u for u, r, _ in fake.tuples if r == "owner"}
+    assert users == {"user:zitadel%3Au1", "user:zitadel%3Au9"}
+    assert "e-mail creator" in text and "boss@example.com" not in text
+
+
+def test_without_cfaccess_an_email_owner_is_refused_before_any_write(capsys):
+    fake = FakeOpenFga()
+    code, _ = cli(fake, "--apply", "--owner", "owner@example.com", backfill=True, env=ENV)
+    err = capsys.readouterr().err
+    assert code == 2 and not fake.tuples and "e-mail" in err and "owner@example.com" not in err
+
+
+@pytest.mark.parametrize("identity, expected", [("zitadel,apikey,devloopback", 1), ("zitadel,cfaccess", 2)])
+def test_an_owner_email_resolves_to_the_account_and_to_the_address_only_with_cfaccess(identity, expected):
+    from eap_iam import Member
+    from eap_iam.registry import clear_local, register_local
+    from eap_iam_openfga.reconcile import resolve_owner_emails
+
+    class Source:
+        name = "zitadel"
+
+        async def list_members(self, tenant_id):
+            return [Member(id="u1", email="Owner@example.com", roles=("admin",))]
+
+    register_local("eap.iam.membership", "fake-members", lambda ctx: Source())
+    try:
+        env = {"EAP_IAM_MEMBERSHIP": "fake-members", "EAP_IAM_IDENTITY": identity}
+        found = asyncio.run(resolve_owner_emails(["owner@example.com"], "studio", env))
+    finally:
+        clear_local()
+    assert found == ["zitadel:u1", "owner@example.com"][:expected]

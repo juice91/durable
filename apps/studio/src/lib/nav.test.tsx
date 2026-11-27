@@ -14,6 +14,7 @@ import {
   navSectionsFor,
   type NavItem,
 } from "@/lib/nav";
+import { defaultFilter } from "cmdk";
 import { routes } from "@/lib/routes";
 import { AgentsIcon, WorkflowsIcon } from "@/lib/icons";
 
@@ -59,8 +60,8 @@ describe("Navigation", () => {
       expect(navSections.map((section) => section.group.title)).toEqual([null, "Primitives", "Evaluation", "Observability", null]);
       const permanent = (groupId: string) =>
         navSections.find((section) => section.group.id === groupId)!.items.filter((item) => !item.transitional).map((item) => item.label);
-      expect(permanent("primitives")).toEqual(["Agents", "Architect", "Workflows", "Tools", "MCP Servers", "Processors", "Knowledge"]);
-      expect(permanent("evaluation")).toEqual(["Test suites", "Scorers", "Experiments"]);
+      expect(permanent("primitives")).toEqual(["Agents", "Architect", "Workflows", "Tools", "MCP Servers", "Processors", "Knowledge", "Webhooks", "External access"]);
+      expect(permanent("evaluation")).toEqual(["Test suites", "Scorers", "Test runs"]);
       expect(permanent("observability")).toEqual(["Metrics", "Threads", "Traces", "Logs"]);
       expect(permanent("settings")).toEqual(["Settings"]);
       expect(navSections.find((section) => section.group.id === "settings")!.group.placement).toBe("footer");
@@ -72,9 +73,20 @@ describe("Navigation", () => {
       expect(navItems.some((item) => item.id === "request-context" || item.href.startsWith("/request-context"))).toBe(false);
     });
 
+    test("the Test runs item links to /experiments and matches the palette's search for 'experiments'", () => {
+      const item = byId("experiments");
+      expect(item.label).toBe("Test runs");
+      expect(item.href).toBe("/experiments");
+      expect(item.gKey).toBe("e");
+      // The palette scores the row's keywords (label + keywords) only: replicate its filter.
+      const keywords = [item.label, ...(item.keywords ?? [])];
+      expect(defaultFilter(keywords.join(" "), "experiments")).toBeGreaterThan(0);
+      expect(defaultFilter(keywords.join(" "), "test runs")).toBeGreaterThan(0);
+    });
+
     test("g-keys follow the plan", () => {
       const keys = Object.fromEntries(navItems.filter((item) => item.gKey).map((item) => [item.gKey, item.id]));
-      expect(keys).toEqual({ i: "approvals", a: "agents", r: "architect", w: "workflows", o: "tools", m: "mcp", p: "processors", k: "knowledge", d: "datasets", s: "scorers", e: "experiments", n: "metrics", h: "threads", t: "traces", l: "logs", ",": "settings" });
+      expect(keys).toEqual({ i: "approvals", a: "agents", r: "architect", w: "workflows", o: "tools", m: "mcp", p: "processors", b: "webhooks", y: "external-access", k: "knowledge", d: "datasets", s: "scorers", e: "experiments", n: "metrics", h: "threads", t: "traces", l: "logs", ",": "settings" });
       expect(navItemForGKey("t")?.href).toBe(routes.traces());
       expect(navItemForGKey("z")).toBeNull();
     });

@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan } from "@/lib/permissions";
 import React, { useId, useMemo, useState } from "react";
 import Link from "next/link";
 import { PublishWarnings } from "@/components/agents/PublishWarnings";
@@ -71,6 +73,8 @@ function toggled<T>(list: readonly T[], item: T, on: boolean, same: (a: T, b: T)
 
 type Status = { kind: "saved"; result: SaveResult } | null;
 
+const CREATE_ACTION = ["create"] as const;
+
 export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectFormProps) {
   const ids = useId();
   const [form, setForm] = useState<AgentFormValues>(() => (source.spec ? limitToOptions(source.spec, options) : EMPTY_FORM));
@@ -88,6 +92,13 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
 
   const set = <K extends keyof AgentFormValues>(key: K, value: AgentFormValues[K]) => setForm((current) => ({ ...current, [key]: value }));
   const needsReview = assumptions.length > 0 && !reviewed;
+  // Drafting and a new agent need `create`; an existing one `edit` to save and `publish` to go live.
+  const existing = source.agentRowId;
+  const mayCreate = useCan("agent", null, "create");
+  const mayEditThis = useCan("agent", existing ?? undefined, "edit");
+  const mayPublishThis = useCan("agent", existing ?? undefined, "publish");
+  const maySave = existing ? mayEditThis : mayCreate;
+  const mayPublish = existing ? mayPublishThis : mayCreate;
   const canSave = form.name.trim() !== "" && form.instructions.trim() !== "" && !saving;
   const approvalTools = useMemo(() => new Set((options?.tools ?? []).filter((tool) => tool.requires_approval).map((tool) => tool.id)), [options]);
 
@@ -150,9 +161,11 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
           placeholder="What should this agent do, and for whom?"
         />
         <div className="flex items-center gap-3">
-          <Button variant="primary" onClick={() => void fillIn()} disabled={drafting || description.trim() === ""}>
-            {drafting ? "Drafting…" : "Fill in the form"}
-          </Button>
+          {mayCreate ? (
+            <Button variant="primary" onClick={() => void fillIn()} disabled={drafting || description.trim() === ""}>
+              {drafting ? "Drafting…" : "Fill in the form"}
+            </Button>
+          ) : null}
           <span className="text-caption text-muted-foreground">The draft only fills the fields below; nothing is saved until you save.</span>
         </div>
         {failure ? <DrafterFailure answer={failure.answer} problems={failure.problems} /> : null}
@@ -320,8 +333,13 @@ export function ArchitectForm({ options, source, onSaved, onReload }: ArchitectF
       ) : null}
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button onClick={() => void save(false)} disabled={!canSave}>Save draft</Button>
-        <Button variant="primary" onClick={() => void save(true)} disabled={!canSave || needsReview}>Save and go live</Button>
+        {maySave ? (
+          <Button onClick={() => void save(false)} disabled={!canSave}>Save draft</Button>
+        ) : null}
+        {mayPublish ? (
+          <Button variant="primary" onClick={() => void save(true)} disabled={!canSave || needsReview}>Save and go live</Button>
+        ) : null}
+        {maySave ? null : <PermissionNotice kind="agent" id={null} actions={CREATE_ACTION} />}
         {needsReview ? <span className="text-caption text-muted-foreground">Review the assumptions to go live.</span> : null}
       </div>
     </div>

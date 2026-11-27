@@ -15,6 +15,8 @@ from eap_worker.app import launch
 from eap_worker import cancel_reconcile
 # Registers eap.schedule_tick (parity round 2, Task 5).
 from eap_worker import schedule_tick
+# Registers eap.external_run_sweep (deadlines of external agents' runs).
+from eap_worker import external_run_sweep
 
 
 def main() -> int:
@@ -30,10 +32,12 @@ def main() -> int:
     # An invalid EAP_CANCEL_RECONCILE_* setting fails here, before DBOS launches or recovers anything.
     reconcile_config = cancel_reconcile.ReconcileConfig.from_env()
     tick_config = schedule_tick.ScheduleTickConfig.from_env()  # an invalid EAP_SCHEDULE_TICK fails here too
+    sweep_config = external_run_sweep.ExternalSweepConfig.from_env()
     settings = launch()
     # Every worker applies the same schedule (an upsert by name); one workflow runs per tick.
     cancel_reconcile.apply_cancel_reconcile_schedule(reconcile_config)
     schedule_tick.apply_schedule_tick(tick_config)
+    external_run_sweep.apply_external_sweep_schedule(sweep_config)
     logging.getLogger("eap_worker").info(
         "eap-worker ready: executor_id=%s app_version=%s schema=%s",
         settings.executor_id,

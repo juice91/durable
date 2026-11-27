@@ -74,6 +74,10 @@ jobs:
               - '.github/**'
               - 'deploy/**'
               - 'tests/deploy/**'
+              # The Compose quick start (tests/deploy/test_compose_quickstart.py).
+              - 'compose.yaml'
+              - '.env.example'
+              - 'docs/quickstart-compose.md'
               - 'scripts/ci/**'
               # Versioning and release notes: the version files must agree (bump.py --check below).
               - 'scripts/release/**'
@@ -133,11 +137,14 @@ jobs:
           unit="packages/shared-schemas/tests
           packages/agent-runtime/runtime_tests
           packages/kb-sources/kb_sources_tests
+          packages/inbound-auth/inbound_tests
           packages/knowledge/knowledge_tests
           packages/observability/tests
           packages/pricing/pricing_tests
           packages/processors/processors_tests
           packages/secrets/secrets_tests
+          plugins/iam-localadmin/iam_localadmin_tests
+          plugins/iam-webhook/iam_webhook_tests
           plugins/iam-openfga/iam_openfga_tests"
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         # Hosted runners only: on the self-hosted macOS runners the toolcache build wants /Users/runner, and

@@ -18,6 +18,8 @@ export interface MemberList {
   items: Member[];
   /** False: read only, "managed in the identity provider". */
   mutable: boolean;
+  /** False: only a person who already exists in the identity provider can be added; it cannot create one here. */
+  canCreateUsers: boolean;
 }
 
 const URL_BASE = `${BASE_URL}/api/v1/iam/members`;
@@ -26,10 +28,10 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 export async function listMembers(): Promise<MemberList> {
   const response = await fetch(URL_BASE, { headers: apiHeaders(), cache: "no-store" });
   if (!response.ok) throw await apiErrorFromResponse(response);
-  const body = (await response.json()) as Partial<MemberList>;
+  const body = (await response.json()) as { items?: Member[]; mutable?: boolean; can_create_users?: boolean };
   const items = body.items ?? [];
   for (const member of items) rememberMember(member.id, member.email); // so `decided_by` / audit subjects show as e-mails
-  return { items, mutable: body.mutable === true };
+  return { items, mutable: body.mutable === true, canCreateUsers: body.can_create_users !== false };
 }
 
 export async function inviteMember(email: string, role: MemberRole): Promise<Member> {

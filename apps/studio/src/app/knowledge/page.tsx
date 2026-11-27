@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus } from "lucide-react";
@@ -16,6 +18,9 @@ import { ICON_STROKE_WIDTH } from "@/lib/icons";
 import { getKnowledgeBase, listKnowledgeBases, type KnowledgeBase } from "@/lib/knowledge";
 import { navCrumb } from "@/lib/nav";
 import { routes } from "@/lib/routes";
+
+/** What "why can't I?" asks about on the list. */
+const CREATE_ACTIONS = ["create"] as const;
 
 /** Ingest cost requests (GET /knowledge-bases/{id}) in flight at once. */
 const COST_CONCURRENCY = 4;
@@ -77,7 +82,8 @@ export default function KnowledgePage() {
   }, [load]);
 
   const openCreate = useCallback(() => setCreating(true), []);
-  useCreateAction(creating ? null : openCreate);
+  const mayCreate = useCan("knowledge_base", null, "create");
+  useCreateAction(creating || !mayCreate ? null : openCreate);
 
   const columns: DataListColumn<KnowledgeBase>[] = [
     {
@@ -147,14 +153,17 @@ export default function KnowledgePage() {
       <PageHeader
         crumbs={[navCrumb("knowledge", { current: true })]}
         actions={
-          <Button variant="primary" onClick={openCreate} aria-keyshortcuts="c" data-testid="knowledge-new">
-            <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-            New knowledge base
-            <Kbd className="hidden md:inline-flex">C</Kbd>
-          </Button>
+          mayCreate ? (
+            <Button variant="primary" onClick={openCreate} aria-keyshortcuts="c" data-testid="knowledge-new">
+              <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+              New knowledge base
+              <Kbd className="hidden md:inline-flex">C</Kbd>
+            </Button>
+          ) : null
         }
       />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
+        {mayCreate ? null : <PermissionNotice kind="knowledge_base" id={null} actions={CREATE_ACTIONS} />}
         <p className="text-body text-muted-foreground">Documents agents can search and cite. Upload Markdown, text, HTML, reStructuredText, PDF, YAML or JSON; each is split into sections and embedded.</p>
         <DataList
           label="Knowledge bases"
@@ -177,7 +186,7 @@ export default function KnowledgePage() {
           empty={{
             title: "No knowledge bases yet",
             description: "Create one, upload documents, then attach it to an agent in the editor's Knowledge step.",
-            action: <Button variant="primary" onClick={openCreate}>New knowledge base</Button>,
+            action: mayCreate ? <Button variant="primary" onClick={openCreate}>New knowledge base</Button> : undefined,
           }}
         />
       </div>

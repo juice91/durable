@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from eap_run_store import EventLog
+from eap_schemas.capability_gaps import known_gaps
 from eap_schemas.system_context import ContextLayers, render_block
 from eap_iam import Only
 from eap_api.services.capabilities import ARCHITECT_RUN, CapabilityRegistryService, Viewer
@@ -79,7 +80,7 @@ def test_context_has_names_counts_gaps_and_is_the_same_over_rest_and_mcp(world):
     assert data["degraded"] == [] and len(data["snapshot_hash"]) == 64 and len(data["registry_version"]) == 64
     assert [a["name"] for a in data["tenant"]["agents"]] == ["Support triage"]
     assert data["tenant"]["secrets"] == ["slack-token"] and data["tenant"]["counts"]["secrets"] == 1
-    assert any(g["id"] == "gap.inbound_webhook" for g in data["known_gaps"])
+    assert known_gaps() and {g["id"] for g in data["known_gaps"]} == {g.id for g in known_gaps()}  # whatever the registry lists
     assert any(c["id"] == "trigger.schedule" and c["status"] == "available" for c in data["capabilities"])
     assert "architect.publish_agent" in data["policies"]["approvals"]
     with world.rest() as c:

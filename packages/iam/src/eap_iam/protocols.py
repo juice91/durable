@@ -6,7 +6,20 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
-from eap_iam.types import CatalogEntry, Decision, Grant, IdFilter, Member, Principal, RequestView, ResourceRef
+from eap_iam.types import (
+    AccessRequirement,
+    CatalogEntry,
+    Decision,
+    Grant,
+    GrantableRelation,
+    IdFilter,
+    Member,
+    Principal,
+    RequestView,
+    ResourceRef,
+    SessionTokens,
+    SignInResult,
+)
 
 GROUP_IDENTITY = "eap.iam.identity"
 GROUP_POLICY = "eap.iam.policy"
@@ -22,6 +35,37 @@ class IdentityProvider(Protocol):
     async def authenticate(self, request: RequestView) -> Principal | None:
         """A Principal, or None when this provider does not recognise the request. Raise `AuthError` only when
         the request presents THIS provider's credential and it is invalid: a bad token never falls through."""
+        ...
+
+
+@runtime_checkable
+class PasswordSignInProvider(IdentityProvider, Protocol):
+    """An identity provider that signs people in with a username and password and issues its own tokens (the built-in
+    admin account). The API's sign-in routes call it; the provider does the verification, the throttling and the
+    sessions. Every method is synchronous (hashing and a database), refuses with `SignInError`, and never logs a
+    password or a token. `client_address` is the caller's address as the entry point established it (for throttling)."""
+
+    def sign_in(self, username: str, password: str, client_address: str) -> SignInResult: ...
+
+    def setup_required(self) -> bool:
+        """True while there is no account: the first-run setup is open."""
+        ...
+
+    def set_up_admin(self, code: str, username: str, password: str, client_address: str) -> tuple[str, str]:
+        """Create the account with the one-time setup code the provider announced: its (tenant id, subject). Refuses
+        with `setup_closed` once there is one; of concurrent calls exactly one succeeds."""
+        ...
+
+    def change_password(self, username: str, current_password: str, new_password: str, client_address: str) -> SignInResult:
+        """Change the password (proven by the current one), end every session and start a new one."""
+        ...
+
+    def refresh(self, refresh_token: str) -> SessionTokens:
+        """Rotate the refresh token. A spent one ends its session."""
+        ...
+
+    def sign_out(self, refresh_token: str) -> tuple[str, str] | None:
+        """End the session of the refresh token: its (tenant id, subject), or None when there was none."""
         ...
 
 
@@ -62,6 +106,20 @@ class GrantingPolicyEngine(PolicyEngine, Protocol):
     async def revoke(self, grant: Grant) -> None: ...
 
     async def list_grants(self, resource: ResourceRef) -> list[Grant]: ...
+
+    def grantable(self, kind: str) -> list[GrantableRelation]:
+        """The grants a resource of `kind` can hold (empty for a kind with none)."""
+        ...
+
+
+@runtime_checkable
+class ExplainingPolicyEngine(PolicyEngine, Protocol):
+    """A policy engine that can say what an action needs (features contains "explain")."""
+
+    def requirements(self, action: str, kind: str, has_id: bool) -> AccessRequirement | None:
+        """The roles and grants that allow `action` on a `kind` (`has_id` False: the collection), or None when the
+        model has no such action. No engine call: it reads the model."""
+        ...
 
 
 @runtime_checkable

@@ -1,6 +1,7 @@
 // Tenant secrets (/api/v1/secrets). Values are write-only: PUT sends one, nothing ever returns it,
 // and Studio never stores, logs or echoes a typed value (errors here are built from the response's
 // code, never from the request body). A secret is referenced elsewhere as `secret:<name>`.
+import { refusedMessage } from "./access";
 import { ApiError, apiHeaders, BASE_URL } from "./api";
 
 /** A managed MCP server whose environment refers to a secret. */
@@ -25,6 +26,8 @@ async function errorFor(response: Response): Promise<ApiError> {
   let servers: SecretUser[] = [];
   try {
     const data = await response.json();
+    const refused = await refusedMessage(response.status, data);
+    if (refused) return new ApiError(response.status, refused);
     const detail = data?.detail ?? data;
     code = typeof detail === "string" ? detail : String(detail?.code ?? data?.code ?? "");
     const listed = detail?.servers ?? data?.servers;

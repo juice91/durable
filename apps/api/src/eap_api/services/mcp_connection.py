@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from eap_api.mcp_servers.connection import call_server_tool, connection_timeout_s, list_server_tools
 from eap_api.mcp_servers.models import McpServerModel, McpServerSecretModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.mcp_runtime import McpRuntimeService, Target, get_server_or_404, target_of
 from eap_api.services.mcp_servers import keyring, secret_context
 from eap_run_store import EventLog, RunIdConflict, RunStore
@@ -82,11 +84,14 @@ def _run_body(run: dict[str, Any], status_value: str | None = None) -> dict[str,
     }
 
 
-class McpConnectionService:
+class McpConnectionService(AccessBound):
+    """Testing a server and calling one of its tools: `edit` to test (it connects with the stored headers), `run` to call."""
+
     def __init__(
         self, engine: Engine, policy: OutboundPolicy, runtime: McpRuntimeService,
-        run_store: RunStore | None = None, event_log: EventLog | None = None,
+        run_store: RunStore | None = None, event_log: EventLog | None = None, access: Access | None = None,
     ) -> None:
+        self._access = access  # None: no caller to check
         self._engine = engine
         self._policy = policy
         self._runtime = runtime
@@ -122,6 +127,7 @@ class McpConnectionService:
         (EAP_MCP_TEST_START_TIMEOUT_SECONDS); the answer then carries `runtime: {state (before), started,
         waited_ms, idle_minutes}`; a start still going when the time is up answers `runtime_starting` (not
         stored), a `failed` runtime `runtime_not_running` with `runtime.last_error`."""
+        await anyio.to_thread.run_sync(acl.require, self._access, "edit", "mcp_server", str(server_id))
         policy = self._policy
         target, secrets = await anyio.to_thread.run_sync(self._load_for_test, tenant_id, server_id)
 
@@ -186,6 +192,7 @@ class McpConnectionService:
         `run_id` returns the recorded run without calling the tool again. Refuses with 404 (no such server or
         tool), 422 (server disabled, input too large or rejected by the tool's schema; nothing recorded), 409
         (`run_id` used by a different request), 503 (header secrets without the platform key)."""
+        await anyio.to_thread.run_sync(acl.require, self._access, "run", "mcp_server", str(server_id))
         run_store, event_log = self._run_store, self._event_log
         run_id = run_id or uuid.uuid4()
         sid = str(server_id)

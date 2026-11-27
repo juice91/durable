@@ -1,0 +1,211 @@
+# Quick start: the whole platform on one machine with Docker Compose (docs/quickstart-compose.md).
+#
+#   docker compose up -d                      # builds the images on first run
+#   docker compose exec api setup-link        # the link that creates your admin account
+#
+# Optional: `cp .env.example .env` first and put a model provider key in it. Only Studio is published, on this
+# machine's loopback address. For development against a database only, see infrastructure/docker/compose.yaml.
+name: eap-quickstart
+
+x-python: &python
+  image: eap-python:${EAP_IMAGE_TAG:-local}
+  # Built by the `init` service below; never pulled from a registry.
+  pull_policy: never
+
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+# The per-install secrets: files the `init` service generates into the `secrets` volume (Postgres gets a volume of its
+# own, `postgres_secrets`, with a copy of the passwords it reads). The entrypoint reads each
+# `<NAME>_FILE` into `<NAME>`; the sign-in plug-in reads its key file itself.
+x-secret-files: &secret-files
+  EAP_DATABASE_URL_FILE: /run/eap-secrets/database_url
+  EAP_DBOS_URL_FILE: /run/eap-secrets/dbos_url
+  EAP_SECRETS_KEY_FILE: /run/eap-secrets/secrets_key
+  EAP_AUDIT_HASH_SALT_FILE: /run/eap-secrets/audit_hash_salt
+
+# One built-in admin account and tenant API keys. `openaccess` means every signed-in user is admin, which is what a
+# single admin account is; for several users and roles see docs/iam.md.
+x-iam: &iam
+  EAP_AUTH_MODE: production
+  EAP_IAM_IDENTITY: localadmin,apikey
+  EAP_IAM_POLICY: openaccess
+  EAP_IAM_ALLOW_TRANSITIONAL: "1"
+  EAP_IAM_MEMBERSHIP: localadmin
+
+# Settings the API and the worker share. A name with no value is passed on only when you set it (in .env or the shell).
+x-platform: &platform
+  EAP_APP_VERSION: m1
+  EAP_DBOS_SYSTEM_SCHEMA: dbos
+  EAP_BLOB_BACKEND: fs
+  EAP_BLOB_DIR: /var/lib/eap/blobs
+  EAP_ALLOWED_MODELS: ${EAP_ALLOWED_MODELS:-anthropic:*,openai:*,litellm:*}
+  EAP_ALLOWED_EMBEDDING_MODELS: ${EAP_ALLOWED_EMBEDDING_MODELS:-openai:text-embedding-3-small=1536}
+  EAP_ALLOWED_TOOLS:
+  OPENAI_API_KEY:
+  OPENAI_BASE_URL:
+  ANTHROPIC_API_KEY:
+  EAP_LITELLM_BASE_URL:
+  EAP_LITELLM_API_KEY:
+  EAP_LITELLM_EMBEDDING_BASE_URL:
+  EAP_LITELLM_EMBEDDING_API_KEY:
+  EAP_OPENAI_EMBEDDING_API_KEY:
+  # Observability (the `observability` profile): unset means off.
+  OTEL_EXPORTER_OTLP_ENDPOINT:
+  EAP_LOKI_URL:
+
+services:
+  init:
+    # Generates the secrets that are missing (never overwrites one), hands the blob volume to the platform's user and
+    # gives Postgres its first-start script. Volumes only: the stack needs no file of this checkout at run time.
+    image: eap-python:${EAP_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: deploy/docker/python.Dockerfile
+      args:
+        EAP_BUILD_SHA: ${EAP_BUILD_SHA:-dev}
+    user: "0:0"
+    entrypoint: ["python", "-I", "/usr/local/lib/eap/compose-init.py"]
+    command: ["/run/eap-secrets", "/var/lib/eap/blobs", "/var/lib/eap/initdb", "/var/lib/eap/postgres-secrets"]
+    network_mode: none
+    volumes:
+      - secrets:/run/eap-secrets
+      - blobs:/var/lib/eap/blobs
+      - postgres_init:/var/lib/eap/initdb
+      - postgres_secrets:/var/lib/eap/postgres-secrets
+
+  postgres:
+    # Postgres 17 with pgvector. Not published: only the platform's containers reach it.
+    image: pgvector/pgvector:0.8.2-pg17-trixie
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - idle_in_transaction_session_timeout=300000
+    shm_size: 256mb
+    environment:
+      POSTGRES_USER: eap_admin
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/eap-secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_secrets:/run/eap-secrets:ro
+      - postgres_init:/docker-entrypoint-initdb.d:ro
+    depends_on:
+      init: {condition: service_completed_successfully}
+    healthcheck:
+      # Over TCP: the temporary server of the first start listens on the socket only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U eap_admin -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  migrate:
+    <<: [*python, *hardening]
+    command: [migrate]
+    environment:
+      <<: [*secret-files, *iam]
+    volumes:
+      - secrets:/run/eap-secrets:ro
+    depends_on:
+      init: {condition: service_completed_successfully}
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: [*python, *hardening]
+    command: [api]
+    environment:
+      <<: [*secret-files, *iam, *platform]
+      EAP_LOCAL_AUTH_SIGNING_KEY_FILE: /run/eap-secrets/local_auth_signing_key
+      EAP_STUDIO_URL: ${EAP_STUDIO_URL:-http://localhost:${EAP_STUDIO_PORT:-3000}}
+      # Off: inbound webhooks and external agents need a host others can reach (docs/expose.md).
+      EAP_WEBHOOKS_ENABLED: "false"
+      EAP_EXTERNAL_ACCESS_ENABLED: "false"
+    volumes:
+      - secrets:/run/eap-secrets:ro
+      - blobs:/var/lib/eap/blobs
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-I", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+      start_interval: 2s
+    restart: unless-stopped
+
+  worker:
+    <<: [*python, *hardening]
+    command: [worker]
+    environment:
+      <<: [*secret-files, *iam, *platform]
+      # Stable across restarts: the worker recovers the runs the previous container owned.
+      EAP_EXECUTOR_ID: worker-1
+      EAP_API_INTERNAL_URL: http://api:8000
+      # Managed (containerised) MCP servers need Kubernetes; remote MCP servers work.
+      EAP_MCP_RUNTIME_SWEEP_SCHEDULE: "off"
+    volumes:
+      - secrets:/run/eap-secrets:ro
+      - blobs:/var/lib/eap/blobs
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      api: {condition: service_healthy}
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "tr '\\0' ' ' </proc/1/cmdline | grep -q eap_worker"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+      start_interval: 2s
+    restart: unless-stopped
+
+  studio:
+    <<: *hardening
+    image: eap-studio:${EAP_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: deploy/docker/studio.Dockerfile
+      args:
+        # Studio's server forwards /api/ to the API, so the browser needs one origin and the API is not published.
+        EAP_API_INTERNAL_URL: http://api:8000
+    environment:
+      EAP_STUDIO_AUTH: local
+    ports:
+      - "127.0.0.1:${EAP_STUDIO_PORT:-3000}:3000"
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+      start_interval: 2s
+    restart: unless-stopped
+
+  lgtm:
+    # Grafana with Loki, Tempo and Prometheus: `docker compose --profile observability up -d`. For trying out
+    # only: its ingest and query APIs have no authentication.
+    profiles: [observability]
+    image: grafana/otel-lgtm@sha256:72e05804790e6e0d8c0b70a6d5ff1f721ef7b203463374631e99aa3429bd0cf6
+    ports:
+      - "127.0.0.1:${EAP_GRAFANA_PORT:-3001}:3000"
+    volumes:
+      - lgtm_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  secrets:
+  blobs:
+  postgres_init:
+  postgres_secrets:
+  lgtm_data:

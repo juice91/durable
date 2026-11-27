@@ -18,6 +18,9 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel, AgentVersionModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
+from eap_api.services.agent_grants import AgentGrantService, PublishGrants
 from eap_api.services.errors import InvalidInput, NotFound
 from eap_api.services.revision_conflict import stale_revision
 from eap_api.services.run_filters import plain_refusals
@@ -35,6 +38,7 @@ from eap_run_store.agent_checks import (  # noqa: F401 - re-exported: the API's 
     publish_warnings,
     validate_stored_draft,
 )
+from eap_run_store import AuditStore
 from eap_run_store.definitions import publish_agent, restore_agent_version, set_agent_archived
 from eap_run_store.revisions import RevisionMismatch, bump_row
 from eap_schemas import AgentSpec
@@ -189,13 +193,20 @@ def _compare_side(db: Session, agent: AgentModel, side: int | str) -> dict:
 
 
 @plain_refusals
-class AgentService:
+class AgentService(AccessBound):
     """Agents and their versions. Reads return the API shapes; writes return `(shape, revision)` for the ETag."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, access: Access | None = None) -> None:
         self.db = db
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _require(self, action: str, agent_id: uuid.UUID | str | None) -> None:
+        acl.require(self._access, action, "agent", None if agent_id is None else str(agent_id))
 
     # -- helpers -----------------------------------------------------------------------------------
+
+    def _grants(self) -> AgentGrantService:
+        return AgentGrantService(self.db, self._access, AuditStore(self.db.get_bind()) if self._access is not None else None)
 
     def _run_definition_op(self, op: Callable[[Connection], Any]) -> Any:
         """Run one shared definition operation (eap_run_store.definitions) in the request's transaction:
@@ -228,11 +239,13 @@ class AgentService:
 
     def create(self, tenant_id: str, spec: AgentSpec) -> tuple[dict, int]:
         """Create an agent with `spec` as its draft."""
+        self._require("create", None)
         refuse_architect_tools(spec, builtin=False)
         agent = AgentModel(tenant_id=tenant_id, name=spec.name, draft_spec=spec.model_dump(mode="json"))
         self.db.add(agent)
         self.db.commit()
         self.db.refresh(agent)
+        acl.register(self._access, "agent", str(agent.id))  # before the response: the creator owns what it made
         return {**agent_to_response(agent, None), "builtin_role": None}, agent.revision
 
     def list(self, tenant_id: str, *, archived: bool, include_system: bool) -> list[dict]:
@@ -244,6 +257,8 @@ class AgentService:
             .all()
         )
         agents = [a for a in agents if include_system or builtin_role(a) != "drafter"]
+        shown = set(acl.keep(acl.visible(self._access, "agent"), [str(a.id) for a in agents]))  # one engine call
+        agents = [a for a in agents if str(a.id) in shown]
         # One query for every agent's newest version (spec included), not one per agent.
         newest = (
             self.db.query(AgentVersionModel.agent_id, func.max(AgentVersionModel.version).label("v"))
@@ -260,6 +275,7 @@ class AgentService:
         return [agent_to_response(agent, latest_by_agent.get(str(agent.id))) for agent in agents]
 
     def get(self, tenant_id: str, agent_id: uuid.UUID) -> tuple[dict, int]:
+        self._require("read", agent_id)
         agent = self.tenant_agent(tenant_id, agent_id)
         return self._shape(agent), agent.revision
 
@@ -268,6 +284,7 @@ class AgentService:
     ) -> tuple[dict, int]:
         """Replace the draft spec. A stale `expected_revision` is the revision-mismatch Conflict with the
         current agent."""
+        self._require("edit", agent_id)
         agent = self.tenant_agent(tenant_id, agent_id)
 
         def current() -> tuple[dict, int]:
@@ -293,6 +310,7 @@ class AgentService:
     ) -> tuple[dict, int]:
         """eap_run_store.definitions.set_agent_archived: locked like publish and restore, 409 for a built-in
         agent or when published workflows run it (unless force)."""
+        self._require("archive", agent_id)
         self._run_definition_op(
             lambda conn: set_agent_archived(conn, tenant_id, str(agent_id), archived, force=force)
         )
@@ -304,12 +322,17 @@ class AgentService:
     def publish(self, tenant_id: str, user_id: str, agent_id: uuid.UUID) -> tuple[dict, int]:
         """Publish the draft as a new version: the version and `warnings` (publish-time advice that does not
         block). The work is eap_run_store.definitions.publish_agent, shared with the Architect's publish tool."""
+        self._require("publish", agent_id)
+        grants = self._grants()
+        plan = grants.plan("agent", str(agent_id), self.tenant_agent(tenant_id, agent_id).draft_spec)
+        grants.require_approvable(plan)  # newly used servers and secrets: an admin approves, and approving grants them
         result = self._run_definition_op(
             lambda conn: publish_agent(
                 conn, tenant_id, str(agent_id), created_by=user_id,
                 after_lock=lambda: _latest_version(self.db, str(agent_id)),
             )
         )
+        grants.apply(plan, f"published version {result.version['version']}")
         return {**version_dict_to_response(result.version), "warnings": result.warnings}, result.revision
 
     def restore(
@@ -317,16 +340,42 @@ class AgentService:
     ) -> tuple[dict, int]:
         """Roll back by publishing version `latest + 1` whose spec equals version `version_num` (history is
         never rewritten). The work is eap_run_store.definitions.restore_agent_version."""
+        self._require("publish", agent_id)  # a restore publishes a new version
+        grants = self._grants()
+        old = (
+            self.db.query(AgentVersionModel)
+            .filter(AgentVersionModel.agent_id == str(agent_id), AgentVersionModel.version == version_num).first()
+        )
+        plan = grants.plan("agent", str(agent_id), None if old is None else old.spec)
+        grants.require_approvable(plan)
         result = self._run_definition_op(
             lambda conn: restore_agent_version(
                 conn, tenant_id, str(agent_id), version_num, created_by=user_id,
                 discard_draft=discard_draft, after_lock=lambda: _latest_version(self.db, str(agent_id)),
             )
         )
+        grants.apply(plan, f"restored version {version_num} as version {result.version['version']}")
         return {**version_dict_to_response(result.version), "warnings": result.warnings}, result.revision
+
+    def publish_grants(self, tenant_id: str, agent_id: uuid.UUID) -> dict:
+        """What publishing the draft would newly grant (the publish card's line), and whether the caller may approve it."""
+        self._require("publish", agent_id)
+        plan = self._grants().plan("agent", str(agent_id), self.tenant_agent(tenant_id, agent_id).draft_spec)
+        return (plan or PublishGrants("agent", str(agent_id))).to_json()
+
+    def access_grants(self, tenant_id: str) -> AgentGrantService:
+        return self._grants()
+
+    def access_status(self, tenant_id: str, agent_id: uuid.UUID) -> dict:
+        """The Access section: what this agent is authorised to use (docs/iam.md, "Agent and workflow grants")."""
+        self._require("read", agent_id)
+        self.tenant_agent(tenant_id, agent_id)
+        latest = _latest_version(self.db, str(agent_id))
+        return self._grants().status("agent", str(agent_id), None if latest is None else latest.spec)
 
     def list_versions(self, tenant_id: str, agent_id: uuid.UUID) -> list[dict]:
         """Versions of an agent, newest first."""
+        self._require("read", agent_id)
         self.tenant_agent(tenant_id, agent_id)
         versions = (
             self.db.query(AgentVersionModel)
@@ -337,6 +386,7 @@ class AgentService:
         return [version_to_response(v) for v in versions]
 
     def get_version(self, tenant_id: str, agent_id: uuid.UUID, version_num: int) -> dict:
+        self._require("read", agent_id)
         self.tenant_agent(tenant_id, agent_id)
         version = (
             self.db.query(AgentVersionModel)
@@ -350,6 +400,7 @@ class AgentService:
     def compare(self, tenant_id: str, agent_id: uuid.UUID, base: int | str, target: int | str) -> dict:
         """Two versions, or a version and the draft (a side is a version number or `"draft"`), with the
         field-level `changes` and the instructions' line diff. Read-only."""
+        self._require("read", agent_id)
         agent = self.tenant_agent(tenant_id, agent_id)
         base_side = _compare_side(self.db, agent, base)
         target_side = _compare_side(self.db, agent, target)

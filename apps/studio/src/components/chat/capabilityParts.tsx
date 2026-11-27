@@ -1,5 +1,6 @@
 "use client";
 
+import { useAgentPage } from "@/components/agentPage/AgentPageContext";
 import React, { createContext, useContext } from "react";
 import { type DataMessagePartProps } from "@assistant-ui/react";
 import { RotateCcw } from "lucide-react";
@@ -58,6 +59,7 @@ export function ToolApprovalPart({ data: raw }: DataMessagePartProps<ToolApprova
   const data = raw as ToolApprovalState | undefined;
   const runId = useMessageRunId();
   const { refreshRun, lostRaces, noteLostRace } = useContext(ChatRunActionsContext);
+  const agentId = useAgentPage()?.agentId;
   if (!data || runId === null) return null;
   if (data.decision) {
     return (
@@ -73,6 +75,7 @@ export function ToolApprovalPart({ data: raw }: DataMessagePartProps<ToolApprova
   return (
     <div className="my-2" data-testid="tool-approval-waiting" data-tool-call-id={data.toolCallId}>
       <ApprovalCard
+        subject={agentId ? { kind: "agent", id: agentId } : null}
         approval={{ kind: "tool", runId, toolCallId: data.toolCallId, toolName: data.toolName, args: data.args, deadline: data.deadline, summary: data.summary ?? null }}
         onRefresh={() => refreshRun(runId)}
         onConflict={() => noteLostRace?.(toolCallInfoKey(runId, data.toolCallId))}

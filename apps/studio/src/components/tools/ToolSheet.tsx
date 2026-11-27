@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { Can } from "@/lib/permissions";
 import React from "react";
 import Link from "next/link";
 import { EmptyState } from "@/components/shared/EmptyState";
@@ -35,6 +37,8 @@ export interface ToolSheetProps {
   loadError: string | null;
   onRetryLoad: () => void;
 }
+
+const RUN_TOOLS = ["run"] as const;
 
 /**
  * One tool in a right-hand Sheet (full width below 768 px), addressed by `?tool=`: tabs Overview
@@ -99,7 +103,9 @@ export function ToolSheet({ name, server, row, loading, tab, onTabChange, onOpen
                 {runnable ? (
                   // `hidden` (not only a class): forceMount drops Radix's own, and the form must leave the tab order.
                   <TabsContent value="run" forceMount hidden={activeTab !== "run"} className="pt-4 data-[state=inactive]:hidden">
-                    <ToolRunner key={runnable.id} tool={runnable} />
+                    <Can kind="tenant" action="run" fallback={<PermissionNotice kind="tenant" id={null} actions={RUN_TOOLS} />}>
+                      <ToolRunner key={runnable.id} tool={runnable} />
+                    </Can>
                   </TabsContent>
                 ) : null}
               </Tabs>

@@ -1,9 +1,21 @@
-import { beforeAll, beforeEach, expect } from "vitest";
+import { beforeAll, beforeEach, expect, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { resetWorkingMemoryCache } from "@/lib/workingMemoryCache";
 import { setChatProtocolDefaultForTests } from "@/components/chat/chatProtocol";
 import { configure } from "@testing-library/react";
 import { installSelectChange } from "./select";
+
+// Suites that are not about roles run as someone who may do everything (Studio's admin view), with no capability or
+// explain request to answer. The role suites opt out with `vi.unmock("@/lib/permissions")` and answer both routes.
+vi.mock("@/lib/permissions", async (importOriginal) => {
+  const everything = { loading: false, can: () => true };
+  return {
+    ...(await importOriginal<object>()),
+    usePermissions: () => everything,
+    useCan: () => true,
+    Can: ({ children }: { children?: unknown }) => children ?? null,
+  };
+});
 
 // The hosted runner is several times slower than a laptop: findBy/waitFor default to 1 s, which a
 // loading state can outlast there (8 s stays under the 15 s test timeout in vite.config.ts).

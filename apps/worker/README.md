@@ -2,7 +2,7 @@
 
 Durable agent runs for the Enterprise Agent Platform: one generic Pydantic AI agent (`eap-agent`,
 `DBOSDurability`) driven by the DBOS workflow `eap.agent_run` on queue `eap-agent-runs`, per the
-"Run hand-off contract" in `docs/plans/2026-11-11-milestone-1-vertical-slice.md`.
+"Run hand-off contract" in an internal design note.
 
 Run it: `uv run python -m eap_worker` (blocks), or `bash scripts/dev-worker.sh` for a restart loop
 that recovers the previous process's pending runs (fixed `EAP_EXECUTOR_ID`). Configuration is in
@@ -27,7 +27,7 @@ model step:
   Load the key into your shell, never into a file:
   `export LITELLM_API_KEY="$(sops -d ~/.config/sops/secrets.json | jq -r .LITELLM_QWEN38_THINKING_API_KEY)"`.
 
-  The public URL `https://llm-gateway.example.com/v1` sits behind Cloudflare, which cuts any single
+  The public URL `https://llm-gateway.example.com/v1` sits behind a proxy that cuts any single
   request at ~300 s. For local development use the SSH tunnel `http://127.0.0.1:14001/v1`, which
   has no such limit.
 

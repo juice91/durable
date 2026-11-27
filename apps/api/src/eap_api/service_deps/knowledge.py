@@ -20,6 +20,8 @@ from eap_api.deps import (
     run_launcher_of,
     run_stores_of,
 )
+from eap_api.service_deps.iam import AccessDep
+from eap_api.services.access import Access
 from eap_api.services.attachments import AttachmentService
 from eap_api.services.kb_sources import KbSourceService
 from eap_api.services.knowledge import KnowledgeService
@@ -29,45 +31,47 @@ from eap_run_store.knowledge import KnowledgeStore
 
 
 def get_knowledge_service(
-    store=Depends(get_knowledge_store), stores=Depends(require_run_storage), launcher=Depends(get_run_launcher)
+    access: AccessDep, store=Depends(get_knowledge_store), stores=Depends(require_run_storage),
+    launcher=Depends(get_run_launcher),
 ) -> KnowledgeService:
-    return KnowledgeService(store, stores[0], launcher)
+    return KnowledgeService(store, stores[0], launcher, access)
 
 
 KnowledgeServiceDep = Annotated[KnowledgeService, Depends(get_knowledge_service)]
 
 
-def build_kb_source_service(engine: Engine, run_store, launcher) -> KbSourceService:
+def build_kb_source_service(engine: Engine, run_store, launcher, access: Access | None = None) -> KbSourceService:
     return KbSourceService(
         KnowledgeStore(engine), SourceStore(engine), ConnectionStore(engine), SyncStore(engine), run_store, engine,
-        launcher,
+        launcher, access,
     )
 
 
 def get_kb_source_service(
-    engine: Engine = Depends(get_database_engine), stores=Depends(require_run_storage),
+    access: AccessDep, engine: Engine = Depends(get_database_engine), stores=Depends(require_run_storage),
     launcher=Depends(get_run_launcher),
 ) -> KbSourceService:
-    return build_kb_source_service(engine, stores[0], launcher)
+    return build_kb_source_service(engine, stores[0], launcher, access)
 
 
 KbSourceServiceDep = Annotated[KbSourceService, Depends(get_kb_source_service)]
 
 
 def get_memory_service(
-    memory=Depends(get_memory_store), stores=Depends(require_run_storage), engine: Engine = Depends(get_database_engine)
+    access: AccessDep, memory=Depends(get_memory_store), stores=Depends(require_run_storage),
+    engine: Engine = Depends(get_database_engine),
 ) -> MemoryService:
-    return MemoryService(memory, stores[0], engine)
+    return MemoryService(memory, stores[0], engine, access)
 
 
 MemoryServiceDep = Annotated[MemoryService, Depends(get_memory_service)]
 
 
 def get_attachment_service(
-    attachments=Depends(get_chat_attachment_store), feedback=Depends(get_message_feedback_store),
+    access: AccessDep, attachments=Depends(get_chat_attachment_store), feedback=Depends(get_message_feedback_store),
     stores=Depends(require_run_storage), engine: Engine = Depends(get_database_engine),
 ) -> AttachmentService:
-    return AttachmentService(attachments, feedback, stores[0], engine)
+    return AttachmentService(attachments, feedback, stores[0], engine, access)
 
 
 AttachmentServiceDep = Annotated[AttachmentService, Depends(get_attachment_service)]

@@ -74,6 +74,7 @@ from eap_schemas.architect import (
 
 from eap_worker import architect_evals
 from eap_worker.architect_allowlist import approved_for_tenant
+from eap_worker.read_only import is_read_only, refusal
 from eap_worker.system_context import snapshot_hash_of
 
 log = logging.getLogger("eap_worker.architect_tools")
@@ -1108,6 +1109,8 @@ async def _save_agent(
     """Save an agent definition as a draft (not live). New agent when `id` is unused, otherwise the next
     draft of that Architect-made agent. If the result is needs_confirmation, ask the person first and call
     again with confirm: true. Grant a tool only when the description names a capability."""
+    if is_read_only(ctx.deps):
+        return refusal()
     return await save_agent(_engine(), ctx.deps.tenant_id, spec, confirm, run_id=str(ctx.deps.run_id))
 
 
@@ -1115,6 +1118,8 @@ async def _save_workflow(
     ctx: RunContext[RunDeps], spec: ArchitectWorkflowSpec | str, confirm: bool = False
 ) -> dict[str, Any]:
     """Save a workflow definition as a draft (not live). Same rules as save_agent."""
+    if is_read_only(ctx.deps):
+        return refusal()
     return await save_workflow(_engine(), ctx.deps.tenant_id, spec, confirm, run_id=str(ctx.deps.run_id))
 
 
@@ -1125,6 +1130,8 @@ async def _gated(
     """Run one gated operation once for this tool call: the side-effect store keeps the result under
     the run and tool call id, so a crashed and replayed call returns it instead of repeating the change
     (and an unknown outcome is raised, never guessed)."""
+    if is_read_only(ctx.deps):
+        return refusal()
     if ctx.tool_call_id is None:
         raise ValueError("tool_call_id is required for the Architect's gated tools")
     key = f"architect:{ctx.deps.run_id}:{ctx.tool_call_id}"

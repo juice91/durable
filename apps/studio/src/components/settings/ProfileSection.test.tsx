@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 describe("ProfileSection", () => {
-  test("Access: identity, roles with their meaning, the method, my activity via actor=me, no account links, an empty API keys slot", async () => {
+  test("Access: identity, roles with their meaning, the method, my activity via actor=me, no account links, the API keys section", async () => {
     respond({}, rows);
     render(<ProfileSection />);
     expect(await screen.findByTestId("profile-email")).toHaveTextContent("joyce@example.com");
@@ -53,7 +53,7 @@ describe("ProfileSection", () => {
     expect(await screen.findByTestId("profile-activity-list")).toHaveTextContent("create_agent");
     const auditCall = fetchMock.mock.calls.map(([u]) => String(u)).find((u) => u.includes("/api/v1/audit"))!;
     expect(new URL(auditCall, "http://x").searchParams.get("actor")).toBe("me");
-    expect(screen.getByTestId("profile-api-keys-slot")).toBeEmptyDOMElement();
+    expect(await screen.findByTestId("personal-keys-empty")).toBeInTheDocument();
   });
 
   test("ZITADEL: the session expiry and the account links", async () => {
@@ -71,6 +71,7 @@ describe("ProfileSection", () => {
     render(<ProfileSection />);
     expect(await screen.findByTestId("profile-method")).toHaveTextContent("Dev bearer");
     expect(screen.queryByTestId("profile-account")).toBeNull();
+    expect(screen.getByTestId("profile-api-keys-unavailable")).toBeInTheDocument();
   });
 
   test("an empty or failing activity read says so and does not break the page", async () => {

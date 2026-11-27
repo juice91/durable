@@ -18,9 +18,10 @@ import base64
 import binascii
 import json
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import cast, func, select, text, tuple_
+from sqlalchemy import and_, cast, func, or_, select, text, true, tuple_
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, distinct_on
 
 from eap_api.models import AgentModel
@@ -81,6 +82,16 @@ def brief_aggregates(aggregates: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------- suites
 
 
+def _targets_visible(model, agent_ids: Sequence[str] | None, workflow_ids: Sequence[str] | None):
+    """The per-resource access restriction (IAM P2b) on a row that targets an agent or a workflow (a suite, an eval run):
+    its agent is in `agent_ids` or its workflow in `workflow_ids`. None = no limit on that kind (both None: no condition)."""
+    if agent_ids is None and workflow_ids is None:
+        return None
+    agent_ok = true() if agent_ids is None else model.agent_id.in_(list(agent_ids))
+    workflow_ok = true() if workflow_ids is None else model.workflow_id.in_(list(workflow_ids))
+    return or_(and_(model.workflow_id.is_(None), agent_ok), and_(model.workflow_id.is_not(None), workflow_ok))
+
+
 def list_suite_overview(
     store: EvalStore,
     db,
@@ -90,6 +101,8 @@ def list_suite_overview(
     include_archived: bool,
     limit: int,
     after: str | None,
+    visible_agent_ids: Sequence[str] | None = None,
+    visible_workflow_ids: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """`(rows, next_cursor)`: each row is `{suite: EvalSuiteRecord, agent_name, agent_archived,
     last_run: {run, aggregates} | None}`."""
@@ -114,6 +127,9 @@ def list_suite_overview(
     )
     if agent_id is not None:
         stmt = stmt.where(EvalSuiteModel.agent_id == agent_id)
+    visible = _targets_visible(EvalSuiteModel, visible_agent_ids, visible_workflow_ids)
+    if visible is not None:
+        stmt = stmt.where(visible)
     if not include_archived:
         stmt = stmt.where(EvalSuiteModel.archived_at.is_(None))
     if cursor is not None:
@@ -164,6 +180,8 @@ def list_run_overview(
     suite_id: str | None,
     limit: int,
     before: RunCursor | None,
+    visible_agent_ids: Sequence[str] | None = None,
+    visible_workflow_ids: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """`(rows, next_cursor)`: each row is `{run, aggregates, agent_name, suite_name}`."""
     stmt = (
@@ -174,6 +192,9 @@ def list_run_overview(
     )
     if agent_id is not None:
         stmt = stmt.where(RunModel.agent_id == agent_id)
+    visible = _targets_visible(RunModel, visible_agent_ids, visible_workflow_ids)
+    if visible is not None:
+        stmt = stmt.where(visible)
     if suite_id is not None:
         stmt = stmt.where(RunModel.eval_suite_id == suite_id)
     if before is not None:
@@ -246,19 +267,19 @@ def _run_values(store: EvalStore, tenant_id: str, run_ids: list[str]) -> dict[st
 
 
 def list_scorer_overview(
-    store: EvalStore, db, tenant_id: str, *, limit: int, after: str | None
+    store: EvalStore, db, tenant_id: str, *, limit: int, after: str | None,
+    visible_agent_ids: Sequence[str] | None = None, visible_workflow_ids: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """`(scorers, next_cursor)` ordered by (kind, name). A scorer is an evaluator `kind` with its
     result name (its `name`, else the kind, as the eval runtime names it) used by at least one
     active suite, at suite or case level."""
     cursor = _decode(after, 2) if after is not None else None
+    suite_query = select(EvalSuiteModel).where(EvalSuiteModel.tenant_id == tenant_id, EvalSuiteModel.archived_at.is_(None))
+    visible = _targets_visible(EvalSuiteModel, visible_agent_ids, visible_workflow_ids)
+    if visible is not None:
+        suite_query = suite_query.where(visible)
     with store.Session() as session:
-        suites = {
-            row.id: row
-            for row in session.execute(
-                select(EvalSuiteModel).where(EvalSuiteModel.tenant_id == tenant_id, EvalSuiteModel.archived_at.is_(None))
-            ).scalars()
-        }
+        suites = {row.id: row for row in session.execute(suite_query).scalars()}
         case_rows = session.execute(
             select(EvalCaseModel.suite_id, EvalCaseModel.evaluators).where(
                 EvalCaseModel.tenant_id == tenant_id,

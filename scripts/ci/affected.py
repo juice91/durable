@@ -15,7 +15,7 @@ with the reason for each.
 Rules, first match wins:
   * docs/, apps/docs/, examples/, spikes/, .planning/, any *.md       -> nothing to test
   * apps/studio/ and the pnpm files                                    -> Studio only, no Python tests
-  * tests/deploy/, deploy/, .dockerignore, other .github/ files        -> the deploy checks only
+  * tests/deploy/, deploy/, compose.yaml, .dockerignore, other .github/ files        -> the deploy checks only
   * root pyproject.toml, uv.lock, .github/workflows/ci*.yml, scripts/ci/, any conftest.py,
     the rest of tests/ (tests/deploy is deploy-only), packages/db (its pytest plugin runs in every session), and any path no
     rule knows (config/, infrastructure/, scripts/, ...)                -> everything
@@ -39,7 +39,7 @@ NOTHING_PREFIXES = ("docs/", "apps/docs/", "examples/", "spikes/", ".planning/")
 STUDIO_FILES = {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc"}
 STUDIO_PREFIXES = ("apps/studio/",)
 DEPLOY_PREFIXES = ("tests/deploy/", "deploy/")
-DEPLOY_FILES = {".dockerignore"}
+DEPLOY_FILES = {".dockerignore", "compose.yaml"}
 EVERYTHING_FILES = {"pyproject.toml", "uv.lock"}
 EVERYTHING_PREFIXES = ("scripts/ci/", "tests/")
 # Members whose change affects every Python test: eap-db registers a pytest plugin (eap_db.testing)
@@ -56,8 +56,9 @@ SCHEMA_FILE = re.compile(
 # own dependents do not rerun (nothing of the key's code changed), which keeps one cross-import
 # in a test from pulling in the whole graph.
 TEST_ONLY_DEPENDENCIES: dict[str, tuple[str, ...]] = {
-    # The API suite exercises the IAM plug-ins through the identity chain (the key, dev bearer and policy acceptance tests).
-    "eap-api": ("eap-worker", "eap-iam-apikey", "eap-iam-cfaccess", "eap-iam-devloopback", "eap-iam-openaccess", "eap-iam-zitadel"),
+    # The API suite exercises the IAM plug-ins through the identity chain (the key, dev bearer and policy acceptance tests)
+    # and the real OpenFGA model (per-resource authorisation tests run `OpenFgaPolicy` over a model-evaluating double).
+    "eap-api": ("eap-worker", "eap-iam-apikey", "eap-iam-cfaccess", "eap-iam-devloopback", "eap-iam-localadmin", "eap-iam-openaccess", "eap-iam-openfga", "eap-iam-webhook", "eap-iam-zitadel"),
     "eap-pricing": ("eap-api", "eap-worker"),
     "eap-schemas": ("eap-agent-runtime", "eap-worker"),
 }

@@ -1,4 +1,6 @@
 "use client";
+import { AGENT_PERMISSIONS } from "./agentPermissions";
+import { usePermissions } from "@/lib/permissions";
 import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { MessageSquare } from "lucide-react";
@@ -63,6 +65,9 @@ export function EditorTab({ agentId }: { agentId: string }) {
   const layout = useEditorLayout();
   const guardDialog = useUnsavedChangesGuard(isDirty);
   const router = useRouter();
+  const permissions = usePermissions("agent", agentId, AGENT_PERMISSIONS);
+  const mayEdit = permissions.can("edit");
+  const mayPublish = permissions.can("publish");
   // A save refused with 412 (someone else changed the draft) is held as a notice, not an error.
   const conflict = useConflict<Agent>({ onSaved: (saved) => applySaved(saved as Agent) });
 
@@ -217,15 +222,19 @@ export function EditorTab({ agentId }: { agentId: string }) {
           {`Compare with latest (v${latestVersion})`}
         </Button>
       ) : null}
-      <Button size="sm" variant="ghost" asChild>
-        <Link href={routes.agentChat(agent.id, { version: "draft" })} data-testid="editor-test-draft">
-          <MessageSquare strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-          Test draft
-        </Link>
-      </Button>
-      <Button size="sm" variant="primary" onClick={handlePublish} disabled={busy || isDirty}>
-        {busy ? "Processing..." : "Publish"}
-      </Button>
+      {permissions.can("run") ? (
+        <Button size="sm" variant="ghost" asChild>
+          <Link href={routes.agentChat(agent.id, { version: "draft" })} data-testid="editor-test-draft">
+            <MessageSquare strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+            Test draft
+          </Link>
+        </Button>
+      ) : null}
+      {mayPublish ? (
+        <Button size="sm" variant="primary" onClick={handlePublish} disabled={busy || isDirty}>
+          {busy ? "Processing..." : "Publish"}
+        </Button>
+      ) : null}
     </>
   );
 
@@ -262,6 +271,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
     <div data-testid="agent-editor-tab" className="w-full min-w-0">
       <AgentEditor
         key={editorKey}
+        readOnly={!mayEdit}
         initialData={agent.draft_spec}
         onSubmit={handleSaveDraft}
         submitLabel="Save draft"
@@ -286,6 +296,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
               agentId={agent.id}
               hasUnsavedEdits={isDirty}
               onRestored={handleRestored}
+              mayRestore={mayPublish}
               onCompare={query.openCompare}
               draftChanged={draftChanged}
               onNavigate={(href) => navigateGuarded(href, (target) => router.push(target))}
@@ -295,10 +306,12 @@ export function EditorTab({ agentId }: { agentId: string }) {
       />
       <section aria-labelledby="editor-scorers-title" className="mt-6 border-t border-border pt-4">
         <h2 id="editor-scorers-title" className="mb-2 text-title font-semibold text-foreground">Scorers</h2>
-        <AttachedScorers key={scorersKey} agentId={agent.id} />
-        <div className="mt-4">
-          <SuggestedRules target={{ kind: "agent", id: agent.id, name: agent.name }} heading="Suggested scorers" onChanged={() => setScorersKey((k) => k + 1)} />
-        </div>
+        <AttachedScorers key={scorersKey} agentId={agent.id} mayEdit={mayEdit} />
+        {mayEdit ? (
+          <div className="mt-4">
+            <SuggestedRules target={{ kind: "agent", id: agent.id, name: agent.name }} heading="Suggested scorers" onChanged={() => setScorersKey((k) => k + 1)} />
+          </div>
+        ) : null}
       </section>
       <CompareSheet
         agentId={agent.id}
@@ -306,6 +319,7 @@ export function EditorTab({ agentId }: { agentId: string }) {
         latest={latestVersion}
         onClose={query.closeCompare}
         restore={compareRestore}
+        mayRestore={mayPublish}
         onCloseAutoFocus={restoreFocus.onSheetCloseAutoFocus}
       />
       {compareRestore.dialog}

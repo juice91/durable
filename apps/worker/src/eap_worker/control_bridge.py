@@ -50,6 +50,7 @@ from eap_observability import log_failure
 from eap_run_store.run_tokens import mint_run_token, signing_key
 from eap_runtime import RunDeps, run_side_effect
 from eap_schemas.architect import CONTROL_TOOL_PREFIX, control_tool_name
+from eap_worker.read_only import is_read_only, refusal
 
 log = logging.getLogger("eap_worker.control_bridge")
 
@@ -254,6 +255,11 @@ def _ids(ctx: RunContext[RunDeps]) -> tuple[str, str]:
     return ctx.deps.tenant_id, str(ctx.deps.run_id)
 
 
+def _offered(ctx: RunContext[RunDeps], tools: list[ControlTool]) -> list[ControlTool]:
+    """The catalog this run may use: for a read-only person, the `read` tools (eap_worker.read_only)."""
+    return [t for t in tools if t.kind == READ] if is_read_only(ctx.deps) else tools
+
+
 def capability_entry(tool: ControlTool) -> dict[str, Any]:
     return {
         "name": tool.name,
@@ -284,7 +290,7 @@ async def list_capabilities(ctx: RunContext[RunDeps], query: str | None = None) 
     tools = await fetch_catalog(tenant_id, run_id)
     if isinstance(tools, dict):
         return tools
-    return list_capabilities_result(tools, query)
+    return list_capabilities_result(_offered(ctx, tools), query)
 
 
 class ControlToolset(AbstractToolset[Any]):
@@ -313,7 +319,7 @@ class ControlToolset(AbstractToolset[Any]):
             log.warning("control bridge off for run %s: %s", run_id, catalog["error"]["code"])
             return {}
         out: dict[str, ToolsetTool[Any]] = {}
-        for tool in catalog:
+        for tool in _offered(ctx, catalog):
             note = " A person approves each call." if tool.gated else ""
             out[tool.tool_name] = self._tool(ToolDefinition(
                 name=tool.tool_name,
@@ -335,6 +341,8 @@ class ControlToolset(AbstractToolset[Any]):
         if not isinstance(control_name, str):
             return error("unknown_tool", f"{name} is not a control tool")
         tenant_id, run_id = _ids(ctx)
+        if meta.get("control_kind") != READ and is_read_only(ctx.deps):
+            return refusal()
         if meta.get("control_kind") != MANAGE:
             return await call_control(tenant_id, run_id, control_name, tool_args)
         if ctx.tool_call_id is None:

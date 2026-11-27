@@ -1,6 +1,6 @@
 """AG-UI workflow endpoints (AGUI.8): an AG-UI client runs a published workflow over SSE.
 
-Plan: docs/plans/2026-11-13-milestone-ag-ui.md (D2, D4, D7, D9, D11, D12, D15 and "### AGUI.8").
+Plan: an internal design note (D2, D4, D7, D9, D11, D12, D15 and "### AGUI.8").
 
 - `POST /api/v1/ag-ui/workflows/{workflow_id}`: a `RunAgentInput` body, an AG-UI SSE answer.
 - `GET  /api/v1/ag-ui/workflows/{workflow_id}/threads/{threadId}`: the thread's run, its AG-UI
@@ -91,6 +91,7 @@ from eap_api.ag_ui.resume_entries import (
     thread_interrupts,
 )
 from eap_api.ag_ui.translate import AgUiFormatter, AgUiStreamContext, ChildPrior, OpenApproval, step_interrupt_id, tool_interrupt_id
+from eap_api.service_deps.iam import require_access
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, require_agui_workflow
 from eap_api.deps import get_delta_source, get_stream_limiter
 from eap_api.routes.ag_ui import (
@@ -843,11 +844,15 @@ async def run_workflow(
 ) -> StreamingResponse:
     """Run the workflow for one AG-UI run (`RunAgentInput`), answering with AG-UI SSE (D2, D12)."""
     wid = _workflow_id_or_404(principal, workflow_id)
+    await require_access(request, principal, "run", "workflow", wid)
     body = await _checked_json_body(request)
     mapped = await parse_run_agent_input_async(body)
     check_principal_options(mapped.options, is_api_key=principal.is_api_key)
     check_workflow_options(mapped)
     decisions = resume_decisions(mapped.resume)
+    if decisions:
+        # A resume decides the run's open approvals: the same right as the approvals route (`approve`), on top of `run`.
+        await require_access(request, principal, "approve", "workflow", wid)
     c = _wctx(svc, principal, wid)
     lease = _acquire(limiter, principal)
     try:
@@ -903,6 +908,7 @@ async def get_workflow_thread(
     `activeRunId`: the AG-UI runId to attach to while the run is not finished (else null). An
     unknown thread is empty (200)."""
     wid = _workflow_id_or_404(principal, workflow_id)
+    await require_access(request, principal, "read", "workflow", wid)
     _check_params(request)
     thread_id = _path_id(thread_id, "Thread not found")
     c = _wctx(svc, principal, wid)
@@ -938,6 +944,7 @@ async def attach_workflow_run(
 ) -> StreamingResponse:
     """Attach to a recorded AG-UI run of a workflow thread (D7); nothing is started or decided."""
     wid = _workflow_id_or_404(principal, workflow_id)
+    await require_access(request, principal, "read", "workflow", wid)
     _check_params(request)
     thread_id = _path_id(thread_id, UNKNOWN_RUN_DETAIL)
     run_id = _path_id(run_id, UNKNOWN_RUN_DETAIL)

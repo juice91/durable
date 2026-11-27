@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-iam-zitadel"
-version = "0.3.0"
+version = "0.5.0"
 description = "IAM plug-in (enterprise): ZITADEL access tokens as the identity, the tenant's org as the membership source, and the bootstrap CLI"
 readme = "README.md"
 requires-python = ">=3.13"

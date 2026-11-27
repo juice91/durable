@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useEffect, useId, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/Dialog";
@@ -23,6 +24,8 @@ function outputText(run: TraceRun): string {
  */
 export function AddToDataset({ run }: { run: TraceRun }) {
   const id = useId();
+  // A case is added to a suite of the run's agent: `edit` on it.
+  const mayEditAgent = useCan("agent", run.agent_id ?? undefined, "edit");
   const [open, setOpen] = useState(false);
   const [suites, setSuites] = useState<OverviewSuite[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -81,6 +84,7 @@ export function AddToDataset({ run }: { run: TraceRun }) {
     }
   };
 
+  if (run.agent_id && !mayEditAgent) return null;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>

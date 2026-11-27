@@ -1,5 +1,7 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { Badge } from "@/components/ui/Badge";
@@ -185,12 +187,16 @@ function ConnectionSheet({ editing, adapters, onClose, onSaved }: { editing: Con
   );
 }
 
+/** What "why can't I?" asks about on the connection list. */
+const CONNECTION_ACTIONS = ["manage_connections"] as const;
+
 /**
  * Settings → Connections: tenant connections to knowledge-base source providers. A connection holds
  * `secret:<name>` references to stored secrets, never a value; Check calls the provider and shows a
  * stable result code.
  */
 export function ConnectionsSection() {
+  const manages = useCan("tenant", null, "manage_connections");
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [adapters, setAdapters] = useState<AdapterInfo[] | null>(null);
@@ -279,7 +285,7 @@ export function ConnectionsSection() {
             Provider accounts that knowledge-base sources sync from. A connection stores the names of secrets, never their values.
           </p>
         </div>
-        <Button variant="primary" size="sm" onClick={() => setSheet({ editing: null })}>Add connection</Button>
+        {manages ? <Button variant="primary" size="sm" onClick={() => setSheet({ editing: null })}>Add connection</Button> : null}
       </div>
       {loadError ? (
         <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -303,6 +309,7 @@ export function ConnectionsSection() {
                     <span className="text-caption text-muted-foreground">{providerLabel(adapters ?? [], connection)}</span>
                     <StatusChip connection={connection} />
                   </span>
+                  {manages ? (
                   <span className="flex flex-wrap gap-1.5">
                     <Button variant="secondary" size="sm" aria-label={`Check ${connection.name}`} disabled={state?.busy} onClick={() => void check(connection)}>
                       {state?.busy ? "Checking…" : "Check"}
@@ -313,6 +320,7 @@ export function ConnectionsSection() {
                     </Button>
                     <Button variant="secondary" size="sm" aria-label={`Delete ${connection.name}`} onClick={() => { setDeleteError(null); setDeleting(connection); }}>Delete</Button>
                   </span>
+                  ) : null}
                 </div>
                 <p className="text-caption text-muted-foreground">
                   {connection.last_checked_at ? `Checked ${formatWhen(connection.last_checked_at)}` : "Never checked"}
@@ -328,6 +336,7 @@ export function ConnectionsSection() {
           })}
         </ul>
       )}
+      {manages ? null : <PermissionNotice kind="tenant" id={null} actions={CONNECTION_ACTIONS} />}
       <ConflictNotice state={toggleConflict} onReload={() => void load()} />
       <p role="status" data-testid="connections-status" className="min-h-5 text-label text-muted-foreground">{status}</p>
       {sheet && adapters ? <ConnectionSheet editing={sheet.editing} adapters={adapters} onClose={() => setSheet(null)} onSaved={() => void load()} /> : null}

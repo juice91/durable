@@ -153,12 +153,12 @@ export interface StepIoPanelProps {
   children?: React.ReactNode;
   /** A loop step's iterations (its pager's): a refine loop lists its attempts from them (LP.15). */
   iterations?: readonly IterationDetail[] | null;
-  /** The step's AI note (the cached explanation of the run's workflow version), labelled 「AI 註解」. */
-  aiNote?: string | null;
+  /** The 「說明」 section (a `StepExplanation` for the run's workflow version); omit for none. */
+  explanation?: React.ReactNode;
 }
 
 /** Input, output or error of one step, from its step_* events (a body step: of one iteration). */
-export function StepIoPanel({ step, detail, onClose, className, iterationLabel, children, iterations, aiNote }: StepIoPanelProps) {
+export function StepIoPanel({ step, detail, onClose, className, iterationLabel, children, iterations, explanation }: StepIoPanelProps) {
   const type = step?.type ?? detail.stepType;
   const evaluation = type === "evaluate" && detail.hasOutput ? evaluationView(detail.output) : null;
   const attempts = refineAttempts(step, iterations);
@@ -182,12 +182,7 @@ export function StepIoPanel({ step, detail, onClose, className, iterationLabel, 
         ) : null}
         {detail.startedAt ? <span className="ml-2 text-xs text-muted-foreground">started {formatDateTime(detail.startedAt)}</span> : null}
       </p>
-      {aiNote ? (
-        <p data-testid="step-io-ai-note" className="select-text break-words rounded-sm bg-muted/40 px-2 py-1 text-caption text-foreground">
-          <span className="mr-1 font-semibold text-muted-foreground">AI 註解</span>
-          {aiNote}
-        </p>
-      ) : null}
+      {explanation}
       {iterationLabel ? <p data-testid="step-io-iteration" className="text-caption text-muted-foreground">{iterationLabel}</p> : null}
       {detail.childRunId ? (
         <p className="text-sm">

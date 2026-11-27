@@ -6,6 +6,8 @@
  * and go live, and once it is live put it on a schedule. Everything is the restricted format of
  * `lib/architect-workflow.ts`; the API validates and compiles the real workflow. Tokens only.
  */
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
@@ -127,6 +129,8 @@ function Problems({ messages }: { messages: readonly string[] | undefined }) {
   );
 }
 
+const CREATE_ACTION = ["create"] as const;
+
 export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowFormProps) {
   const [name, setName] = useState(initial?.spec.name ?? "");
   const [slug, setSlug] = useState(initial?.spec.id ?? "");
@@ -208,6 +212,8 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
     }
   };
 
+  // The API creates a new workflow or edits and publishes the one named; `create` covers drafting and a new one.
+  const mayCreate = useCan("workflow", null, "create");
   const save = async (publish: boolean, expected: number | null = version) => {
     if (saving) return;
     const built = stepsFromRows(rows);
@@ -252,7 +258,9 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
         <label htmlFor="wf-describe" className={labelClass}>Describe the workflow</label>
         <textarea id="wf-describe" value={describe} onChange={(e) => setDescribe(e.target.value)} rows={3} maxLength={8000} placeholder="What should happen, in what order, and which agents do it" className={field} />
         <div className="flex items-center gap-2">
-          <Button variant="secondary" onClick={fillIn} disabled={filling || !describe.trim()}>{filling ? "Drafting…" : "Fill in the form"}</Button>
+          {mayCreate ? (
+            <Button variant="secondary" onClick={fillIn} disabled={filling || !describe.trim()}>{filling ? "Drafting…" : "Fill in the form"}</Button>
+          ) : null}
           <p className="text-caption text-muted-foreground">The drafter fills the form below; nothing is saved until you save.</p>
         </div>
         {unusable ? <DrafterFailure answer={unusable.answer} problems={unusable.problems} /> : null}
@@ -413,9 +421,15 @@ export function WorkflowForm({ options, agents, initial, onSaved }: WorkflowForm
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="secondary" onClick={() => void save(false)} disabled={saving !== null}>{saving === "draft" ? "Saving…" : "Save draft"}</Button>
-        <Button onClick={() => void save(true)} disabled={saving !== null}>{saving === "publish" ? "Publishing…" : "Save and go live"}</Button>
+        {mayCreate ? (
+          <Button variant="secondary" onClick={() => void save(false)} disabled={saving !== null}>{saving === "draft" ? "Saving…" : "Save draft"}</Button>
+        ) : null}
+        {mayCreate ? (
+          <Button onClick={() => void save(true)} disabled={saving !== null}>{saving === "publish" ? "Publishing…" : "Save and go live"}</Button>
+        ) : null}
       </div>
+
+      {mayCreate ? null : <PermissionNotice kind="workflow" id={null} actions={CREATE_ACTION} />}
 
       {saved ? (
         <div className="space-y-2" aria-live="polite">

@@ -22,6 +22,8 @@ from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import InvalidInput, Unavailable
 from eap_api.services.run_filters import plain_refusals
 from eap_processors import (
@@ -31,7 +33,7 @@ from eap_processors import (
     compile_processors,
     new_budget,
 )
-from eap_run_store.store import ExecutionEventModel, RunModel
+from eap_run_store.store import ExecutionEventModel, RunModel, visible_runs_condition
 from eap_schemas.processors import (
     MAX_PROCESSORS_PER_PHASE,
     MAX_REGEX_PATTERN_LENGTH,
@@ -148,14 +150,17 @@ def _result_json(event: ExecutionEventModel, run: RunModel) -> dict[str, Any]:
 
 
 @plain_refusals
-class ProcessorService:
-    """`db` is needed only by `results`."""
+class ProcessorService(AccessBound):
+    """`db` is needed only by `results`. The catalog and the tester are stateless (`read` on the tenant); the results are
+    events of runs, so they are limited to the runs of the agents and workflows the caller may read."""
 
-    def __init__(self, db: Session | None = None) -> None:
+    def __init__(self, db: Session | None = None, access: Access | None = None) -> None:
         self.db = db
+        self._access = access  # None: no caller to check
 
     def catalog(self) -> dict[str, Any]:
         """The processor catalog: every built-in type with its config schema, and the limits."""
+        acl.require(self._access, "read", "tenant", None)
         items = [
             {
                 "id": d.id,
@@ -182,6 +187,7 @@ class ProcessorService:
     def test(self, processors: list[ProcessorSpec], sample: str) -> dict[str, Any]:
         """Run deterministic processors in order on `sample` (at most 32 KiB). Stops at the first block.
         Nothing is stored or logged; the sample is answered to the caller only."""
+        acl.require(self._access, "read", "tenant", None)
         if len(sample.encode("utf-8")) > MAX_TEST_SAMPLE_BYTES:
             raise InvalidInput(f"text is larger than {MAX_TEST_SAMPLE_BYTES} bytes (32 KiB)")
         if any(p.type == "moderation" for p in processors):
@@ -217,6 +223,8 @@ class ProcessorService:
         Unavailable asking to narrow the range."""
         assert self.db is not None
         db = self.db
+        if agent_id is not None:
+            acl.require(self._access, "read", "agent", str(agent_id))
         start, end = _aware(start), _aware(end)
         if start is not None and end is not None and start >= end:
             raise InvalidInput("from must be before to")
@@ -236,6 +244,11 @@ class ProcessorService:
         )
         if agent_id is not None:
             query = query.where(RunModel.agent_id == str(agent_id))
+        visible = visible_runs_condition(
+            acl.sql_ids(acl.visible(self._access, "agent")), acl.sql_ids(acl.visible(self._access, "workflow"))
+        )
+        if visible is not None:
+            query = query.where(visible)
         if run_id is not None:
             query = query.where(ExecutionEventModel.run_id == str(run_id))
         if processor_type is not None:

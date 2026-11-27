@@ -6,6 +6,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, NotFound, Unavailable
 from eap_api.services.run_filters import (
@@ -44,10 +46,26 @@ def _cursor(before: str | None) -> SpanCursor | None:
 
 
 @plain_refusals
-class SpanService:
-    def __init__(self, spans: SpanStore, run_store: RunStore) -> None:
+class SpanService(AccessBound):
+    """Spans, the runs histogram and external traces. Spans and the histogram are limited to the runs of the agents and
+    workflows the caller may read (two engine calls, whatever the page size); external (OTLP) traces are tenant data:
+    `read` on the tenant."""
+
+    def __init__(self, spans: SpanStore, run_store: RunStore, access: Access | None = None) -> None:
         self.spans = spans
         self.run_store = run_store
+        self._access = access  # None: no caller to check
+
+    def _visible(self, agent_id: uuid.UUID | None, workflow_id: uuid.UUID | None) -> dict[str, Any]:
+        """The per-resource restriction as filters; an agent or workflow the caller names must be readable."""
+        if agent_id is not None:
+            acl.require(self._access, "read", "agent", str(agent_id))
+        if workflow_id is not None:
+            acl.require(self._access, "read", "workflow", str(workflow_id))
+        return {
+            "visible_agent_ids": acl.sql_ids(acl.visible(self._access, "agent")),
+            "visible_workflow_ids": acl.sql_ids(acl.visible(self._access, "workflow")),
+        }
 
     def runs_histogram(
         self,
@@ -82,6 +100,7 @@ class SpanService:
             "workflow_id": workflow_id, "knowledge_base_id": knowledge_base_id, "parent_run_id": parent_run_id,
             "model": model, "provider": provider, "tags": list_param(tags, "tags", split=True),
             "metadata": metadata_filter(metadata), "text_query": text_query(q),
+            **self._visible(agent_id, workflow_id),
         }
         try:
             buckets = self.spans.runs_histogram(
@@ -120,6 +139,7 @@ class SpanService:
             "agent_id": agent_id, "status": status_filter(run_status), "kind": kind, "tool_id": tool_id,
             "workflow_id": workflow_id, "model": model, "provider": provider,
             "tags": list_param(tags, "tags", split=True), "metadata": metadata_filter(metadata),
+            **self._visible(agent_id, workflow_id),
         }
         try:
             items, next_before = self.spans.list(
@@ -145,6 +165,7 @@ class SpanService:
         created_to: datetime | None,
     ) -> dict[str, Any]:
         """The tenant's external traces (sent over OTLP), newest first (see GET /traces)."""
+        acl.require(self._access, "read", "tenant", None)
         start, end = time_window(created_from, created_to)
         cursor = _cursor(before)
         filters = {"service": service, "q": text_query(q), "status": trace_status, "from": start, "to": end}
@@ -162,6 +183,7 @@ class SpanService:
 
     def read_external_trace(self, tenant_id: str, trace_id: str) -> dict[str, Any]:
         """One external trace with the platform run its spans name (when that run is the tenant's)."""
+        acl.require(self._access, "read", "tenant", None)
         trace = self.spans.read_external_trace(tenant_id, trace_id)
         if trace is None:
             raise NotFound(TRACE_NOT_FOUND)

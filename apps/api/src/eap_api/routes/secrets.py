@@ -60,6 +60,6 @@ async def delete_secret(name: NameParam, principal: PrincipalDep, service: Secre
     except SecretInUse as exc:
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={"detail": exc.message, "code": exc.code, "servers": exc.servers},
+            content={"detail": exc.message, "code": exc.code, "servers": exc.servers, "triggers": exc.triggers},
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

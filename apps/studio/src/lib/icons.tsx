@@ -2,6 +2,7 @@ import React from "react";
 import {
   BookOpen,
   Bot,
+  Cable,
   ChartLine,
   Database,
   FlaskConical,
@@ -16,6 +17,7 @@ import {
   Sparkles,
   ShieldCheck,
   Workflow,
+  Webhook,
   Wrench,
   type LucideIcon,
   type LucideProps,
@@ -54,6 +56,8 @@ export const LogsIcon = studioIcon(ScrollText, "LogsIcon");
 export const DatasetsIcon = studioIcon(Database, "DatasetsIcon");
 export const ScorersIcon = studioIcon(Gauge, "ScorersIcon");
 export const ExperimentsIcon = studioIcon(FlaskConical, "ExperimentsIcon");
+export const WebhooksIcon = studioIcon(Webhook, "WebhooksIcon");
+export const ExternalAccessIcon = studioIcon(Cable, "ExternalAccessIcon");
 export const SettingsIcon = studioIcon(Settings, "SettingsIcon");
 export const ApprovalsIcon = studioIcon(Inbox, "ApprovalsIcon");
 // Transitional page (removed with its nav item in SL.10).

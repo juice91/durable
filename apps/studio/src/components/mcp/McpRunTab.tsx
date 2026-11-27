@@ -20,13 +20,16 @@ interface McpRunTabProps {
   /** Run the connection test, which lists the tools. */
   onLoadTools: () => void;
   loadingTools: boolean;
+  /** The caller may test the connection (change the server) and run its tools. */
+  mayLoad?: boolean;
+  mayRun?: boolean;
 }
 
 /**
  * Run tab of an MCP server: pick one of its tools, run it with the shared tool runner and see its
  * result and its recent runs. Runs are recorded on the tool-run ledger like the built-in tools'.
  */
-export function McpRunTab({ server, tools, onLoadTools, loadingTools }: McpRunTabProps) {
+export function McpRunTab({ server, tools, onLoadTools, loadingTools, mayLoad = true, mayRun = true }: McpRunTabProps) {
   const [selected, setSelected] = useState<string>("");
   const [history, setHistory] = useState<Run[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -56,7 +59,7 @@ export function McpRunTab({ server, tools, onLoadTools, loadingTools }: McpRunTa
         <p className="text-body text-muted-foreground">
           {server.enabled ? "Test the connection to list the tools you can run." : "This server is disabled. Enable it, then test the connection to run its tools."}
         </p>
-        <Button variant="primary" disabled={loadingTools || !server.enabled} onClick={onLoadTools}>Test connection</Button>
+        {mayLoad ? <Button variant="primary" disabled={loadingTools || !server.enabled} onClick={onLoadTools}>Test connection</Button> : null}
       </div>
     );
   }
@@ -79,12 +82,14 @@ export function McpRunTab({ server, tools, onLoadTools, loadingTools }: McpRunTa
 
       {tool ? (
         <>
-          <ToolRunner
-            key={`${server.id}/${tool.name}`}
-            tool={mcpToolDefinition(server.id, tool)}
-            start={(input, runId) => startMcpToolRun(server.id, tool.name, input, runId)}
-            onStarted={() => void loadHistory(tool.name)}
-          />
+          {mayRun ? (
+            <ToolRunner
+              key={`${server.id}/${tool.name}`}
+              tool={mcpToolDefinition(server.id, tool)}
+              start={(input, runId) => startMcpToolRun(server.id, tool.name, input, runId)}
+              onStarted={() => void loadHistory(tool.name)}
+            />
+          ) : null}
           <section aria-labelledby="mcp-run-history-title" data-testid="mcp-run-history" className="flex min-w-0 flex-col gap-2">
             <h3 id="mcp-run-history-title" className="text-label font-semibold text-foreground">Recent runs</h3>
             {historyError ? (

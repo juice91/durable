@@ -1,9 +1,9 @@
 """Postgres store for durable runs and event logging."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from dataclasses import dataclass
 from typing import Any
 import json
 import logging
@@ -29,6 +29,7 @@ from sqlalchemy import (
     text,
     func,
     case,
+    and_,
     false,
     null,
     or_,
@@ -273,6 +274,8 @@ class RunModel(Base):
     # workflow run pauses after each top-level step.
     rerun_of: Mapped[str | None] = mapped_column("rerun_of", PG_UUID(as_uuid=False), nullable=True)
     schedule_id: Mapped[str | None] = mapped_column("schedule_id", PG_UUID(as_uuid=False), nullable=True)
+    # 0037_webhook_triggers: the inbound webhook trigger whose verified delivery started the run (no FK, like schedule_id).
+    trigger_id: Mapped[str | None] = mapped_column("trigger_id", PG_UUID(as_uuid=False), nullable=True)
     pause_after_each_step: Mapped[bool] = mapped_column(
         "pause_after_each_step", Boolean, nullable=False, default=False, server_default=text("false")
     )
@@ -292,6 +295,10 @@ class RunModel(Base):
     principal: Mapped[str | None] = mapped_column("principal", Text, nullable=True)
     on_behalf_of: Mapped[str | None] = mapped_column("on_behalf_of", Text, nullable=True)
     started_by_kind: Mapped[str | None] = mapped_column("started_by_kind", Text, nullable=True)
+    # 0040_run_grant_set: what the run may use (MCP servers, secrets), computed once at its start. NULL: not enforced.
+    grant_set: Mapped[dict | None] = mapped_column("grant_set", JSONB, nullable=True)
+    # 0041_run_actor_roles: the starting person's tenant roles (a child copies its parent's). NULL: not a person.
+    actor_roles: Mapped[list | None] = mapped_column("actor_roles", JSONB(none_as_null=True), nullable=True)
 
     __table_args__ = (
         # Redundant with the primary key, but lets tenant-owned children reference (tenant_id, id).
@@ -319,6 +326,12 @@ class RunModel(Base):
         Index("ix_runs_parent_run", "parent_run_id"),
         Index("ix_runs_rerun_of", "rerun_of"),
         Index("ix_runs_schedule_id", "schedule_id"),
+        Index(
+            "ix_runs_trigger_active", "tenant_id", "trigger_id",
+            postgresql_where=text(
+                "trigger_id IS NOT NULL AND status NOT IN ('completed', 'failed', 'needs_attention', 'skipped')"
+            ),
+        ),
         Index("ix_runs_updated_at", "updated_at"),
         # A knowledge base's runs (ingest progress, summed cost), newest first.
         Index("ix_runs_tenant_kb_created", "tenant_id", "knowledge_base_id", "created_at"),
@@ -703,6 +716,28 @@ def _like_pattern(value: str) -> str:
     return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
+def visible_runs_condition(
+    visible_agent_ids: Sequence[str] | None, visible_workflow_ids: Sequence[str] | None
+) -> Any | None:
+    """The per-resource access restriction on `RunModel` (IAM P2b): agent runs of the listed agents and workflow runs of
+    the listed workflows, an eval run by the agent or workflow it targets, plus runs of other kinds (tool, knowledge base), which this restriction
+    does not cover.
+    None (both lists None) = no limit."""
+    if visible_agent_ids is None and visible_workflow_ids is None:
+        return None
+    agent_ok = true() if visible_agent_ids is None else RunModel.agent_id.in_(list(visible_agent_ids))
+    workflow_ok = true() if visible_workflow_ids is None else RunModel.workflow_id.in_(list(visible_workflow_ids))
+    return or_(
+        RunModel.kind.not_in(("agent", "workflow", "eval")),
+        and_(RunModel.kind == "agent", agent_ok),
+        and_(RunModel.kind == "workflow", workflow_ok),
+        # An eval run targets an agent or a workflow.
+        and_(RunModel.kind == "eval", or_(
+            and_(RunModel.workflow_id.is_(None), agent_ok), and_(RunModel.workflow_id.is_not(None), workflow_ok)
+        )),
+    )
+
+
 def run_filter_conditions(
     tenant_id: str,
     *,
@@ -720,6 +755,8 @@ def run_filter_conditions(
     tags: list[str] | None = None,
     metadata: dict[str, str] | None = None,
     text_query: str | None = None,
+    visible_agent_ids: Sequence[str] | None = None,
+    visible_workflow_ids: Sequence[str] | None = None,
 ) -> tuple[list[Any], bool]:
     """The one builder of the `GET /runs` filters, shared by `RunStore.list_runs`, `SpanStore.list` and the
     runs histogram, as SQL conditions on `RunModel` (tenant, top-level unless
@@ -759,6 +796,9 @@ def run_filter_conditions(
         conds.append(RunModel.kind == kind)
     if tool_id is not None:
         conds.append(RunModel.tool_id == tool_id)
+    visible = visible_runs_condition(visible_agent_ids, visible_workflow_ids)
+    if visible is not None:
+        conds.append(visible)
     return conds, slow
 
 
@@ -809,6 +849,7 @@ def _run_dict(run: RunModel, waiting_approval: bool = False) -> dict[str, Any]:
         "eval_suite_hash": run.eval_suite_hash,
         "rerun_of": run.rerun_of,
         "schedule_id": run.schedule_id,
+        "trigger_id": run.trigger_id,
         "pause_after_each_step": run.pause_after_each_step,
         "client_tools": run.client_tools,
         "client_tool_results": run.client_tool_results,
@@ -1184,7 +1225,11 @@ def _actor_values(actor: RunActor | None) -> dict[str, Any]:
     actor = actor or current_actor()  # the request's actor when the caller named none
     if actor is None:
         return {}
-    return {"principal": actor.principal, "on_behalf_of": actor.on_behalf_of, "started_by_kind": actor.kind}
+    roles = None if actor.roles is None else list(actor.roles)
+    return {
+        "principal": actor.principal, "on_behalf_of": actor.on_behalf_of, "started_by_kind": actor.kind,
+        **({} if roles is None else {"actor_roles": roles}),
+    }
 
 
 class RunStore:
@@ -1279,13 +1324,15 @@ class RunStore:
         *,
         rerun_of: UUID | str | None = None,
         schedule_id: UUID | str | None = None,
+        trigger_id: UUID | str | None = None,
         pause_after_each_step: bool = False,
         actor: RunActor | None = None,
     ) -> tuple[UUID, bool]:
         """Create a workflow run (kind 'workflow': published version `workflow_version` of
         `workflow_id`, `input` = the workflow input as canonical JSON text). `rerun_of`: the earlier
         run this one repeats (the caller has checked it is the same tenant's and workflow's).
-        `schedule_id`: the schedule whose tick created the run. `pause_after_each_step`: a
+        `schedule_id`: the schedule whose tick created the run. `trigger_id`: the inbound webhook trigger whose
+        delivery created it. `pause_after_each_step`: a
         step-by-step run (the worker waits after every top-level step).
 
         Same idempotency and tenant rules as create_run."""
@@ -1300,6 +1347,7 @@ class RunStore:
             traceparent=traceparent,
             rerun_of=None if rerun_of is None else str(rerun_of),
             schedule_id=None if schedule_id is None else str(schedule_id),
+            trigger_id=None if trigger_id is None else str(trigger_id),
             pause_after_each_step=pause_after_each_step,
             **_actor_values(actor),
         )
@@ -1399,6 +1447,7 @@ class RunStore:
             trace_id=trace_id,
             traceparent=traceparent,
             draft_spec=null() if draft_spec is None else draft_spec,
+            **_actor_values(None),
         )
 
     def create_workflow_eval_run(
@@ -1437,6 +1486,7 @@ class RunStore:
             input=input,
             trace_id=trace_id,
             traceparent=traceparent,
+            **_actor_values(None),
         )
 
     def create_eval_workflow_child_run(
@@ -1547,6 +1597,13 @@ class RunStore:
                 # otherwise stay queued forever. A child row that already exists (a replayed step)
                 # is returned as before.
                 _lock_run(session, tenant_id, parent_run_id)
+                # A child never acts for anyone else (design 4.1): it carries its parent's person and their roles.
+                parent = session.execute(
+                    select(RunModel.on_behalf_of, RunModel.actor_roles)
+                    .where(RunModel.tenant_id == tenant_id, RunModel.id == str(parent_run_id))
+                ).first()
+                if parent is not None and parent.actor_roles is not None:
+                    values = {**values, "on_behalf_of": parent.on_behalf_of, "actor_roles": parent.actor_roles}
                 existing = session.execute(
                     select(RunModel.id, RunModel.tenant_id).where(RunModel.id == str(run_id))
                 ).first()
@@ -1820,6 +1877,51 @@ class RunStore:
             session.commit()
             return updated is not None
 
+    def get_run_actor(self, tenant_id: str, run_id: UUID) -> RunActor | None:
+        """Who the run acts as, as recorded when it was created; None when none was (or the run is unknown)."""
+        with self.Session() as session:
+            row = session.execute(
+                select(RunModel.principal, RunModel.started_by_kind, RunModel.on_behalf_of, RunModel.actor_roles)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+            ).first()
+        if row is None or row.principal is None or row.started_by_kind is None:
+            return None
+        return RunActor(
+            kind=row.started_by_kind, subject=row.principal.removeprefix(f"{row.started_by_kind}:"),
+            on_behalf_of=row.on_behalf_of, roles=None if row.actor_roles is None else tuple(row.actor_roles),
+        )
+
+    def conversation_starters(self, tenant_id: str, conversation_id: UUID | str) -> set[str | None]:
+        """The distinct principals (`<kind>:<subject>`, None when unrecorded) that started the conversation's turns."""
+        with self.Session() as session:
+            return set(session.execute(
+                select(RunModel.principal)
+                .where(RunModel.tenant_id == tenant_id, RunModel.conversation_id == str(conversation_id))
+                .distinct()
+            ).scalars().all())
+
+    def get_grant_set(self, tenant_id: str, run_id: UUID) -> dict | None:
+        """The start-time grant set of the run (`runs.grant_set`), None when it has none (not enforced) or is unknown."""
+        with self.Session() as session:
+            return session.execute(
+                select(RunModel.grant_set).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+            ).scalar_one_or_none()
+
+    def claim_grant_set(self, tenant_id: str, run_id: UUID, grant_set: dict) -> dict:
+        """Store `grant_set` when the run has none yet and return the stored set: written once, so a replayed start and a
+        concurrent one see the set the first start computed (a revoke reaches the next run, not this one)."""
+        with self.Session() as session:
+            session.execute(
+                update(RunModel)
+                .where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id, RunModel.grant_set.is_(None))
+                .values(grant_set=grant_set)
+            )
+            session.commit()
+            stored = session.execute(
+                select(RunModel.grant_set).where(RunModel.id == str(run_id), RunModel.tenant_id == tenant_id)
+            ).scalar_one_or_none()
+        return stored if stored is not None else grant_set
+
     def heartbeat(self, tenant_id: str, run_id: UUID) -> bool:
         """Update the heartbeat timestamp for a run owned by `tenant_id` (RunNotFound otherwise).
 
@@ -1962,6 +2064,20 @@ class RunStore:
             ).all()
         return [{"tenant_id": r[0], "run_id": r[1], "requested_at": r[2]} for r in rows]
 
+    def unfinished_child_syncs(self, tenant_id: str, parent_id: UUID | str) -> list[UUID]:
+        """The knowledge-base source sync runs the workflow run `parent_id` started (same tenant) that have not
+        ended, oldest first: a cancel of the parent cancels them too."""
+        with self.Session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT s.run_id FROM kb_source_syncs s JOIN runs r ON r.tenant_id = s.tenant_id AND r.id::text = s.run_id"
+                    " WHERE s.tenant_id = :t AND s.parent_run_id = :p AND r.status NOT IN ('completed', 'failed', 'needs_attention', 'skipped')"
+                    " ORDER BY s.started_at, s.id"
+                ),
+                {"t": tenant_id, "p": str(parent_id)},
+            ).scalars().all()
+        return [UUID(str(r)) for r in rows]
+
     def run_tree_cost(self, tenant_id: str, run_id: UUID | str) -> Decimal:
         """The cost so far of the run and all its descendants (child runs by `parent_run_id`, and
         theirs, up to depth 16): AC.5's recorded cost (`recorded_cost_usd`, what `eap.check_budget`
@@ -2028,6 +2144,8 @@ class RunStore:
         metadata: dict[str, str] | None = None,
         text_query: str | None = None,
         statement_timeout_ms: int | None = None,
+        visible_agent_ids: Sequence[str] | None = None,
+        visible_workflow_ids: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's runs ordered (created_at DESC, id DESC): at most `limit`, strictly after the
         `before` position in that order (RunCursor.after(last row of the previous page)),
@@ -2055,7 +2173,7 @@ class RunStore:
             tenant_id, agent_id=agent_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
             parent_run_id=parent_run_id, status=status, kind=kind, tool_id=tool_id, created_from=created_from,
             created_to=created_to, model=model, provider=provider, tags=tags, metadata=metadata,
-            text_query=text_query,
+            text_query=text_query, visible_agent_ids=visible_agent_ids, visible_workflow_ids=visible_workflow_ids,
         )
         query = _run_select().where(*conditions)
         if before is not None:
@@ -2304,6 +2422,7 @@ class RunStore:
         limit: int = 100,
         before: ConversationCursor | None = None,
         title_contains: str | None = None,
+        visible_agent_ids: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         """The tenant's conversations ordered (updated_at DESC, id DESC), at most `limit`, strictly
         after the `before` position (ConversationCursor.after(last row of the previous page)).
@@ -2314,6 +2433,8 @@ class RunStore:
         query = self._conversation_select().where(ConversationModel.tenant_id == tenant_id)
         if agent_id is not None:
             query = query.where(ConversationModel.agent_id == str(agent_id))
+        if visible_agent_ids is not None:  # per-resource access: only conversations of these agents
+            query = query.where(ConversationModel.agent_id.in_(list(visible_agent_ids)))
         if title_contains:
             escaped = title_contains.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             query = query.where(ConversationModel.title.ilike(f"%{escaped}%", escape="\\"))
@@ -2375,6 +2496,7 @@ class RunStore:
         client_tools: list[dict[str, Any]] | None = None,
         client_tool_results: list[dict[str, Any]] | None = None,
         ag_ui_run: Any = None,
+        actor: RunActor | None = None,
     ) -> tuple[UUID, bool]:
         """Insert the conversation's next turn as a queued run; idempotent on `run_id`.
 
@@ -2454,6 +2576,7 @@ class RunStore:
                     # SQL NULL explicitly (JSONB binds Python None as the JSON value `null`).
                     client_tools=null() if client_tools is None else client_tools,
                     client_tool_results=null() if client_tool_results is None else client_tool_results,
+                    **_actor_values(actor),
                 )
                 .on_conflict_do_nothing()  # no target: runs_pkey and uq_runs_tenant_id_id both fire in a race
                 .returning(RunModel.id)

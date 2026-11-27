@@ -13,6 +13,8 @@ from eap_run_store.kb_sources import (
 )
 from eap_run_store.actor import RunActor, bind_actor, current_actor
 from eap_run_store.secrets import SecretStore
+from eap_run_store.webhooks import TriggerNameConflict, WebhookStore  # noqa: F401  0037: registers the webhook tables
+from eap_run_store.external_access import ExternalAccessStore  # noqa: F401  0043: registers the external access tables
 from eap_run_store.audit import AuditEntry, AuditLogModel, AuditStore  # noqa: F401  0036: registers audit_log
 from eap_run_store.provenance import CapabilitySnapshotModel, DefinitionProvenanceModel, ProvenanceStore  # noqa: F401  0037, 0038: registers the tables
 from eap_run_store.revisions import RevisionMismatch
@@ -190,6 +192,7 @@ from eap_run_store.store import (
 )
 
 __all__ = [
+    "ExternalAccessStore",
     "AG_UI_SCOPE_KINDS",
     "AgUiRunModel",
     "AgUiRunRecord",

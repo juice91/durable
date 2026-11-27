@@ -1,6 +1,6 @@
 """FastAPI application factory for the control-plane API."""
 
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from eap_observability import install_access_logging, instrument_fastapi, setup_logging, setup_telemetry
 from fastapi import FastAPI
@@ -9,14 +9,14 @@ from fastapi import FastAPI
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager - the database schema was already checked in create_app."""
-    # The MCP control endpoint's streamable-HTTP session manager runs for the life of the app.
+    # Each MCP endpoint's streamable-HTTP session manager (control and external) runs for the life of the app.
     _reconcile_architect_seeds(app)
-    mcp_app = getattr(app.state, "mcp_control_app", None)
-    if mcp_app is None:
+    async with AsyncExitStack() as running:
+        for name in ("mcp_control_app", "external_mcp_app"):
+            mcp_app = getattr(app.state, name, None)
+            if mcp_app is not None:
+                await running.enter_async_context(mcp_app.router.lifespan_context(mcp_app))
         yield
-    else:
-        async with mcp_app.router.lifespan_context(mcp_app):
-            yield
     app.state.run_launcher.close()
 
 
@@ -55,6 +55,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     # API keys on /api/v1/ag-ui/* only). Unset, unknown, no identity provider or no single policy engine refuses to
     # start (eap_iam.require_iam_configured); the plug-ins are built once the database engine exists, below.
     mode = check_iam().mode
+    # A malformed EAP_WEBHOOK_BASE_URL, or a public hook path (EAP_WEBHOOK_PUBLIC=true) under the forgeable dev bearer, fails startup.
+    from eap_api.inbound_guard import check_webhook_startup
+
+    check_webhook_startup(auth_mode=mode)
+    # Likewise a malformed EAP_EXTERNAL_BASE_URL, or external access (EAP_EXTERNAL_ACCESS_ENABLED) under the dev bearer.
+    from eap_api.external_settings import check_external_startup
+
+    check_external_startup(auth_mode=mode)
     # A malformed EAP_AGUI_CORS_ORIGINS fails startup here (AGUI.9, D17).
     agui_cors_origins = agui_cors_origins_from_env()
     loopback_cors_origins = loopback_cors_origins_from_env()  # EAP_CORS_LOOPBACK_ORIGINS: loopback hosts only
@@ -163,6 +171,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     check_workflow_configuration()
     app.include_router(workflows_router, prefix="/api/v1")
+    from eap_api.routes.agent_grants import router as agent_grants_router  # the Access section: grants of an agent / workflow
+
+    app.include_router(agent_grants_router, prefix="/api/v1")
+    from eap_api.routes.resource_access import router as resource_access_router  # Access tabs and "why can't I?"
+
+    app.include_router(resource_access_router, prefix="/api/v1")
     # Workflow runs and approval decisions (task 3.8): POST /workflows/{id}/runs, .../approve|reject.
     from eap_api.routes.workflow_runs import cancel_router as run_cancel_router, router as workflow_runs_router
 
@@ -215,6 +229,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.otlp import router as otlp_router
 
     app.include_router(otlp_router, prefix="/api/v1")
+    # Inbound webhooks: the signed hook endpoint (authenticated by its signature alone: docs/webhooks.md) and
+    # the management API behind the dev bearer. Nothing but the hook route may live under /api/v1/hooks/.
+    from eap_api.routes.webhook_hooks import router as webhook_hooks_router
+    from eap_api.routes.webhook_triggers import router as webhook_triggers_router
+
+    app.include_router(webhook_hooks_router, prefix="/api/v1")
+    app.include_router(webhook_triggers_router, prefix="/api/v1")
+    # External access management (clients, run keys, workflow exports), for people.
+    from eap_api.routes.external_access import router as external_access_router
+
+    app.include_router(external_access_router, prefix="/api/v1")
     # Knowledge bases (RM.7): CRUD, document upload, ingest and reindex runs, GET /embedding-models.
     # A malformed embedding allowlist or knowledge base limit fails startup here.
     from eap_api.routes.knowledge import check_knowledge_configuration, router as knowledge_router
@@ -229,6 +254,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.routes.audit import router as audit_router  # IAM P0b: GET /audit
 
     app.include_router(iam_router, prefix="/api/v1")
+    from eap_api.routes.local_auth import router as local_auth_router  # the built-in admin account (404 without it)
+
+    app.include_router(local_auth_router, prefix="/api/v1")
     from eap_api.routes.personal_api_keys import router as personal_api_keys_router  # personal API keys
 
     app.include_router(personal_api_keys_router, prefix="/api/v1")
@@ -254,6 +282,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
     from eap_api.mcp_control.server import mount_mcp_control
 
     app.state.mcp_control_app = mount_mcp_control(app)
+
+    # The run surface for external agents: POST /api/v1/external/mcp (`run` keys only; 404 unless
+    # EAP_EXTERNAL_ACCESS_ENABLED). See eap_api.external_mcp and docs/external-access.md.
+    from eap_api.external_mcp.server import mount_external_mcp
+
+    app.state.external_mcp_app = mount_external_mcp(app)
+
+    # The A2A server for external agents under /api/v1/external/a2a/{endpoint_id}: Agent Cards and JSON-RPC (A2A 1.0),
+    # under the same switch and door. See eap_api.external_a2a.
+    from eap_api.external_a2a.server import mount_external_a2a
+
+    mount_external_a2a(app)
 
     # Add healthz at root level (no prefix)
     @app.get("/healthz", tags=["health"])

@@ -163,7 +163,7 @@ def test_iam_namespace_policies_default_deny_and_admit_only_the_named_peers():
     assert [p["port"] for p in pg[0]["ports"]] == [5432]
     assert pol["iam-egress-postgres"]["podSelector"]["matchExpressions"][0]["values"] == ["zitadel", "openfga"]
     for name, target, names, ports in (
-        ("zitadel-ingress", "zitadel", ["cloudflared", "api", "worker"], [8080]),
+        ("zitadel-ingress", "zitadel", ["api", "worker"], [8080]),
         ("openfga-ingress", "openfga", ["api", "worker"], [8080, 8081]),
     ):
         spec = pol[name]
@@ -188,7 +188,7 @@ def test_platform_policies_reach_into_iam_and_every_older_policy_stays():
     assert peer["podSelector"]["matchExpressions"][0]["values"] == ["zitadel", "openfga"]
     assert [p["port"] for p in ingress["ingress"][0]["ports"]] == [5432]
     for name, sources, target, ports in (
-        ("iam-egress-zitadel", ["cloudflared", "api", "worker"], "zitadel", [8080]),
+        ("iam-egress-zitadel", ["api", "worker"], "zitadel", [8080]),
         ("iam-egress-openfga", ["api", "worker"], "openfga", [8080, 8081]),
     ):
         spec = pol[name]
@@ -201,7 +201,7 @@ def test_platform_policies_reach_into_iam_and_every_older_policy_stays():
     # The platform's own Postgres ingress is untouched: the iam peers are a separate policy.
     old = {p["podSelector"]["matchLabels"]["app.kubernetes.io/name"] for p in pol["postgres-ingress"]["ingress"][0]["from"]}
     assert old == {"api", "worker", "migrate", "postgres-backup"}
-    assert {"default-deny", "allow-dns-and-otlp", "cloudflared-egress-origins", "api-ingress-studio"} <= set(pol)
+    assert {"default-deny", "allow-dns-and-otlp", "api-ingress-worker", "api-ingress-studio"} <= set(pol)
 
 
 def test_zitadel_bootstrap_volume_is_a_small_pvc():
@@ -226,8 +226,9 @@ def test_up_sh_wires_the_optional_services_without_echoing_values():
     assert "ZITADEL_MASTERKEY must be exactly 32 characters" in up
     # The password reaches psql through stdin, never a command line.
     assert "exec -i postgres-0" in up and 'read -r pw' in up
-    # The platform Secret never carries the master key, the admin credentials or the preshared key.
-    assert "ZITADEL_MASTERKEY|ZITADEL_ADMIN_USERNAME|ZITADEL_ADMIN_PASSWORD|OPENFGA_PRESHARED_KEY" in up
+    # The platform Secret never carries the master key or the admin credentials. (It does carry OpenFGA's preshared key,
+    # which the API and the worker present to OpenFGA.)
+    assert "^(ZITADEL_MASTERKEY|ZITADEL_ADMIN_USERNAME|ZITADEL_ADMIN_PASSWORD)=" in up
 
 
 def test_backup_job_dumps_the_identity_databases_when_their_passwords_are_present():

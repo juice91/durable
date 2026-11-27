@@ -274,6 +274,11 @@ def test_the_real_graph_covers_every_cross_member_import():
         assert owners <= closure, f"{member.name} imports {sorted(owners - closure)} without depending on it"
 
 
+def test_an_openfga_plugin_change_reruns_the_api_tests_that_run_its_model():
+    result = affected.select(ROOT, ["plugins/iam-openfga/src/eap_iam_openfga/engine.py"])
+    assert result.members["eap-api"] == "its tests import eap-iam-openfga"
+
+
 def test_the_real_workspace_is_parsed():
     members = affected.load_workspace(ROOT)
     assert {"eap-api", "eap-worker", "eap-schemas", "eap-db"} <= set(members)

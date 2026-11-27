@@ -19,7 +19,9 @@ from starlette.concurrency import run_in_threadpool
 from eap_api.auth import AgUiPrincipal, Principal
 from eap_api.concurrency import ConcurrencyError, Precondition
 from eap_api.deps import database_engine_of, get_run_launcher, open_session, run_launcher_of, run_stores_of
+from eap_api.service_deps.iam import build_access
 from eap_api.service_errors import service_error_response
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import ServiceError
 from eap_api.ports import DefinitionError
 
@@ -124,6 +126,11 @@ class Ctx:
         return Principal(tenant_id=self.principal.tenant_id, user_id=user)
 
     @property
+    def access(self) -> Access:
+        """The caller's access to the policy engine (one per call; the principal's core identity)."""
+        return build_access(self.app, self.principal)
+
+    @property
     def stores(self) -> Any:
         return run_stores_of(self.app)
 
@@ -144,6 +151,14 @@ class Ctx:
         return self.principal.allows_workflow(workflow_id)
 
 
+def bind(ctx: "Ctx", service: Any) -> Any:
+    """The service with this call's access (per-resource authorisation) when it takes one: the one place the tools
+    get it, so no tool can build an unchecked resource service by forgetting to."""
+    if isinstance(service, AccessBound):
+        service.bind_access(ctx.access)
+    return service
+
+
 async def call_service(ctx: Ctx, build: Callable[[Any], Any], fn: Callable[[Any], Any]) -> Any:
     """Run `fn(service)` in a worker thread with `service = build(session)`, a fresh Session of this call
     (the services take their collaborators through the constructor); return its data or raise McpToolError.
@@ -152,7 +167,7 @@ async def call_service(ctx: Ctx, build: Callable[[Any], Any], fn: Callable[[Any]
 
     def run() -> Any:
         with open_session(ctx.engine) as db:
-            return fn(build(db))
+            return fn(bind(ctx, build(db)))
 
     try:
         return await run_in_threadpool(run)
@@ -166,7 +181,7 @@ async def call_service_async(ctx: Ctx, build: Callable[[Any], Any], fn: Callable
     """As `call_service` for a service method that is a coroutine: awaited on the event loop, with the same session."""
     try:
         with open_session(ctx.engine) as db:
-            return await fn(build(db))
+            return await fn(bind(ctx, build(db)))
     except McpToolError:
         raise
     except Exception as exc:  # noqa: BLE001 - translate re-raises anything that is not a refusal

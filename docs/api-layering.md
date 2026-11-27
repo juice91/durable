@@ -4,7 +4,7 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
 
 | Layer | Where | What belongs there |
 |---|---|---|
-| Controller | `eap_api/routes/`, and the other entry points `eap_api/mcp_control/` and `eap_api/ag_ui/` | Protocol only; never calls a store. REST: parse the request, headers, ETag / If-Match, streaming, status codes. MCP control and AG-UI are controllers too: they parse their protocol, call a service or a store, and render the answer. |
+| Controller | `eap_api/routes/`, and the other entry points `eap_api/mcp_control/`, `eap_api/external_mcp/`, `eap_api/external_a2a/` (with their shared door, `eap_api/external_door.py`) and `eap_api/ag_ui/` | Protocol only; never calls a store. REST: parse the request, headers, ETag / If-Match, streaming, status codes. MCP control and AG-UI are controllers too: they parse their protocol, call a service or a store, and render the answer. |
 | Service | `eap_api/services/` | Business logic, independent of the transport: business rules and checks (publish guards such as the model allowlist and "MCP server exists"; at most 10 scorers per agent), orchestration across stores, transaction boundaries and hand-off to the worker, state transitions (an approval only moves from pending to approved, rejected or expired). Collaborators (stores, session, launcher, settings) come through the constructor. It refuses with a `ServiceError` subclass (`NotFound`, `Conflict`, `InvalidInput`, `Forbidden`, `Unavailable`), never `HTTPException`. It never imports `fastapi` or `starlette` and never reads `app.state`. Not in a service: HTTP or protocol details (controller), SQL (`eap_run_store`), pure shape validation (`eap_schemas` Pydantic models), running agents (worker). |
 | Data access | `eap_run_store` | All SQL. Every query filters by tenant. Reached only from services and `deps.py`. |
 | Dependency providers | `eap_api/deps.py`, `eap_api/service_deps/<domain>.py` | `deps.py`: `get_<name>(request)` and `<Name>Dep` for every long-lived object (stores, engine, launcher); the only reader of `app.state` besides `app.py`, the composition root. `service_deps/<domain>.py`: `get_<x>_service(...)` and `<X>ServiceDep`, which build a service from those providers (`deps.py` cannot import services). A test replaces a provider with `app.dependency_overrides[get_<name>]`. |
@@ -53,9 +53,10 @@ The API is built in four layers. Each rule below is checked by a tool, not by me
     `eap_run_store`. No exceptions.
   - "Service providers do not import entry points": `eap_api.service_deps` must not import `eap_api.routes`,
     `eap_api.mcp_control` or `eap_api.ag_ui`.
-  - "API entry points do not query the database": `eap_api.routes`, `eap_api.mcp_control` and `eap_api.ag_ui`
-    must not import `sqlalchemy`. No exceptions.
-  - "MCP control does not import routes": `eap_api.mcp_control` must not import `eap_api.routes`.
+  - "API entry points do not query the database": `eap_api.routes`, `eap_api.mcp_control`, `eap_api.external_mcp`,
+    `eap_api.external_a2a`, `eap_api.external_door` and `eap_api.ag_ui` must not import `sqlalchemy`. No exceptions.
+  - "MCP servers do not import routes": `eap_api.mcp_control`, `eap_api.external_mcp`, `eap_api.external_a2a` and
+    `eap_api.external_door` must not import `eap_api.routes`.
 - "Observability core has no web framework imports": `eap_observability.redaction`, `.context`, `.logcontext` and
     `.pathredact` must not import fastapi, starlette or `eap_observability.http`. A service imports what it needs
     from those submodules directly (`from eap_observability.redaction import log_failure, redact`,

@@ -1,4 +1,4 @@
-"""The AG-UI output adapter (docs/plans/2026-11-13-milestone-ag-ui.md).
+"""The AG-UI output adapter (an internal design note).
 
 The only package of the API that may import `ag_ui` (D19). Submodules: `input` (AGUI.5: the
 `RunAgentInput` mapping onto the shared run-start path); `translate` (AGUI.4: `AgUiFormatter`, the

@@ -1,6 +1,6 @@
 """AG-UI input mapping (AGUI.5): a `RunAgentInput` body onto the shared run-start path.
 
-Plan: docs/plans/2026-11-13-milestone-ag-ui.md, D3 (threadId), D4 (runId, fingerprint), D5 (the
+Plan: an internal design note, D3 (threadId), D4 (runId, fingerprint), D5 (the
 tail), D10 (client tools), D11 (ignored state and context), D15 (resume entries), D16 (what keys
 may not do), D18 (limits). Protocol-agnostic on purpose: the body is read as plain JSON with our
 own lenient parsing (the AG-UI 1.0 `RunAgentInput` shape), so this module needs no `ag_ui` import.

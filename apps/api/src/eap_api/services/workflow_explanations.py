@@ -32,6 +32,9 @@ from pydantic import ValidationError
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
+
 from eap_api.models import AgentModel, AgentVersionModel
 from eap_api.workflows.models import WorkflowExplanationModel, WorkflowModel, WorkflowVersionModel
 from eap_observability.redaction import redact
@@ -93,9 +96,13 @@ def _present(row: WorkflowExplanationModel) -> dict[str, Any]:
     }
 
 
-class WorkflowExplanationService:
-    def __init__(self, session: Session) -> None:
+class WorkflowExplanationService(AccessBound):
+    """An explanation is a reading of the workflow's published version, stored as a cache: `read` on the workflow for both
+    the read and the generation (the role matrix has no separate right to ask for one; the cost is one model call)."""
+
+    def __init__(self, session: Session, access: Access | None = None) -> None:
         self._db = session
+        self._access = access  # None: no caller to check
 
     def build_prompt(self, tenant_id: str, spec: dict[str, Any], locale: str) -> str:
         """The explainer's input: the language, the redacted spec, the tools' titles and one-line descriptions,
@@ -158,6 +165,7 @@ class WorkflowExplanationService:
 
     def get(self, tenant_id: str, workflow_id: uuid.UUID, version: int | None, locale: str) -> dict[str, Any]:
         """The stored explanation of a published version (default: the latest), 404 `explanation_missing` when none."""
+        acl.require(self._access, "read", "workflow", str(workflow_id))
         row = self._version(workflow_id, tenant_id, version)
         stored = self._stored(tenant_id, workflow_id, row.version, locale)
         if stored is None:
@@ -169,6 +177,7 @@ class WorkflowExplanationService:
         refresh: bool, ports: ExplainerPorts,
     ) -> dict[str, Any]:
         """Generate (or, with a stored one and `refresh` false, return) the explanation of a published version."""
+        acl.require(self._access, "read", "workflow", str(workflow_id))
         if version is not None and version < 1:
             raise refuse(422, "version must be 1 or more.", code="invalid_version")
         row = self._version(workflow_id, tenant_id, version)

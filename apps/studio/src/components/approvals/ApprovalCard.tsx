@@ -1,5 +1,7 @@
 "use client";
 
+import { usePermissions } from "@/lib/permissions";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
 import { CopyableText } from "@/components/ui/CopyableText";
 import React, { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
@@ -9,6 +11,7 @@ import { putSecret } from "@/lib/secrets";
 import { decideApproval, MAX_APPROVAL_COMMENT, resumeStep } from "@/lib/workflows";
 import { JsonSchemaForm } from "@/components/tools/JsonSchemaForm";
 import { ProvenanceFooter } from "@/components/architect/ProvenanceFooter";
+import { isPublishTool, PublishGrantsLine } from "./PublishGrantsLine";
 import { serverFieldErrors, validateAgainstSchema } from "@/lib/schemaValidation";
 import type { JsonSchema } from "@/lib/tools";
 
@@ -36,7 +39,17 @@ export type ApprovalTarget =
       pause?: boolean;
     };
 
+/** What an approval belongs to: its workflow, else its agent. The server's `approve` on it decides who may decide. */
+export interface ApprovalSubject {
+  kind: "agent" | "workflow";
+  id: string;
+}
+
+const APPROVE_ACTION = ["approve"] as const;
+
 export interface ApprovalCardProps {
+  /** Without one the buttons are offered and the server decides. */
+  subject?: ApprovalSubject | null;
   approval: ApprovalTarget;
   /** Reload the run's events (after a 409, or once a decision is recorded). The buttons stay
    * disabled until a returned promise settles, so a second click cannot race the refresh. */
@@ -104,7 +117,9 @@ function prettyJson(value: unknown): string {
  * A waiting approval: the step's prompt, or the tool and its arguments; the deadline with a
  * countdown; an optional comment; Approve, and Reject (step) or Deny (tool) after a confirm.
  */
-export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submit }: ApprovalCardProps) {
+export function ApprovalCard({ approval, subject: owner = null, onRefresh, onDecided, onConflict, submit }: ApprovalCardProps) {
+  const permissions = usePermissions(owner?.kind ?? "agent", owner?.id, APPROVE_ACTION);
+  const mayDecide = !owner || permissions.can("approve");
   const tool = approval.kind === "tool";
   const key = tool ? `tool-${approval.toolCallId}` : approval.stepId;
   const pause = approval.kind === "step" && approval.pause === true;
@@ -117,6 +132,8 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
   const [busy, setBusy] = useState<null | "approve" | "deny">(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDeny, setConfirmDeny] = useState(false);
+  // A publish that newly uses an ungranted server or secret can be approved by an admin only (the grant line says so).
+  const [grantsBlocked, setGrantsBlocked] = useState(false);
   // A secrets__request call: the typed value goes to PUT /secrets/{name} only, never to the decision.
   const secretRequest = approval.kind === "tool" ? parseSecretRequest(approval.toolName, approval.args) : null;
   const [secretValue, setSecretValue] = useState("");
@@ -229,7 +246,7 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           ) : null}
         </p>
       </div>
-      {tool && secretRequest ? (
+      {tool && secretRequest && mayDecide ? (
         <div className="space-y-2">
           {approval.summary ? (
             <p data-testid={`approval-summary-${key}`} className="whitespace-pre-wrap text-sm font-medium text-foreground">
@@ -267,6 +284,9 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
               </p>
             </CopyableText>
           ) : null}
+          {isPublishTool(approval.toolName) ? (
+            <PublishGrantsLine runId={approval.runId} toolCallId={approval.toolCallId} onBlocked={setGrantsBlocked} />
+          ) : null}
           {publishedKind(approval) ? (
             <ProvenanceFooter kind={publishedKind(approval)!} definitionId={String((approval.args as { id?: unknown }).id)} card="publish" />
           ) : null}
@@ -287,54 +307,60 @@ export function ApprovalCard({ approval, onRefresh, onDecided, onConflict, submi
           </p>
         </CopyableText>
       )}
-      {resumeSchema ? (
+      {resumeSchema && mayDecide ? (
         <JsonSchemaForm schema={resumeSchema} value={formValue} onChange={setFormValue} errors={fieldErrors} idPrefix={`resume-${key}`} />
       ) : null}
-      <div className="space-y-1">
-        <label htmlFor={commentId} className="block text-sm font-medium text-foreground">
-          Comment (optional{tool ? "; a denial's comment is shown to the model" : ""})
-        </label>
-        <textarea
-          id={commentId}
-          rows={2}
-          value={comment}
-          aria-invalid={tooLong}
-          aria-describedby={`${commentId}-count`}
-          onChange={(event) => setComment(event.target.value)}
-          className="w-full rounded-md border border-input bg-background p-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-        <p id={`${commentId}-count`} className={`text-xs ${tooLong ? "text-destructive-text" : "text-muted-foreground"}`}>
-          {comment.length}/{maxComment}
-          {tooLong ? " — too long" : ""}
-        </p>
-      </div>
+      {mayDecide ? (
+        <div className="space-y-1">
+          <label htmlFor={commentId} className="block text-sm font-medium text-foreground">
+            Comment (optional{tool ? "; a denial's comment is shown to the model" : ""})
+          </label>
+          <textarea
+            id={commentId}
+            rows={2}
+            value={comment}
+            aria-invalid={tooLong}
+            aria-describedby={`${commentId}-count`}
+            onChange={(event) => setComment(event.target.value)}
+            className="w-full rounded-md border border-input bg-background p-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <p id={`${commentId}-count`} className={`text-xs ${tooLong ? "text-destructive-text" : "text-muted-foreground"}`}>
+            {comment.length}/{maxComment}
+            {tooLong ? " — too long" : ""}
+          </p>
+        </div>
+      ) : null}
       {error ? (
         <p role="alert" data-testid={`approval-error-${key}`} className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive-text">
           {error}
         </p>
       ) : null}
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => decide("approve")}
-          disabled={Boolean(busy) || tooLong || (secretRequest !== null && !secretValue)}
-          aria-busy={busy === "approve"}
-          className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {resumeSchema ? "Submit" : pause ? "Continue" : "Approve"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setDialogError(null);
-            setConfirmDeny(true);
-          }}
-          disabled={Boolean(busy) || tooLong}
-          className="rounded-md border border-destructive px-4 py-1.5 text-sm font-medium text-destructive-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {denyLabel}
-        </button>
-      </div>
+      {mayDecide ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => decide("approve")}
+            disabled={Boolean(busy) || tooLong || grantsBlocked || (secretRequest !== null && !secretValue)}
+            aria-busy={busy === "approve"}
+            className="rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {resumeSchema ? "Submit" : pause ? "Continue" : "Approve"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDialogError(null);
+              setConfirmDeny(true);
+            }}
+            disabled={Boolean(busy) || tooLong}
+            className="rounded-md border border-destructive px-4 py-1.5 text-sm font-medium text-destructive-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {denyLabel}
+          </button>
+        </div>
+      ) : owner ? (
+        <PermissionNotice kind={owner.kind} id={owner.id} actions={APPROVE_ACTION} />
+      ) : null}
       {confirmDeny ? (
         <ConfirmDialog
           title={tool ? `Deny ${approval.toolName}?` : pause ? "Stop this run?" : `Reject step ${approval.stepId}?`}

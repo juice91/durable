@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { createContext, useContext, useId, useState } from "react";
 import type { ArchitectOptions } from "@/lib/architect";
 import { Select } from "@/components/ui/Select";
@@ -23,8 +24,9 @@ export function ModelPicker({ label }: { label: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [applied, setApplied] = useState<string | null>(null);
+  const mayChange = useCan("tenant", null, "manage_settings");
   const models = value?.options?.models ?? [];
-  if (!value || models.length === 0) return null;
+  if (!value || models.length === 0 || !mayChange) return null;
   const ids = models.map((m) => m.id);
   if (value.model && !ids.includes(value.model)) ids.unshift(value.model);
 

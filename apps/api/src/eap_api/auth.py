@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 
 from eap_iam import (
     ACTION_INGEST_OTLP,
+    ACTION_INGEST_WEBHOOK,
     ACTION_RUN_AGUI,
     AuthError,
     IamConfigError,
@@ -23,16 +24,35 @@ from eap_iam.messages import DEV_AUTH_DISABLED_DETAIL, INVALID_API_KEY_DETAIL, O
 from eap_observability import bind_log_context
 from eap_run_store import RunActor, bind_actor, normalize_origin
 from fastapi import Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from eap_api.deps import iam_of
 
 
 class Principal(BaseModel):
-    """Represents an authenticated principal (tenant + user)."""
+    """Represents an authenticated principal (tenant + user).
+
+    `iam` is the core principal the identity chain built (roles included): what the authorisation service asks the
+    policy engine about. It is None for a principal made by hand (a test, a script); `core_principal` then builds the
+    plain user principal for `user_id`."""
 
     tenant_id: str
     user_id: str
+    iam: IamPrincipal | None = Field(default=None, exclude=True, repr=False)
+
+
+def core_principal(principal: "Principal | AgUiPrincipal") -> IamPrincipal:
+    """The core principal behind a compatibility principal (see `Principal.iam`)."""
+    if principal.iam is not None:
+        return principal.iam
+    if isinstance(principal, AgUiPrincipal) and principal.kind == "api_key":
+        return IamPrincipal(
+            tenant_id=principal.tenant_id, kind="api_key", subject=str(principal.key_id), provider="compat",
+            scopes=frozenset(principal.scopes), agent_ids=principal.agent_ids, workflow_ids=principal.workflow_ids,
+        )
+    if isinstance(principal, AgUiPrincipal) and principal.kind == "architect_run":
+        return IamPrincipal(tenant_id=principal.tenant_id, kind="run", subject=str(principal.user_id), provider="compat")
+    return IamPrincipal(tenant_id=principal.tenant_id, kind="user", subject=str(principal.user_id), provider="compat")
 
 
 # Regex for tenant/user of the dev bearer: non-empty, [A-Za-z0-9_-]+ (enforced by the devloopback plug-in).
@@ -58,13 +78,18 @@ def auth_mode() -> str | None:
     return _auth_mode(os.environ)
 
 
-def _view(request: Request, accepts: frozenset[str], action: str | None) -> RequestView:
+def _view(
+    request: Request, accepts: frozenset[str], action: str | None, route_params: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> RequestView:
     client = request.client  # the TCP peer as the ASGI server reports it; no proxy header is ever consulted here
     return RequestView(
         headers={name.lower(): value for name, value in request.headers.items()},
         peer_host=client.host if client else None,
         accepts=accepts,
         action=action,
+        route_params=route_params or {},
+        body=body,
     )
 
 
@@ -91,13 +116,30 @@ async def authenticate_request(
     return principal
 
 
+WEBHOOK_KINDS = frozenset({"webhook"})
+
+
+async def authenticate_webhook(request: Request, trigger_id: str, body: bytes) -> IamPrincipal:
+    """The principal of `POST /api/v1/hooks/{trigger_id}`: the trigger, proven by its HMAC signature over `body`, and
+    nothing else. The route accepts ONLY the `webhook` kind, so the chain never consults the dev bearer, an Access JWT or
+    an API key (an `Authorization` header is not read). An AuthError (the route renders it uniformly) carries a `reason`
+    for counters only."""
+    view = _view(request, WEBHOOK_KINDS, ACTION_INGEST_WEBHOOK, {"trigger_id": trigger_id}, body)
+    principal = await iam_of(request.app).chain.authenticate(view)
+    bind_log_context(tenant_id=principal.tenant_id)
+    request.state.iam_principal = principal
+    bind_actor(run_actor(principal))
+    return principal
+
+
 def run_actor(principal: IamPrincipal) -> RunActor:
     """Who a run started by this request acts as (design 4.1): the user, the key (for its creator), or a run."""
     owner = principal.extra.get("owner") if principal.kind == "api_key" else None
     if owner:  # a personal API key: the run is the owner's
         return RunActor(kind="user", subject=str(owner), on_behalf_of=str(owner))
     on_behalf_of = principal.subject if principal.kind == "user" else principal.on_behalf_of
-    return RunActor(kind=principal.kind, subject=principal.subject, on_behalf_of=on_behalf_of)
+    roles = tuple(sorted(principal.roles)) if principal.kind == "user" else None
+    return RunActor(kind=principal.kind, subject=principal.subject, on_behalf_of=on_behalf_of, roles=roles)
 
 
 def bind_agui_actor(principal: "AgUiPrincipal") -> None:
@@ -110,7 +152,8 @@ def bind_agui_actor(principal: "AgUiPrincipal") -> None:
     elif principal.kind == "architect_run":
         actor = RunActor(kind="run", subject=str(principal.user_id))
     else:
-        actor = RunActor(kind="user", subject=str(principal.user_id), on_behalf_of=str(principal.user_id))
+        roles = () if principal.iam is None else tuple(sorted(principal.iam.roles))
+        actor = RunActor(kind="user", subject=str(principal.user_id), on_behalf_of=str(principal.user_id), roles=roles)
     bind_actor(actor)
 
 
@@ -161,7 +204,7 @@ async def current_principal(
         principal = await _in_process_principal(authorization)
     else:
         principal = await authenticate_request(request, USER_KINDS, None)
-    return Principal(tenant_id=principal.tenant_id, user_id=principal.subject)
+    return Principal(tenant_id=principal.tenant_id, user_id=principal.subject, iam=principal)
 
 
 def feedback_viewer(principal: Any) -> str | None:
@@ -204,6 +247,8 @@ class AgUiPrincipal(BaseModel):
     # A personal API key: the person it acts for and the key's prefix (`pos_<id>_`). None for a tenant key.
     owner_subject: str | None = None
     via_api_key: str | None = None
+    # The core principal the chain built (see `Principal.iam`); never serialised.
+    iam: IamPrincipal | None = Field(default=None, exclude=True, repr=False)
 
     @property
     def is_api_key(self) -> bool:
@@ -258,6 +303,7 @@ def to_agui_principal(principal: IamPrincipal, dev_scopes: tuple[str, ...] = ())
             allowed_origins=principal.allowed_origins,
             owner_subject=principal.extra.get("owner"),
             via_api_key=principal.extra.get("via_api_key"),
+            iam=principal,
         )
     if principal.kind == "run":
         return AgUiPrincipal(
@@ -265,8 +311,11 @@ def to_agui_principal(principal: IamPrincipal, dev_scopes: tuple[str, ...] = ())
             kind="architect_run",
             user_id=principal.subject,
             scopes=tuple(sorted(principal.scopes, reverse=True)),
+            iam=principal,
         )
-    return AgUiPrincipal(tenant_id=principal.tenant_id, kind="dev", user_id=principal.subject, scopes=dev_scopes)
+    return AgUiPrincipal(
+        tenant_id=principal.tenant_id, kind="dev", user_id=principal.subject, scopes=dev_scopes, iam=principal
+    )
 
 
 async def agui_principal(request: Request, authorization: Annotated[str | None, Header()] = None) -> AgUiPrincipal:  # noqa: ARG001

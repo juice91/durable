@@ -138,6 +138,7 @@ PLUGIN_DEPENDENT_MODULES = frozenset({
     "test_agui9_hardening_acceptance", "test_agui_attachments_api", "test_api_keys_api",
     "test_api_keys_api_acceptance", "test_architect_control_seam", "test_iam_p0a", "test_iam_p0b", "test_mcp_control_evals",
     "test_mcp_control_manage", "test_mcp_control_read", "test_mcp_control_revisions", "test_otlp_ingest",
+    "test_webhooks_p1", "test_webhooks_mcp",
 })
 # Single tests: they set EAP_AUTH_MODE=production with no plug-in lists (the fakes select their own), or send a key.
 PLUGIN_DEPENDENT_TESTS = frozenset({

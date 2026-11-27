@@ -2,7 +2,8 @@
 
 The change is made in ZITADEL, the single source of truth: no member table here. A tenant is one ZITADEL organisation
 (`EAP_ZITADEL_ORG_TENANT_MAP`); a member is a user of that org holding at least one grant on the project, and the
-grant's role keys are the roles. Writes need the machine user (`EAP_ZITADEL_MACHINE_KEY`); without it the source is
+grant's role keys are the roles. On the operator organisation the machine user may write grants but not create users
+(`can_create_users`). Writes need the machine user (`EAP_ZITADEL_MACHINE_KEY`); without it the source is
 not `configured` and the capabilities answer does not offer it. The last admin can never be demoted or removed."""
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
+from collections.abc import Callable
 from typing import Any
 
 from eap_iam import MEMBER_ROLES, ROLE_ADMIN, Member, MembershipError
@@ -23,6 +26,14 @@ EMAIL_PATTERN = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
 MAX_GRANTS = 1000
 GRANT_ACTIVE = "USER_GRANT_STATE_ACTIVE"
 NOT_CONFIGURED = "ZITADEL membership is not configured (the machine user's key is missing)"
+# The machine user's own permissions in an organisation say whether it may create users there. On the operator
+# organisation it may not (`platform-members` holds ORG_USER_PERMISSION_EDITOR: see platform_setup).
+CREATE_PERMISSION = "user.write"
+PERMISSIONS_TTL_SECONDS = 60.0
+NO_USER_CREATION = (
+    "the platform cannot create users in this organisation: create the user in the ZITADEL console first, then add "
+    "them here with the same e-mail address"
+)
 
 
 def _wrap(exc: ZitadelApiError) -> MembershipError:
@@ -54,10 +65,15 @@ def _member(grants: list[dict[str, Any]], *, invited: bool = False) -> Member:
 class ZitadelMembership:
     name = "zitadel"
 
-    def __init__(self, settings: ZitadelSettings | None, client: ManagementClient | None) -> None:
+    def __init__(
+        self, settings: ZitadelSettings | None, client: ManagementClient | None, *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._settings = settings
         self._client = client
         self._write_lock = asyncio.Lock()  # one writer at a time: the last-admin check is read-then-write
+        self._clock = clock
+        self._can_create: dict[str, tuple[float, bool]] = {}
 
     @property
     def configured(self) -> bool:
@@ -74,6 +90,23 @@ class ZitadelMembership:
         if org is None:
             raise MembershipError("not_found", "this tenant has no ZITADEL organisation")
         return self._settings, self._client, org
+
+    async def can_create_users(self, tenant_id: str) -> bool:
+        """Whether an invitation may create a new user in the tenant's organisation (cached for a minute). True when
+        ZITADEL cannot say: the invitation itself then answers."""
+        _, client, org = self._need(tenant_id)
+        hit = self._can_create.get(org)
+        now = self._clock()
+        if hit is not None and hit[0] > now:
+            return hit[1]
+        try:
+            answer = await client.request("POST", "/auth/v1/permissions/zitadel/me/_search", org_id=org, json={})
+        except ZitadelApiError as exc:
+            log.warning("ZITADEL permissions could not be read: %s", exc)
+            return True
+        allowed = CREATE_PERMISSION in answer.get("result", [])
+        self._can_create[org] = (now + PERMISSIONS_TTL_SECONDS, allowed)
+        return allowed
 
     async def _grants(self, tenant_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
         settings, client, org = self._need(tenant_id)
@@ -141,17 +174,24 @@ class ZitadelMembership:
                 if users:
                     user_id = str(users[0]["id"])
                 else:
+                    if not await self.can_create_users(tenant_id):
+                        raise MembershipError("no_user_creation", NO_USER_CREATION)
                     local = email.split("@", 1)[0]
-                    made = await client.request(
-                        "POST",
-                        "/v2/users/human",
-                        json={
-                            "organization": {"orgId": org},
-                            "username": email,
-                            "profile": {"givenName": local, "familyName": local},
-                            "email": {"email": email, "sendCode": {}},
-                        },
-                    )
+                    try:
+                        made = await client.request(
+                            "POST",
+                            "/v2/users/human",
+                            json={
+                                "organization": {"orgId": org},
+                                "username": email,
+                                "profile": {"givenName": local, "familyName": local},
+                                "email": {"email": email, "sendCode": {}},
+                            },
+                        )
+                    except ZitadelApiError as exc:
+                        if exc.status == 403:
+                            raise MembershipError("no_user_creation", NO_USER_CREATION) from None
+                        raise
                     user_id = str(made.get("userId") or "")
                     if not user_id:
                         raise MembershipError("unavailable", "ZITADEL did not return the new user")

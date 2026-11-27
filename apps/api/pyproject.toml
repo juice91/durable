@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-api"
-version = "0.3.0"
+version = "0.5.0"
 description = "Control-plane API for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -18,6 +18,8 @@ dependencies = [
     "eap-kb-sources",
     # IAM interfaces and the identity chain; the plug-ins (eap-iam-*) are separate distributions found through entry points.
     "eap-iam",
+    # Inbound webhooks: the preset config models and secret checks at trigger creation (verification runs in the eap-iam-webhook plug-in).
+    "eap-inbound",
     "eap-run-store",
     "eap-blob-store",
     "eap-db",
@@ -50,6 +52,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "a2a-sdk==1.3.1",
     "pytest>=7",
     "pytest-asyncio>=0.24",
 ]
@@ -57,6 +60,7 @@ dev = [
 [tool.uv.sources]
 eap-kb-sources = { workspace = true }
 eap-iam = { workspace = true }
+eap-inbound = { workspace = true }
 eap-run-store = { workspace = true }
 eap-blob-store = { workspace = true }
 eap-db = { workspace = true }

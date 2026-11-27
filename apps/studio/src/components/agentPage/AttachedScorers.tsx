@@ -20,7 +20,7 @@ import { Select } from "@/components/ui/Select";
  * tenant's scorers with a sampling rate, or detach it. The worker applies them to every finished run
  * of the agent (the draft chat included is not scored) and records `score` events.
  */
-export function AttachedScorers({ agentId }: { agentId: string }) {
+export function AttachedScorers({ agentId, mayEdit = true }: { agentId: string; mayEdit?: boolean }) {
   const [attached, setAttached] = useState<AttachedScorer[] | null>(null);
   const [available, setAvailable] = useState<ReusableScorer[]>([]);
   const [choice, setChoice] = useState("");
@@ -85,12 +85,12 @@ export function AttachedScorers({ agentId }: { agentId: string }) {
               <span className="min-w-0 flex-1 truncate text-caption text-muted-foreground">
                 {describeEvaluator(s.evaluator)}, {Math.round(s.sampling_rate * 100)}% of runs
               </span>
-              <Button size="sm" variant="secondary" aria-label={`Detach scorer ${s.name}`} onClick={() => void detach(s.id)}>Detach</Button>
+              {mayEdit ? <Button size="sm" variant="secondary" aria-label={`Detach scorer ${s.name}`} onClick={() => void detach(s.id)}>Detach</Button> : null}
             </li>
           ))}
         </ul>
       ) : null}
-      {options.length > 0 ? (
+      {!mayEdit ? null : options.length > 0 ? (
         <form onSubmit={attach} aria-label="Attach a scorer" className="flex flex-wrap items-end gap-2">
           <label className="flex min-w-0 flex-col gap-1 text-caption text-muted-foreground">
             Scorer

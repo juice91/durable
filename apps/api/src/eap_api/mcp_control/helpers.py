@@ -103,7 +103,7 @@ def schedules(ctx: Ctx) -> Any:
 
 
 def approvals(ctx: Ctx) -> Any:
-    return lambda _db: ApprovalService(approval_store_of(ctx.app), ctx.stores[1], ctx.launcher)
+    return lambda _db: ApprovalService(approval_store_of(ctx.app), ctx.stores[1], ctx.launcher, db=_db)
 
 
 def workflow_runs(ctx: Ctx) -> Any:
@@ -114,7 +114,7 @@ async def tenant_run(ctx: Ctx, run_id: str, *, kind: str | None = None) -> dict[
     """The tenant's run row (another tenant's is not_found), optionally of one kind; a key restricted by
     allowlists sees only runs of its agents and workflows."""
     rid = uid(run_id, "run_id")
-    run = await call_service(ctx, run_service(ctx), lambda s: s.get_run(ctx.tenant_id, rid))
+    run = await call_service(ctx, run_service(ctx), lambda s: s.read_run(ctx.tenant_id, rid))
     if run is None or (kind is not None and (run.get("kind") or "agent") != kind):
         raise not_found("Run")
     if run.get("kind") == "workflow" and run.get("workflow_id") and not ctx.workflow_allowed(str(run["workflow_id"])):

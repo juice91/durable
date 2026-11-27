@@ -1,5 +1,5 @@
 """Tenant API keys (0017_api_keys): the credential third-party AG-UI frontends authenticate with (D16
-of docs/plans/2026-11-13-milestone-ag-ui.md).
+of an internal design note).
 
 A key reads `pos_<id>_<secret>`: `id` is 24 lowercase hex digits (not secret; it names the row and
 is shown in lists), `secret` 43 URL-safe base64 characters (256 random bits). Only
@@ -26,12 +26,24 @@ import hmac
 import re
 import secrets
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
-from sqlalchemy import CheckConstraint, DateTime, Index, PrimaryKeyConstraint, String, Text, func, select, text, update
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKeyConstraint,
+    Index,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    func,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
 
 from eap_run_store.store import Base
@@ -39,7 +51,11 @@ from eap_run_store.store import Base
 API_KEY_PREFIX = "pos_"
 # `agui:run` runs agents and workflows over AG-UI; `mcp` reads the tenant's platform through the MCP control
 # endpoint (/api/v1/mcp); `manage` implies `mcp` and also changes it. A key without either is refused there.
-API_KEY_SCOPES = ("agui:run", "mcp", "manage", "otlp")
+# `run` is an external agent's key (docs/external-access.md): it belongs to an external client and carries nothing else.
+RUN_SCOPE = "run"
+API_KEY_SCOPES = ("agui:run", "mcp", "manage", "otlp", RUN_SCOPE)
+RUN_KEY_DEFAULT_EXPIRY_DAYS = 90
+RUN_KEY_MAX_EXPIRY_DAYS = 365
 DEFAULT_API_KEY_SCOPES = ("agui:run",)
 API_KEY_NAME_MAX_CHARS = 100
 API_KEY_ALLOWLIST_MAX_ITEMS = 100
@@ -67,6 +83,14 @@ API_KEY_OWNER_CHECK = (
     "(owner_subject IS NULL AND owner_email IS NULL) OR "
     "(owner_subject IS NOT NULL AND char_length(owner_subject) BETWEEN 1 AND 255)"
 )
+
+# Same texts as migration 0043_external_access.
+API_KEY_RUN_KEY_CHECK = (
+    "NOT (scopes @> '[\"run\"]'::jsonb) OR (jsonb_array_length(scopes) = 1 AND external_client_id IS NOT NULL"
+    " AND workflow_ids IS NOT NULL AND jsonb_array_length(workflow_ids) > 0 AND agent_ids IS NULL"
+    " AND expires_at IS NOT NULL AND owner_subject IS NULL)"
+)
+API_KEY_EXTERNAL_CLIENT_CHECK = "external_client_id IS NULL OR scopes @> '[\"run\"]'::jsonb"
 
 _TOKEN_RE = re.compile(r"pos_([0-9a-f]{24})_([A-Za-z0-9_-]{43})")
 _KEY_ID_RE = re.compile(r"[0-9a-f]{24}")
@@ -98,6 +122,7 @@ class ApiKeyModel(Base):
     last_used_at: Mapped[datetime | None] = mapped_column("last_used_at", DateTime(timezone=True), nullable=True)
     owner_subject: Mapped[str | None] = mapped_column("owner_subject", Text, nullable=True)
     owner_email: Mapped[str | None] = mapped_column("owner_email", Text, nullable=True)
+    external_client_id: Mapped[str | None] = mapped_column("external_client_id", PG_UUID(as_uuid=False), nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="api_keys_pkey"),
@@ -111,6 +136,16 @@ class ApiKeyModel(Base):
         CheckConstraint(API_KEY_OWNER_CHECK, name="ck_api_keys_owner"),
         Index("ix_api_keys_tenant_created", "tenant_id", "created_at"),
         Index("ix_api_keys_tenant_owner", "tenant_id", "owner_subject"),
+        ForeignKeyConstraint(
+            ["tenant_id", "external_client_id"], ["external_clients.tenant_id", "external_clients.id"],
+            name="fk_api_keys_external_client",
+        ),
+        CheckConstraint(API_KEY_RUN_KEY_CHECK, name="ck_api_keys_run_key"),
+        CheckConstraint(API_KEY_EXTERNAL_CLIENT_CHECK, name="ck_api_keys_external_client"),
+        Index(
+            "ix_api_keys_external_client", "tenant_id", "external_client_id",
+            postgresql_where=text("external_client_id IS NOT NULL"),
+        ),
     )
 
 
@@ -133,6 +168,8 @@ class ApiKeyRecord:
     # The person a personal key belongs to (subject, and the e-mail they had at creation); None for a tenant key.
     owner_subject: str | None = None
     owner_email: str | None = None
+    # A `run` key: the external client it belongs to.
+    external_client_id: str | None = None
 
     @property
     def prefix(self) -> str:
@@ -282,7 +319,35 @@ def _record(row: ApiKeyModel) -> ApiKeyRecord:
         last_used_at=row.last_used_at,
         owner_subject=row.owner_subject,
         owner_email=row.owner_email,
+        external_client_id=None if row.external_client_id is None else str(row.external_client_id),
     )
+
+
+def _run_key_expiry(
+    scopes: list[str], external_client_id: str | None, agent_ids: list[str] | None, workflow_ids: list[str] | None,
+    expires_at: datetime | None, owner_subject: str | None,
+) -> datetime | None:
+    """The rules of an external client's `run` key (ValueError names the broken one); its expiry, defaulted. A key
+    without that scope keeps `expires_at` and may name no client."""
+    if RUN_SCOPE not in scopes:
+        if external_client_id is not None:
+            raise ValueError("only a key with the run scope belongs to an external client")
+        return expires_at
+    if scopes != [RUN_SCOPE]:
+        raise ValueError("a run key carries no other scope")
+    if external_client_id is None:
+        raise ValueError("a run key belongs to an external client")
+    if owner_subject is not None:
+        raise ValueError("a personal key cannot carry the run scope")
+    if agent_ids is not None:
+        raise ValueError("a run key reaches no agent")
+    if not workflow_ids:
+        raise ValueError("a run key needs a workflow allowlist")
+    if expires_at is None:
+        return _now() + timedelta(days=RUN_KEY_DEFAULT_EXPIRY_DAYS)
+    if expires_at.tzinfo is not None and expires_at > _now() + timedelta(days=RUN_KEY_MAX_EXPIRY_DAYS):
+        raise ValueError(f"a run key expires at most {RUN_KEY_MAX_EXPIRY_DAYS} days from now")
+    return expires_at
 
 
 def _active_clause(now: Any):
@@ -325,6 +390,7 @@ class ApiKeyStore:
         expires_at: datetime | None = None,
         owner_subject: str | None = None,
         owner_email: str | None = None,
+        external_client_id: str | None = None,
     ) -> CreatedApiKey:
         """A new key (ValueError on invalid input; ApiKeyLimitExceeded past the tenant's cap).
 
@@ -334,7 +400,11 @@ class ApiKeyStore:
         are normalized (normalize_origin). `expires_at` must be timezone-aware and in the future.
 
         `owner_subject` makes a personal key (with the owner's `owner_email` as a display snapshot): it counts
-        against MAX_ACTIVE_API_KEYS_PER_OWNER as well as the tenant's cap. None is a tenant key."""
+        against MAX_ACTIVE_API_KEYS_PER_OWNER as well as the tenant's cap. None is a tenant key.
+
+        A `run` key (an external agent's) names `external_client_id` (a client of this tenant), carries no other scope,
+        has a non-empty workflow allowlist and no agent one, and expires: `expires_at` None means
+        RUN_KEY_DEFAULT_EXPIRY_DAYS, at most RUN_KEY_MAX_EXPIRY_DAYS."""
         if owner_subject is not None and (
             not isinstance(owner_subject, str) or not owner_subject or len(owner_subject) > API_KEY_OWNER_MAX_CHARS
         ):
@@ -360,11 +430,14 @@ class ApiKeyStore:
             raise ValueError("a key needs at least one scope")
         clean_agents = _validated_ids(agent_ids, "agent_ids")
         clean_workflows = _validated_ids(workflow_ids, "workflow_ids")
+        expires_at = _run_key_expiry(
+            clean_scopes, external_client_id, clean_agents, clean_workflows, expires_at, owner_subject
+        )
         # A key restricted on one dimension is restricted on both: the omitted allowlist is stored
         # as [] (nothing), so the row says what the key can do. Only both omitted is tenant-wide.
         if clean_agents is not None and clean_workflows is None:
             clean_workflows = []
-        elif clean_workflows is not None and clean_agents is None:
+        elif clean_workflows is not None and clean_agents is None and RUN_SCOPE not in clean_scopes:
             clean_agents = []
         clean_origins = _validated_origins(allowed_origins)
         if expires_at is not None:
@@ -399,6 +472,11 @@ class ApiKeyStore:
                 ).scalar_one()
                 if owned >= MAX_ACTIVE_API_KEYS_PER_OWNER:
                     raise ApiKeyLimitExceeded(tenant_id, MAX_ACTIVE_API_KEYS_PER_OWNER, per_owner=True)
+            if external_client_id is not None and session.execute(
+                text("SELECT 1 FROM external_clients WHERE tenant_id = :t AND id::text = :c"),
+                {"t": tenant_id, "c": str(external_client_id)},
+            ).first() is None:
+                raise ValueError("external client not found")
             row = ApiKeyModel(
                 id=key_id,
                 tenant_id=tenant_id,
@@ -412,6 +490,7 @@ class ApiKeyStore:
                 expires_at=expires_at,
                 owner_subject=owner_subject,
                 owner_email=owner_email[:320] if owner_email else None,
+                external_client_id=external_client_id,
             )
             session.add(row)
             session.flush()
@@ -459,6 +538,15 @@ class ApiKeyStore:
                 .returning(ApiKeyModel)
             ).scalar_one_or_none()
             return None if row is None else _record(row)
+
+    def list_run_keys(self, tenant_id: str, external_client_id: str | None = None) -> list[ApiKeyRecord]:
+        """The tenant's `run` keys (of one external client when given), revoked and expired included, newest first."""
+        query = select(ApiKeyModel).where(ApiKeyModel.tenant_id == tenant_id, ApiKeyModel.external_client_id.is_not(None))
+        if external_client_id is not None:
+            query = query.where(ApiKeyModel.external_client_id == str(external_client_id))
+        with self.Session() as session:
+            rows = session.execute(query.order_by(ApiKeyModel.created_at.desc(), ApiKeyModel.id.desc())).scalars()
+            return [_record(row) for row in rows]
 
     def get(self, tenant_id: str, key_id: str) -> ApiKeyRecord | None:
         """One of the tenant's keys, else None (another tenant's key is None too)."""

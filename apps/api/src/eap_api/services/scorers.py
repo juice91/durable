@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, Unavailable
 from eap_processors import Re2PatternError, compile_re2
 from eap_run_store.scorers import (  # noqa: F401 - the limits are re-exported for the routes' request models
@@ -63,16 +65,22 @@ class ScoreOutcome:
     already_scored: list[str]
 
 
-class ScorerService:
-    """Scorers of one tenant at a time (every method takes the tenant id)."""
+class ScorerService(AccessBound):
+    """Scorers of one tenant at a time (every method takes the tenant id).
 
-    def __init__(self, store: ScorerStore, db: Session, run_store: Any, launcher: RunLauncher) -> None:
+    The scorer library is tenant configuration: any member reads it, editors change it (`read` / `write` on the tenant).
+    Attaching one to an agent is `edit` on the agent, scoring a run `run` on the run's agent or workflow."""
+
+    def __init__(
+        self, store: ScorerStore, db: Session, run_store: Any, launcher: RunLauncher, access: Access | None = None
+    ) -> None:
         self.store = store
         self.db = db
         self.run_store = run_store
         self.launcher = launcher
+        self._access = access  # None: no caller to check
 
-    def _agent(self, tenant_id: str, agent_id: uuid.UUID) -> None:
+    def _agent(self, tenant_id: str, agent_id: uuid.UUID, action: str = "read") -> None:
         found = (
             self.db.query(AgentModel.id)
             .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
@@ -80,10 +88,12 @@ class ScorerService:
         )
         if found is None:
             raise NotFound(AGENT_NOT_FOUND)
+        acl.require(self._access, action, "agent", str(agent_id))
 
     # ------------------------------------------------------------------------ scorers
 
     def create(self, tenant_id: str, name: str, evaluator: Any, description: str | None) -> Any:
+        acl.require(self._access, "write", "tenant", None)
         spec = validate_evaluator(evaluator)
         try:
             return self.store.create(tenant_id, name, spec, description)
@@ -91,9 +101,11 @@ class ScorerService:
             raise Conflict(NAME_IN_USE) from None
 
     def list(self, tenant_id: str) -> list[Any]:
+        acl.require(self._access, "read", "tenant", None)
         return self.store.list(tenant_id)
 
     def get(self, tenant_id: str, scorer_id: uuid.UUID) -> Any:
+        acl.require(self._access, "read", "tenant", None)
         try:
             return self.store.get(tenant_id, scorer_id)
         except ScorerNotFound:
@@ -105,6 +117,7 @@ class ScorerService:
     ) -> Any:
         """Change a scorer; `evaluator` None keeps it. A stale `expected_revision` raises the store's
         RevisionMismatch."""
+        acl.require(self._access, "write", "tenant", None)
         spec = validate_evaluator(evaluator) if evaluator is not None else None
         try:
             return self.store.update(
@@ -117,6 +130,7 @@ class ScorerService:
             raise Conflict(NAME_IN_USE) from None
 
     def delete(self, tenant_id: str, scorer_id: uuid.UUID) -> None:
+        acl.require(self._access, "write", "tenant", None)
         try:
             self.store.delete(tenant_id, scorer_id)
         except ScorerNotFound:
@@ -132,7 +146,7 @@ class ScorerService:
         self, tenant_id: str, agent_id: uuid.UUID, scorer_id: uuid.UUID, sampling_rate: Decimal
     ) -> list[Any]:
         """Attach a scorer to the agent (at most 10 per agent: Conflict); the agent's attached scorers."""
-        self._agent(tenant_id, agent_id)
+        self._agent(tenant_id, agent_id, "edit")
         try:
             self.store.attach(tenant_id, agent_id, scorer_id, sampling_rate)
         except ScorerNotFound:
@@ -142,7 +156,7 @@ class ScorerService:
         return self.store.attached_to_agent(tenant_id, agent_id)
 
     def detach(self, tenant_id: str, agent_id: uuid.UUID, scorer_id: uuid.UUID) -> None:
-        self._agent(tenant_id, agent_id)
+        self._agent(tenant_id, agent_id, "edit")
         self.store.detach(tenant_id, agent_id, scorer_id)
 
     # ------------------------------------------------------------------------ score on demand
@@ -165,6 +179,12 @@ class ScorerService:
         run = self.run_store.get_run(tenant_id, run_id)
         if run is None:
             raise NotFound(RUN_NOT_FOUND)
+        if run.get("workflow_id") is not None:
+            acl.require(self._access, "run", "workflow", str(run["workflow_id"]))
+        elif run.get("agent_id") is not None:
+            acl.require(self._access, "run", "agent", str(run["agent_id"]))
+        else:
+            acl.require(self._access, "write", "tenant", None)
         if run["status"] not in ("completed", "skipped"):
             raise Conflict(RUN_NOT_FINISHED)
         requested = list(dict.fromkeys(str(s) for s in scorer_ids))

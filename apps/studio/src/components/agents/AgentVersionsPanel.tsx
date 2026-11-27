@@ -162,6 +162,8 @@ export function useVersionRestore({ agentId, latest, hasUnsavedEdits = false, on
 }
 
 interface AgentVersionsPanelProps {
+  /** The caller may publish, so may restore an old version. */
+  mayRestore?: boolean;
   versions: AgentVersion[];
   /** Enables compare and restore. Without it the panel is a read-only list. */
   agentId?: string;
@@ -189,7 +191,7 @@ const ICON = { strokeWidth: ICON_STROKE_WIDTH, "aria-hidden": true } as const;
  * draft or with another version, test in chat, restore). Two rows can be ticked and compared.
  * Narrow by design: no table, so it fits a 260 px column and a phone.
  */
-export function AgentVersionsPanel({ versions, agentId, hasUnsavedEdits = false, onRestored, onCompare, draftChanged = false, onNavigate }: AgentVersionsPanelProps) {
+export function AgentVersionsPanel({ versions, agentId, hasUnsavedEdits = false, onRestored, onCompare, draftChanged = false, onNavigate, mayRestore = true }: AgentVersionsPanelProps) {
   // The open row menu, so a guarded "Test in chat" can close it before the leave dialog opens.
   const [openMenu, setOpenMenu] = useState<CompareRef | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
@@ -287,7 +289,7 @@ export function AgentVersionsPanel({ versions, agentId, hasUnsavedEdits = false,
               </Link>
             </DropdownMenuItem>
           ) : null}
-          {ref !== "draft" && ref !== latest ? <DropdownMenuItem onSelect={() => restore.start(ref)}>Restore this version</DropdownMenuItem> : null}
+          {mayRestore && ref !== "draft" && ref !== latest ? <DropdownMenuItem onSelect={() => restore.start(ref)}>Restore this version</DropdownMenuItem> : null}
           {draftHint ? <p className="px-2 py-1 text-caption text-muted-foreground">{draftHint}</p> : null}
         </DropdownMenuContent>
       </DropdownMenu>

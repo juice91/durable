@@ -30,6 +30,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.toolsets.abstract import ToolsetTool
 
 from eap_runtime import SideEffectOutcomeUnknown
+from eap_worker.grants import denial_for_secrets, record_denial, refuse_message, secret_names_in
 from eap_schemas.secrets import is_secret_ref
 from eap_secrets import SecretsError, load_keyring
 from eap_secrets.redaction import redact, secret_variants
@@ -117,6 +118,11 @@ async def call_with_secrets(
     if not has_ref(tool_args):
         return await call(tool_args)
     tenant_id = ctx.deps.tenant_id
+    # Agent-bound grants: every name must be in the run's start-time set, checked before any value is read.
+    denial = await asyncio.to_thread(denial_for_secrets, tenant_id, getattr(ctx.deps, "run_id", None), secret_names_in(tool_args))
+    if denial is not None:
+        await asyncio.to_thread(record_denial, tenant_id, getattr(ctx.deps, "run_id", None), denial)
+        raise ToolFailed(refuse_message(denial))
 
     def read() -> dict[str, str | None]:
         store = secret_store(engine)

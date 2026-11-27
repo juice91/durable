@@ -2,7 +2,7 @@
 // pieces, so the whole flow is testable against an in-process provider. No token is ever logged or put in storage;
 // only the one-time `state` / verifier / nonce of a login in flight live in sessionStorage across the redirect.
 import { codeChallenge, randomString } from "./pkce";
-import { scopesFor, type StudioAuthConfig } from "./config";
+import { scopesFor, type ZitadelAuthConfig } from "./config";
 import { setTokens, getTokens, type Tokens } from "./session";
 
 export const CALLBACK_PATH = "/auth/callback";
@@ -34,7 +34,7 @@ interface Pending {
 }
 
 export interface OidcDeps {
-  config: StudioAuthConfig;
+  config: ZitadelAuthConfig;
   fetch: typeof fetch;
   storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   origin: string;

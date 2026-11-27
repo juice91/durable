@@ -7,7 +7,7 @@ guards as Studio, run workflows and agents, wait for runs and read bounded resul
 source data, check connections, list MCP servers and decide approvals.
 
 The design and its reasons are in
-[`docs/superpowers/specs/2026-11-18-mcp-control-design.md`](superpowers/specs/2026-11-18-mcp-control-design.md).
+an internal design note.
 
 ## Endpoint and key
 
@@ -25,6 +25,9 @@ The design and its reasons are in
 - Keys are created in Studio (Settings → API keys) or with `POST /api/v1/api-keys`
   (`{"name": "...", "scopes": ["mcp"]}` to read, `["manage"]` to also change). A key can also carry
   `otlp`, which only sends OpenTelemetry traces (see [external traces](observability/external-traces.md)).
+
+An external agent that only needs to **run** exported workflows does not use this endpoint: it gets a `run` key and the
+separate run surface `/api/v1/external/mcp` ([external access](external-access.md)). A `run` key is refused here.
 
 ## Connect a client
 
@@ -59,7 +62,7 @@ to call `agent.list`, or `agent.chat` with the Architect (below).
 ## Tools
 
 Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, `settings.*`,
-`mcp.*`, `approvals.*`). Results are objects; lists are paged (`limit` at most 100, `offset`,
+`mcp.*`, `approvals.*`, `webhook.*`). Results are objects; lists are paged (`limit` at most 100, `offset`,
 `next_offset`). A refusal is the platform's stable error object `{error: {code, message}}` with MCP
 `isError`, never a traceback.
 
@@ -87,6 +90,10 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 | `system.context` | none | the system context for the caller: capability lines, known gaps, the tenant's resource names and counts (secrets by name only), operational facts and the principal; a layer that could not be built is missing and named in `degraded` |
 | `provenance.get` | `kind`, `definition_id`, `spec_hash?` | what a draft or publish card of an agent or workflow was based on (hashes, principal summary, tool-call names) and the capabilities it uses that changed since |
 | `mcp.catalog.search` | `query?`, `limit?`, `after?`, `source?` | mirrored registry entries |
+| `webhook.trigger.list` | `workflow_id?`, `include_archived?` | inbound webhook triggers: workflow, preset, status, URL, secret **reference** names, limits (never a value) |
+| `webhook.trigger.get` | `trigger_id` | one trigger with its `config_hash`, status and publish-style warnings |
+| `webhook.trigger.events` | `trigger_id`, `limit?` | the trigger's lifecycle audit rows |
+| `webhook.delivery.list` / `.get` | `trigger_id?`, `outcome?`, `limit?` / `delivery_id` | authenticated deliveries: outcome, reason, size, skew, the run started (no body, no signature) |
 | `approvals.list` | `status?`, `kind?`, `agent_id?`, `limit?`, `cursor?` | gated tool calls and workflow approval steps |
 | `scorer.list` | `limit?`, `offset?` | reusable scorers with the agents each is attached to |
 | `eval.suite.list` | `agent_id` or `workflow_id`, `include_archived?`, `limit?`, `offset?` | the target's test suites with their evaluators and case counts |
@@ -113,6 +120,11 @@ Names are the platform's functional namespace (`agent.*`, `workflow.*`, `kb.*`, 
 | `mcp.server.install` | `catalog_name`, `package_index?`, `remote_index?`, `name?`, `env?` | install a catalog entry |
 | `mcp.server.runtime` | `server_id`, `action` (`start` / `stop` / `restart`) | control a managed server's pod |
 | `approvals.decide` | `run_id`, `kind` (`tool` / `step`), `key`, `decision` (`approve` / `deny`), `comment?`, `resume_data?` | decide an approval |
+| `webhook.trigger.create` | `name`, `workflow_id`, `version`, `preset`, `secrets`, `actions`, `description?`, `preset_config?`, `tolerance_seconds?`, `limits?` | create a **disabled** trigger; `secrets` are existing `secret:<name>` references, never values (`generate` is Studio-only); a restricted key cannot |
+| `webhook.trigger.update` | `trigger_id`, `changes`, `if_revision?` | change a trigger; a grant change returns it to `disabled` |
+| `webhook.trigger.request_enable` | `trigger_id` | ask for the trigger to be enabled (`pending_enable`); a person enables it in Studio. There is no tool that enables, and `approvals.decide` does not take this kind |
+| `webhook.trigger.disable` / `.archive` | `trigger_id` | stop the URL / retire the trigger |
+| `webhook.trigger.rotate` | `trigger_id`, `add?` or `retire?` | add a second active secret reference, then retire the old one (no downtime, no new approval). Adding to an **enabled** trigger is refused (`human_required`): a person does it in Studio |
 | `scorer.create` | `name`, `evaluator`, `description?` | create a reusable scorer (`contains`, `regex`, `schema_valid`, `field_equals`, `max_cost`); a restricted key cannot |
 | `scorer.attach` | `agent_id`, `scorer_id`, `sampling_rate?` (0..1] | attach a scorer to an agent; returns its attached scorers |
 | `scorer.suggest` | `agent_id` or `workflow_id`, `max?` (1..12, default 8), `include_runs?` | AI-suggested rules `{suggestions: [{title, rationale, scope, spec, evidence}], model, dropped}`; runs the built-in suggester (a model run), cached 10 minutes, adds nothing |

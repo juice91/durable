@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import Link from "next/link";
 import React, { useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, Copy, Download, Gauge, Maximize2, Minimize2 } from "lucide-react";
@@ -168,6 +169,10 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
   const root = trace?.spans[0] ?? null;
   const selected = trace?.spans.find((s) => s.id === selectedId) ?? null;
   const run = trace?.run ?? null;
+  // Scoring needs `run` on the run's workflow, else its agent (a run of neither: the server decides).
+  const subjectId = run?.workflow_id ?? run?.agent_id ?? undefined;
+  const mayScoreSubject = useCan(run?.workflow_id ? "workflow" : "agent", subjectId, "run");
+  const mayScore = !run || !subjectId || mayScoreSubject;
   // Knowledge base names only when the trace shows one: a kb_ingest run or a retrieve span.
   const needsKbNames = Boolean(
     trace && (runKind(trace.run) === "kb_ingest" || trace.spans.some((s) => s.kind === "retrieve")),
@@ -190,10 +195,14 @@ function TraceSheetBody({ runId, initialSpanId, tab, onTabChange, navigation, ex
             {/* No tooltips here: the first of these can take focus when the Sheet opens, and an
                 open tooltip would take the first Escape (as on the kit's Close button). */}
             <IconButton label="Copy run id" size="sm" tooltip={false} icon={icon(Copy)} onClick={copyId} />
-            {/* Scoring needs a completed run; a disabled button takes no hover, so the reason is the wrapper's title. */}
-            <span title={run && run.status !== "completed" ? "Only completed runs can be scored" : undefined} className="inline-flex">
-              <IconButton label="Score trace" size="sm" tooltip={false} icon={icon(Gauge)} disabled={!run || run.status !== "completed"} onClick={() => setScoreOpen(true)} />
-            </span>
+            {mayScore ? (
+              <>
+                {/* Scoring needs a completed run; a disabled button takes no hover, so the reason is the wrapper's title. */}
+                <span title={run && run.status !== "completed" ? "Only completed runs can be scored" : undefined} className="inline-flex">
+                  <IconButton label="Score trace" size="sm" tooltip={false} icon={icon(Gauge)} disabled={!run || run.status !== "completed"} onClick={() => setScoreOpen(true)} />
+                </span>
+              </>
+            ) : null}
             <IconButton
               label="Download trace"
               size="sm"

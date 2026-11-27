@@ -44,9 +44,17 @@ class FakeDb:
         return self.rows.pop(0)
 
 
-def service(store=None, runtime=None, db=None):
+class FakeWebhooks:
+    def __init__(self, using=None) -> None:
+        self.using = using or []
+
+    def triggers_using_secret(self, tenant_id, name):
+        return self.using
+
+
+def service(store=None, runtime=None, db=None, webhooks=None):
     store = store or FakeSecretStore()
-    return SecretService(None, db, runtime or FakeRuntime(), keyed_store=lambda engine: store), store
+    return SecretService(None, db, runtime or FakeRuntime(), webhooks or FakeWebhooks(), keyed_store=lambda engine: store), store
 
 
 def test_a_bad_name_is_refused_with_its_code():
@@ -98,3 +106,11 @@ def test_delete_of_a_missing_secret_is_not_found(monkeypatch):
     with pytest.raises(NotFound) as raised:
         svc.delete("t", "gone")
     assert raised.value.code == "secret_not_found"
+
+
+def test_delete_refuses_a_secret_a_webhook_trigger_uses(monkeypatch):
+    monkeypatch.setattr(managed, "servers_using", lambda db, tenant: {})
+    svc, _ = service(webhooks=FakeWebhooks([{"trigger_id": "t1", "name": "hook"}]))
+    with pytest.raises(SecretInUse) as raised:
+        svc.delete("t", "token")
+    assert raised.value.triggers == [{"trigger_id": "t1", "name": "hook"}] and raised.value.servers == []

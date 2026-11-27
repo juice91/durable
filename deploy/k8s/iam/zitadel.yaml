@@ -1,9 +1,10 @@
 # ZITADEL (identity): one replica, datastore = the platform's Postgres (database zitadel, role zitadel).
-# TLS is terminated at Cloudflare (--tlsMode external); the public host is auth.example-org.ai on 443. ZITADEL v4
+# TLS is terminated by your ingress or reverse proxy (--tlsMode external); the public host is ZITADEL_EXTERNALDOMAIN below,
+# on 443. ZITADEL v4
 # defaults to Login V2 (instance feature loginV2.required = true), which only the separate zitadel-login container
 # serves, and we do not run it. So the built-in (v1) login UI is pinned with ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED
 # below (cmd/defaults.yaml, DefaultInstance.Features.LoginV2.Required, v4.20.5); the zitadel-login container is a
-# later, optional step (deploy/README.md). The setting applies only to an instance created by `setup`. Off by default (replicas: 0); up.sh scales it to 1 only when the deploy Secret carries
+# later, optional step. The setting applies only to an instance created by `setup`. Off by default (replicas: 0); up.sh scales it to 1 only when the deploy Secret carries
 # ZITADEL_MASTERKEY, ZITADEL_DB_PASSWORD, ZITADEL_ADMIN_USERNAME and ZITADEL_ADMIN_PASSWORD.
 #
 # Start-up flow, every pod start, all idempotent: `init` (schemas in the pre-created database), `setup` (migrations,
@@ -69,7 +70,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: zitadel}
       # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
-      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      # at the next deploy, under the drain. Placeholder text is harmless without up.sh.
       annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_ZITADEL@@"}
     spec:
       # Service-link env vars (ZITADEL_PORT=tcp://ip:PORT) would be read by the app as configuration and crash it.

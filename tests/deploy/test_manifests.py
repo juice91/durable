@@ -20,7 +20,6 @@ WORKLOAD_UIDS = {
     ("Deployment", "api"): 10001,
     ("Deployment", "lgtm"): 1000,
     ("Deployment", "studio"): 10001,
-    ("Deployment", "cloudflared"): 65532,  # the upstream image's nonroot user
     ("StatefulSet", "postgres"): 999,
     ("StatefulSet", "worker"): 10001,
     ("CronJob", "postgres-backup"): 999,
@@ -158,13 +157,14 @@ def test_external_otlp_forwarding_is_off_by_default_and_the_limit_is_set():
     assert data["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://lgtm:4318"
 
 
-def test_r2_endpoint_is_in_the_configmap_not_a_secret():
+def test_object_storage_in_the_configmap_is_a_placeholder_and_webhooks_are_off():
     cm = next(d for d in kustomize_docs() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "pydanticos-config")
     data = cm["data"]
-    assert data["EAP_BLOB_S3_ENDPOINT"] == "https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
+    assert data["EAP_BLOB_S3_ENDPOINT"] == "https://YOUR_S3_ENDPOINT"
     assert data["EAP_BLOB_S3_BUCKET"] == "pydanticos-attachments"
-    assert data["EAP_BLOB_S3_REGION"] == "auto"
-    assert "PLACEHOLDER" not in data["EAP_BLOB_S3_ENDPOINT"]
+    assert data["EAP_BLOB_S3_REGION"] == "us-east-1"
+    assert data["EAP_WEBHOOKS_ENABLED"] == "false"
+    assert data["EAP_TRUSTED_PROXY_CIDRS"] == ""
 
 
 def test_kustomize_emits_no_secret_objects():
@@ -363,47 +363,10 @@ def test_up_sh_replaces_the_kube_api_port_in_block_style_yaml(tmp_path) -> None:
     assert "port: 55436" in out and "6443" not in out
 
 
-# ---- Cloudflare Tunnel connector (deploy/k8s/cloudflared.yaml) ----------------------------------------------
-
-
-def _cloudflared() -> dict:
-    found = [d for d in kustomize_docs() if d["kind"] == "Deployment" and d["metadata"]["name"] == "cloudflared"]
-    assert len(found) == 1
-    return found[0]
-
-
-def test_cloudflared_image_is_pinned_by_version_and_digest():
-    import re
-
-    image = containers(_cloudflared())[0]["image"]
-    assert re.fullmatch(r"cloudflare/cloudflared:\d{4}\.\d+\.\d+@sha256:[0-9a-f]{64}", image), image
-
-
-def test_cloudflared_runs_the_tunnel_with_a_secret_token_and_is_off_by_default():
-    doc = _cloudflared()
-    assert doc["spec"]["replicas"] == 0  # up.sh scales to 1 only when the deploy secret has the token
-    c = containers(doc)[0]
-    assert c["args"] == ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
-    env = {e["name"]: e for e in c["env"]}
-    assert set(env) == {"TUNNEL_TOKEN"}
-    assert "value" not in env["TUNNEL_TOKEN"]
-    ref = env["TUNNEL_TOKEN"]["valueFrom"]["secretKeyRef"]
-    # Its own (optional) Secret, created by up.sh from CLOUDFLARE_TUNNEL_TOKEN.
-    assert ref["name"] == "cloudflared-secrets" and ref["key"] == "CLOUDFLARE_TUNNEL_TOKEN"
-    assert ref.get("optional") is True
-    for probe in ("readinessProbe", "livenessProbe"):
-        assert c[probe]["httpGet"] == {"path": "/ready", "port": "metrics"}
-    assert {"name": "metrics", "containerPort": 2000} in c["ports"]
-
-
-def test_cloudflared_deploy_wiring_uses_the_one_secret_field_name():
-    root = K8S_DIR.parents[1]
-    assert "CLOUDFLARE_TUNNEL_TOKEN=" in (K8S_DIR / "secrets.example.env").read_text()
-    up = (root / "deploy/scripts/up.sh").read_text()
-    assert 'dotenv_get "$secret_file" CLOUDFLARE_TUNNEL_TOKEN' in up
-    assert "scale deployment/cloudflared --replicas=1" in up and "scale deployment/cloudflared --replicas=0" in up
-
-
+def test_the_manifests_ship_no_tunnel_connector_and_no_ingress_for_one():
+    names = {d["metadata"]["name"] for d in kustomize_docs()}
+    assert {"api", "studio"} <= names
+    assert not [n for n in names if "tunnel" in n or n.endswith("flared") or "flared-" in n]
 
 
 def _peer_names(rules: list[dict], direction: str) -> set[tuple[str, tuple[int, ...]]]:
@@ -414,25 +377,7 @@ def _peer_names(rules: list[dict], direction: str) -> set[tuple[str, tuple[int, 
     return out
 
 
-def test_cloudflared_egress_reaches_only_the_edge_studio_and_api():
-    edge = _policy("cloudflared-egress-edge")["spec"]
-    assert edge["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": "cloudflared"}
-    assert edge["policyTypes"] == ["Egress"]
-    rule = edge["egress"][0]
-    assert rule["to"][0]["ipBlock"]["cidr"] == "0.0.0.0/0"
-    assert {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"} <= set(rule["to"][0]["ipBlock"]["except"])
-    assert {(p["protocol"], p["port"]) for p in rule["ports"]} == {("TCP", 7844), ("UDP", 7844), ("TCP", 443)}
-    origins = _policy("cloudflared-egress-origins")["spec"]
-    assert _peer_names(origins["egress"], "to") == {("studio", (3000,)), ("api", (8000,))}
-
-
-def test_studio_and_api_admit_cloudflared_and_every_older_ingress_stays():
-    for name, target, port in (("studio-ingress-cloudflared", "studio", 3000), ("api-ingress-cloudflared", "api", 8000)):
-        spec = _policy(name)["spec"]
-        assert spec["podSelector"]["matchLabels"] == {"app.kubernetes.io/name": target}
-        assert spec["policyTypes"] == ["Ingress"]
-        assert _peer_names(spec["ingress"], "from") == {("cloudflared", (port,))}
-    # The API still admits Studio and the worker (separate policies), and Studio still reaches only the API.
+def test_studio_reaches_only_the_api_and_the_api_admits_studio_and_the_worker():
     assert _peer_names(_policy("api-ingress-studio")["spec"]["ingress"], "from") == {("studio", (8000,))}
     assert _peer_names(_policy("api-ingress-worker")["spec"]["ingress"], "from") == {("worker", (8000,))}
     assert _peer_names(_policy("studio-egress-api")["spec"]["egress"], "to") == {("api", (8000,))}
@@ -448,7 +393,7 @@ def test_studio_image_builds_same_origin_with_the_in_cluster_api_rewrite_target(
     assert '"/api/:path*"' in config and "EAP_API_INTERNAL_URL" in config
 
 
-def test_only_studio_cloudflared_and_the_worker_reach_the_api_port_and_it_stays_cluster_internal():
+def test_only_studio_and_the_worker_reach_the_api_port_and_it_stays_cluster_internal():
     """Design 10 (`allow-api-ingress`): default-deny plus exactly three ingress policies naming the API pods."""
     from kustomize_util import kustomize_docs
 
@@ -462,7 +407,7 @@ def test_only_studio_cloudflared_and_the_worker_reach_the_api_port_and_it_stays_
         peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"]
         for d in api_ingress for rule in d["spec"]["ingress"] for peer in rule["from"]
     }
-    assert peers == {"studio", "cloudflared", "worker"}
+    assert peers == {"studio", "worker"}
     assert all(p["port"] == 8000 for d in api_ingress for rule in d["spec"]["ingress"] for p in rule["ports"])
     assert _policy("default-deny")["spec"]["policyTypes"] == ["Ingress", "Egress"]
     api_service = next(d for d in kustomize_docs() if d.get("kind") == "Service" and d["metadata"]["name"] == "api")

@@ -26,11 +26,8 @@ export interface StepDefinitionPanelProps {
   agent?: StepAgentInfo | null;
   /** Where the step goes next (a branch lists its cases instead). */
   next?: string[];
-  /**
-   * The AI 註解 (explanation) cached for this step. Hook: the page passes it once the cached
-   * explanations (`lib/workflowExplanations.ts`) are on main; null shows no section.
-   */
-  explanation?: string | null;
+  /** The 「說明」 section (a `StepExplanation`), shown near the top; omit for none. */
+  explanation?: React.ReactNode;
   onClose: () => void;
   className?: string;
 }
@@ -62,6 +59,7 @@ export function StepDefinitionPanel({ step, tool, agent, next = [], explanation,
         </h3>
         <IconButton label="Close step details" title="Close step details" size="sm" tooltip={false} data-testid="step-definition-close" icon={<X strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />} onClick={onClose} />
       </div>
+      {explanation}
       {tool ? (
         <div data-testid="step-definition-tool">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Tool</h4>
@@ -86,12 +84,6 @@ export function StepDefinitionPanel({ step, tool, agent, next = [], explanation,
         </div>
       ) : next.length > 0 ? (
         <p data-testid="step-definition-next" className="text-caption text-muted-foreground">Next: <span className="font-mono text-foreground">{next.join(", ")}</span></p>
-      ) : null}
-      {explanation ? (
-        <div data-testid="step-definition-explanation">
-          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">AI 註解</h4>
-          <p className="whitespace-pre-wrap break-words text-caption text-foreground">{explanation}</p>
-        </div>
       ) : null}
       <div>
         <div className="flex items-center justify-between gap-2">

@@ -15,6 +15,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.schedules import check_cron, get_zone, next_fire, validate_schedule_input
 from eap_api.services.revision_conflict import stale_revision
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
@@ -55,10 +57,14 @@ def _fail(code: int, error: str, **extra: Any) -> Any:
     return refuse(code, {"code": error, **extra})  # type: ignore[arg-type]
 
 
-class ScheduleService:
-    def __init__(self, session: Session, store: ScheduleStore) -> None:
+class ScheduleService(AccessBound):
+    def __init__(self, session: Session, store: ScheduleStore, access: Access | None = None) -> None:
         self._db = session
         self._store = store
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _require(self, action: str, schedule_id: str | None) -> None:
+        acl.require(self._access, action, "schedule", schedule_id)
 
     def _workflow_names(self, tenant_id: str, ids: set[str]) -> dict[str, str]:
         if not ids:
@@ -105,6 +111,7 @@ class ScheduleService:
     def page(self, tenant_id: str, workflow_id: str | None, limit: int, before: str | None) -> dict[str, Any]:
         """Schedules newest first (of one workflow when given: it must exist, archived or not)."""
         if workflow_id is not None:
+            acl.require(self._access, "read", "workflow", workflow_id)
             self._workflow(tenant_id, workflow_id, allow_archived=True)
         cursor = None
         if before is not None:
@@ -112,13 +119,16 @@ class ScheduleService:
                 cursor = RunCursor.decode(before)
             except InvalidRunCursor:
                 raise refuse(422, "before is not a valid cursor; pass the previous page's next_before verbatim") from None
-        items, next_before = self._store.list(tenant_id, workflow_id, limit, cursor)
+        items, next_before = self._store.list(
+            tenant_id, workflow_id, limit, cursor, schedule_ids=acl.sql_ids(acl.visible(self._access, "schedule"))
+        )
         names = self._workflow_names(tenant_id, {i["workflow_id"] for i in items})
         last = self._store.last_runs(tenant_id, [i["id"] for i in items])
         return {"items": [schedule_json(i, names.get(i["workflow_id"]), last.get(i["id"])) for i in items],
                 "next_before": next_before}
 
     def get(self, tenant_id: str, schedule_id: str) -> Versioned:
+        self._require("read", schedule_id)
         row = self._store.get(tenant_id, schedule_id)
         if row is None:
             raise refuse(404, "Schedule not found")
@@ -130,6 +140,7 @@ class ScheduleService:
 
     def update(self, tenant_id: str, schedule_id: str, fields: dict[str, Any], expected_revision: int | None) -> Versioned:
         """Change a schedule (`fields`: only what the caller set). A stale `expected_revision` is refused."""
+        self._require("edit", schedule_id)
         store = self._store
         current = store.get(tenant_id, schedule_id)
         if current is None:
@@ -167,12 +178,17 @@ class ScheduleService:
         return schedule_json(row, workflow.name), row["revision"]
 
     def delete(self, tenant_id: str, schedule_id: str) -> None:
+        self._require("archive", schedule_id)
         if not self._store.delete(tenant_id, schedule_id):
             raise refuse(404, "Schedule not found")
+        acl.unregister(self._access, "schedule", schedule_id)
 
     def create(
         self, tenant_id: str, workflow_id: str, *, name: str, cron: str, timezone_name: str, input: dict[str, Any]
     ) -> Versioned:
+        # A schedule starts runs of its workflow: the creator needs the right to create schedules and to run it.
+        acl.require(self._access, "run", "workflow", str(workflow_id))
+        acl.require(self._access, "create", "schedule", None)
         workflow = self._workflow(tenant_id, workflow_id)
         spec = self._latest_spec(workflow)
         self._check_cron_zone(cron, timezone_name)
@@ -184,4 +200,5 @@ class ScheduleService:
             )
         except ScheduleNameConflict:
             raise _fail(409, "schedule_name_taken") from None
+        acl.register(self._access, "schedule", row["id"])  # before the response: the creator owns what it made
         return schedule_json(row, workflow.name), row["revision"]

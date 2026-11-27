@@ -36,7 +36,7 @@ import { modelsFixture, processorCatalogFixture } from "@/components/agents/spec
 import { setWindowWidth, TEST_WIDE_WIDTH } from "@/components/frame/frameTesting";
 import { EditorTab } from "@/components/agentPage/EditorTab";
 import { EDITOR_STEPS, stepForError } from "./registry";
-import { optionsOf } from "@/test/select";
+import { findSelectOption, optionsOf } from "@/test/select";
 
 const TOOLS: ToolDefinition[] = [
   { id: "clock.now", title: "Clock", description: "", side_effect: false, external_idempotent: true, input_schema: {}, allowed: true },
@@ -164,7 +164,7 @@ describe("editor flow: all four features, saved and published", () => {
     fireEvent.change(screen.getByLabelText(/^Model requests/), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText(/^Cost \(USD/), { target: { value: "0.5" } });
     fireEvent.click(screen.getByRole("button", { name: "Add fallback model" }));
-    await act(async () => undefined);
+    await findSelectOption("test:other");
     fireEvent.change(screen.getByLabelText("Fallback 1"), { target: { value: "test:other" } });
     // Tools: gate the side-effect tool with a timeout.
     fireEvent.click(navButton(/^Tools/));

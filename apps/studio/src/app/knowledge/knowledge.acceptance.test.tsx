@@ -1385,7 +1385,7 @@ describe("navigation: sidebar, g k, c and the palette", () => {
     const item = allNavItems.find((entry) => entry.id === "knowledge")!;
     expect(item).toMatchObject({ href: "/knowledge", group: "primitives", gKey: "k", label: "Knowledge" });
     const group = allNavItems.filter((entry) => entry.group === "primitives").map((entry) => entry.id);
-    expect(group.indexOf("knowledge")).toBe(group.indexOf("processors") + 1);
+    expect(group).toEqual(["agents", "architect", "workflows", "tools", "mcp", "processors", "knowledge", "webhooks", "external-access"]);
     render(<KeyboardHarness><KnowledgeBasePage /></KeyboardHarness>);
     await screen.findAllByTestId("knowledge-document-row");
     expect(sidebarLink()).toHaveAttribute("href", "/knowledge");

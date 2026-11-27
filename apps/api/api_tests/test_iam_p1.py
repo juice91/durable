@@ -120,6 +120,25 @@ def test_list_invite_change_role_and_remove(members_app):
     assert c.delete(f"{MEMBERS}/u2", headers=h).status_code == 404
 
 
+def test_the_list_says_whether_an_invitation_may_create_a_user(members_app):
+    """A source that does not say may create; one that says no (the ZITADEL operator organisation) is passed on, and its
+    refusal to create is a 409 with a stable code and what to do instead."""
+    c, h = members_app.client, members_app.headers
+    assert c.get(MEMBERS, headers=h).json()["can_create_users"] is True
+
+    async def cannot(tenant_id):
+        return False
+
+    async def refuse(tenant_id, email, role):
+        raise MembershipError("no_user_creation", "create the user in the ZITADEL console first, then add them here")
+
+    members_app.source.can_create_users = cannot
+    members_app.source.invite = refuse
+    assert c.get(MEMBERS, headers=h).json()["can_create_users"] is False
+    r = c.post(MEMBERS, json={"email": "cy@example.test", "role": "viewer"}, headers=h)
+    assert r.status_code == 409 and r.json()["code"] == "no_user_creation" and "ZITADEL console" in r.json()["detail"]
+
+
 def test_the_last_admin_cannot_be_demoted_or_removed_over_http(members_app):
     c, h = members_app.client, members_app.headers
     r = c.patch(f"{MEMBERS}/u1", json={"role": "viewer"}, headers=h)
@@ -207,7 +226,7 @@ def test_a_zitadel_token_authenticates_through_the_chain(zt):
     r = zt.client.get(CAPABILITIES, headers=auth(zt.mint()))
     assert r.status_code == 200
     body = r.json()
-    assert [p["name"] for p in body["identity"]] == ["zitadel", "apikey", "devloopback"]
+    assert [p["name"] for p in body["identity"]] == ["zitadel", "apikey", "devloopback", "webhook"]  # webhook: always added when installed
     assert body["me"] == {
         "subject": "zitadel:user-1", "email": "zed@example.test", "tenant_id": zt.tenant, "kind": "user",
         "roles": ["admin"], "provider": "zitadel",

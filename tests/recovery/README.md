@@ -1,7 +1,7 @@
 # Crash-injection matrix (milestone 1, task 9)
 
 Kills real processes at named points and checks that a fresh process recovers the run without
-duplicating the external side effect. Binding spec: `docs/plans/2026-11-11-milestone-1-vertical-slice.md`
+duplicating the external side effect. Binding spec: an internal design note
 ("Durability contract", "Run hand-off contract", "Task 9 crash-injection matrix").
 
 ## Run it

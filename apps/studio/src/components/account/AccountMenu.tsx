@@ -12,7 +12,7 @@ import { useTheme } from "@/components/theme/ThemeProvider";
 import { accountLinks, formatUntil, signInMethod } from "@/lib/account";
 import { signOut } from "@/lib/auth/controller";
 import { ICON_STROKE_WIDTH } from "@/lib/icons";
-import { ACCESS_LOGOUT_PATH, canSignOut, canSignOutZitadel, displayName, providerLabel, type IamMe } from "@/lib/iam";
+import { ACCESS_LOGOUT_PATH, canSignOut, canSignOutStudio, displayName, providerLabel, type IamMe } from "@/lib/iam";
 import { routes } from "@/lib/routes";
 import type { ThemePreference } from "@/lib/theme";
 import { Avatar } from "./Avatar";
@@ -84,7 +84,7 @@ export function AccountMenu({
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>
-        {canSignOut(me) || canSignOutZitadel(me) ? (
+        {canSignOut(me) || canSignOutStudio(me) ? (
           <>
             <DropdownMenuSeparator />
             {canSignOut(me) ? (

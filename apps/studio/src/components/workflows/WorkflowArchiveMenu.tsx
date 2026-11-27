@@ -126,7 +126,7 @@ export async function unarchive(workflow: Pick<Workflow, "id" | "name">, onChang
 }
 
 /** Shown under the header of an archived workflow's page. */
-export function WorkflowArchivedBanner({ workflow, onChanged }: { workflow: Workflow; onChanged: (workflow: Workflow) => void }) {
+export function WorkflowArchivedBanner({ workflow, onChanged, mayUnarchive = true }: { workflow: Workflow; onChanged: (workflow: Workflow) => void; mayUnarchive?: boolean }) {
   const [busy, setBusy] = useState(false);
   return (
     <div
@@ -141,17 +141,19 @@ export function WorkflowArchivedBanner({ workflow, onChanged }: { workflow: Work
           Archived workflows
         </Link>
       </span>
-      <Button
-        size="sm"
-        disabled={busy}
-        onClick={async () => {
-          setBusy(true);
-          await unarchive(workflow, onChanged);
-          setBusy(false);
-        }}
-      >
-        Unarchive
-      </Button>
+      {mayUnarchive ? (
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            await unarchive(workflow, onChanged);
+            setBusy(false);
+          }}
+        >
+          Unarchive
+        </Button>
+      ) : null}
     </div>
   );
 }

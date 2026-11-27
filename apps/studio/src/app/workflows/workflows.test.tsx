@@ -97,26 +97,56 @@ describe("/workflows/[id]", () => {
     expect(row).toHaveTextContent("2.50 s");
   });
 
-  it("opens the AI 說明 panel from the header, generates for the shown version and notes the steps", async () => {
+  it("opens Step details on the right for the LAST step, outside the left panel, and keeps it on re-select", async () => {
     await renderDetail();
-    expect(screen.queryByTestId("workflow-explain-panel")).toBeNull();
-    fireEvent.click(screen.getByTestId("workflow-explain-button"));
-    fireEvent.click(await screen.findByTestId("workflow-explain-generate"));
-    expect(await screen.findByTestId("workflow-explain-summary")).toHaveTextContent("先判斷是否緊急");
-    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST" && String(init?.body).includes("refresh"));
-    expect(JSON.parse(post![1].body)).toEqual({ version: 2, locale: "zh-TW", refresh: false });
-    expect(screen.getByTestId("workflow-step-ai-note-route")).toHaveTextContent("判斷這次是否緊急。");
-    fireEvent.click(screen.getByTestId("workflow-explain-close"));
-    expect(screen.queryByTestId("workflow-explain-panel")).toBeNull();
+    const last = demoSpec.steps[demoSpec.steps.length - 1].id;
+    const first = demoSpec.steps[0].id;
+    expect(screen.queryByTestId("workflow-step-details")).toBeNull();
+    fireEvent.click(within(screen.getByTestId(`workflow-step-${last}`)).getAllByRole("button")[0]);
+    const details = await screen.findByTestId("workflow-step-details");
+    expect(screen.getByTestId("workflow-panel").contains(details)).toBe(false);
+    expect(screen.getByTestId("workflow-panel-body").contains(details)).toBe(false);
+    expect(details.className).toContain("right-4");
+    expect(within(details).getByTestId("step-definition")).toHaveTextContent(last);
+    // the same step again does not toggle it off
+    fireEvent.click(within(screen.getByTestId(`workflow-step-${last}`)).getAllByRole("button")[0]);
+    expect(screen.getByTestId("workflow-step-details")).toBeInTheDocument();
+    // another step swaps the content
+    fireEvent.click(within(screen.getByTestId(`workflow-step-${first}`)).getAllByRole("button")[0]);
+    expect(within(screen.getByTestId("workflow-step-details")).getByTestId("step-definition")).toHaveTextContent(first);
+    fireEvent.click(screen.getByTestId("step-definition-close"));
+    expect(screen.queryByTestId("workflow-step-details")).toBeNull();
   });
 
-  it("shows a cached explanation's notes without the panel open, and none after switching to a version without one", async () => {
+  it("opens Step details from a canvas node click and closes on Escape", async () => {
+    await renderDetail();
+    fireEvent.click(screen.getByTestId("workflow-node-route"));
+    expect(await screen.findByTestId("workflow-step-details")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("workflow-step-details")).toBeNull());
+  });
+
+  it("shows no AI note in the step list; the note appears only in Step details", async () => {
     explanation = () => json(200, EXPLAIN);
     await renderDetail();
-    expect(await screen.findByTestId("workflow-step-ai-note-route")).toHaveTextContent("AI 註解");
-    explanation = null;
-    fireEvent.change(screen.getByLabelText("Version"), { target: { value: "1" } });
-    await waitFor(() => expect(screen.queryByTestId("workflow-step-ai-note-route")).toBeNull());
+    expect(screen.queryByTestId("workflow-step-ai-note-route")).toBeNull();
+    expect(within(screen.getByTestId("workflow-step-list")).queryByText("判斷這次是否緊急。")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("workflow-step-route")).getAllByRole("button")[0]);
+    const details = await screen.findByTestId("workflow-step-details");
+    expect(await within(details).findByTestId("step-explanation-note")).toHaveTextContent("判斷這次是否緊急。");
+  });
+
+  it("offers 產生說明 in Step details when missing: one POST on click, never on load", async () => {
+    await renderDetail();
+    fireEvent.click(within(screen.getByTestId("workflow-step-route")).getAllByRole("button")[0]);
+    const details = await screen.findByTestId("workflow-step-details");
+    const generate = await within(details).findByTestId("step-explanation-generate");
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST" && String(init?.body).includes("refresh"))).toBe(false);
+    fireEvent.click(generate);
+    expect(await within(details).findByTestId("step-explanation-note")).toHaveTextContent("判斷這次是否緊急。");
+    const post = fetchMock.mock.calls.filter(([, init]) => init?.method === "POST" && String(init?.body).includes("refresh"));
+    expect(post).toHaveLength(1);
+    expect(JSON.parse(post[0][1].body)).toEqual({ version: 2, locale: "zh-TW", refresh: false });
   });
 
   it("maps 422 field errors onto the form", async () => {

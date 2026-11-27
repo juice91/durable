@@ -23,7 +23,12 @@ COPY --from=builder --chown=eap:eap /app /app
 # The packaged system manifest: the worker reads it from here (WorkerSettings.system_manifest_path), no network.
 COPY --chown=eap:eap docs/platform/system-manifest.yaml /opt/eap/system-manifest.yaml
 COPY --chown=eap:eap deploy/docker/python-entrypoint.sh /usr/local/bin/eap-entrypoint
-RUN chmod 0555 /usr/local/bin/eap-entrypoint
+# The Compose quick start (compose.yaml): the secret generator of its `init` service, the first-start script that
+# service gives Postgres, and the setup link command.
+COPY deploy/docker/compose-init.py deploy/docker/compose-postgres-init.sh /usr/local/lib/eap/
+COPY deploy/docker/setup-link.sh /usr/local/bin/setup-link
+RUN chmod 0555 /usr/local/bin/eap-entrypoint /usr/local/bin/setup-link \
+    && install -d -o eap -g eap /var/lib/eap/blobs
 USER 10001:10001
 EXPOSE 8000
 ENTRYPOINT ["eap-entrypoint"]

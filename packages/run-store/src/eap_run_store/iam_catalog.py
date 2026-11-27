@@ -48,6 +48,16 @@ class RunStoreCatalog:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    def exists(self, tenant_id: str, kind: str, resource_id: str) -> bool:
+        """Whether the tenant has a resource of `kind` with that id (a secret: that name). An unknown kind has none."""
+        sql = dict(_QUERIES).get(kind)
+        if sql is None:
+            return False
+        column = "a.name" if kind == "secret" else "a.id::text"
+        query = sql.format(w=f" WHERE a.tenant_id = :t AND {column} = :id") + " LIMIT 1"
+        with self._engine.connect() as conn:
+            return conn.execute(text(query), {"t": tenant_id, "id": resource_id}).first() is not None
+
     def entries(self, tenant_id: str | None = None) -> list[CatalogRow]:
         rows: list[CatalogRow] = []
         with self._engine.connect() as conn:

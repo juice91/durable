@@ -43,6 +43,7 @@ ARCHITECT_DENIED_TOOL_PREFIXES: tuple[str, ...] = (
     "kb.",
     "settings.",
     "workflow.",
+    "webhook.",
     "knowledge_search",
     "retrieve",
     "update_working_memory",
@@ -100,6 +101,13 @@ ARCHITECT_PLATFORM_TOOL_IDS: tuple[str, ...] = (
     "platform.get_run",
     "platform.list_runs",
     "platform.list_capabilities",
+)
+# What an Architect turn for a read-only person (a tenant viewer) may be offered: the tools that change nothing. An
+# allowlist, so a new tool is withheld until it is listed here. (`platform.list_capabilities` brings the control bridge,
+# which then offers `read` control tools only.)
+ARCHITECT_READ_TOOL_IDS: tuple[str, ...] = (
+    *(t for t in ARCHITECT_TOOL_IDS if t.startswith(("architect.list_", "architect.get_"))),
+    *ARCHITECT_PLATFORM_TOOL_IDS,
 )
 # The Architect's bridge to the MCP control plane: every control tool `a.b.c` is callable as
 # `control__a_b_c` (a run's tool names are discovered at run time with `platform.list_capabilities`, never
@@ -707,6 +715,7 @@ __all__ = [
     "ArchitectToolStep",
     "ArchitectWorkflowSpec",
     "ARCHITECT_GATED_TOOL_IDS",
+    "ARCHITECT_READ_TOOL_IDS",
     "ARCHITECT_TOOL_IDS",
     "GATED_TOOL_IDS",
     "RESERVED_AGENT_IDS",

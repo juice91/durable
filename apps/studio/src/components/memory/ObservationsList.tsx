@@ -18,6 +18,8 @@ import { toast } from "@/components/ui/Toaster";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 
 export interface ObservationsListProps {
+  /** The caller may delete notes (`run` on the conversation's agent). */
+  mayDelete?: boolean;
   conversationId: string;
   /** Bump to reload (an observation or reflection was written). */
   refreshKey?: number;
@@ -38,7 +40,7 @@ function messageOf(error: unknown, fallback: string): string {
  * older one would hide its turns from the model. Rows before a newer expired marker say so. "Delete
  * all" returns the whole history to the model verbatim (within the history limits).
  */
-export function ObservationsList({ conversationId, refreshKey = 0 }: ObservationsListProps) {
+export function ObservationsList({ conversationId, refreshKey = 0, mayDelete = true }: ObservationsListProps) {
   const [list, setList] = useState<ObservationList | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +111,7 @@ export function ObservationsList({ conversationId, refreshKey = 0 }: Observation
           Observations
           {list ? <span className="ml-1 font-normal text-muted-foreground">({sorted.length})</span> : null}
         </h3>
-        {sorted.length > 0 ? (
+        {mayDelete && sorted.length > 0 ? (
           <Button size="sm" variant="ghost" onClick={() => setPending({ kind: "all" })} data-testid="memory-observations-delete-all">
             Delete all
           </Button>
@@ -160,7 +162,7 @@ export function ObservationsList({ conversationId, refreshKey = 0 }: Observation
                   ) : (
                     <span className="text-caption text-muted-foreground">{item.approx_tokens.toLocaleString("en-US")} tokens</span>
                   )}
-                  {isNewest ? (
+                  {mayDelete && isNewest ? (
                     <Button
                       size="sm"
                       variant="ghost"

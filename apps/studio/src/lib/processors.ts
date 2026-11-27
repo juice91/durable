@@ -4,6 +4,7 @@
 //
 // Outcomes carry match COUNTS only. The API never serves matched text and nothing here may
 // suggest that it could.
+import { refusedMessage } from "./access";
 import { ApiError, apiHeaders, BASE_URL, type Agent } from "./api";
 import type { JsonSchema } from "./tools";
 import { loadAgentLatestSpecs } from "./agentUsage";
@@ -129,7 +130,7 @@ async function processorApiError(response: Response): Promise<ApiError> {
   let message = `HTTP ${response.status}`;
   try {
     const data = await response.json();
-    message = describeValidationDetail(data?.detail) ?? message;
+    message = (await refusedMessage(response.status, data)) ?? describeValidationDetail(data?.detail) ?? message;
   } catch {
     // Keep the HTTP status fallback when the response is not JSON.
   }

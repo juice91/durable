@@ -62,7 +62,10 @@ PrincipalDep = Annotated[Principal, Depends(current_principal)]
     status_code=status.HTTP_201_CREATED,
     responses={413: {"model": ErrorDetail}, 415: {"model": ErrorDetail}, 422: {"model": ErrorDetail}},
 )
-async def upload_attachment(request: Request, principal: PrincipalDep, file: UploadFile) -> JSONResponse:
+async def upload_attachment(
+    request: Request, principal: PrincipalDep, file: UploadFile, service: AttachmentServiceDep
+) -> JSONResponse:
+    await run_in_threadpool(service.require_write)
     uploaded = await read_upload(request, file, max_attachment_bytes())
     return await store_upload(request, principal.tenant_id, file, uploaded, created_by_for(principal))
 
@@ -80,9 +83,12 @@ async def get_attachment(
     status_code=status.HTTP_204_NO_CONTENT,
     responses={409: {"model": ErrorDetail}},
 )
-async def delete_attachment(attachment_id: str, request: Request, principal: PrincipalDep) -> Response:
+async def delete_attachment(
+    attachment_id: str, request: Request, principal: PrincipalDep, service: AttachmentServiceDep
+) -> Response:
     """Discard the caller's own upload before it is sent: 204; 409 `attachment_in_use` once a message
     references it; 404 when unknown, another tenant's or another user's."""
+    await run_in_threadpool(service.require_write)
     return await delete_unsent_attachment(request, principal.tenant_id, attachment_id, created_by_for(principal))
 
 

@@ -13,7 +13,7 @@ distributions under `plugins/`.
 
 | Path | What is there |
 |---|---|
-| `apps/api` | `eap_api`: FastAPI control plane (`routes/`, `services/`, `service_deps/`, `deps.py`, `mcp_control/`, `ag_ui/`). Tests in `api_tests/` |
+| `apps/api` | `eap_api`: FastAPI control plane (`routes/`, `services/`, `service_deps/`, `deps.py`, `mcp_control/`, `external_mcp/`, `external_a2a/`, `ag_ui/`). Tests in `api_tests/` |
 | `apps/worker` | `eap_worker`: DBOS worker (agent runs, workflows, schedules, ingest). Tests in `worker_tests/` |
 | `apps/studio` | Studio, Next.js 15 / React 19, tested with vitest (pnpm workspace) |
 | `packages/shared-schemas` | `eap_schemas`: Pydantic contracts, depends on nothing else |
@@ -22,7 +22,8 @@ distributions under `plugins/`.
 | `packages/db` | `eap_db`: Alembic migrations and the pytest plugin that gives each session a throwaway Postgres schema |
 | `packages/iam` | `eap_iam`: IAM interfaces only (identity chain, policy, membership) |
 | `packages/secrets`, `knowledge`, `kb-sources`, `processors`, `pricing`, `observability`, `mcp-runtime`, `blob-store` | Secrets and outbound policy; RAG; knowledge-base source adapters; processors; model prices; the only OpenTelemetry importer; MCP runtime adapter; blob storage |
-| `plugins/iam-*` | IAM implementations: `apikey`, `cfaccess`, `devloopback`, `openaccess`, `zitadel` |
+| `plugins/iam-*` | IAM implementations: `apikey`, `cfaccess`, `devloopback`, `localadmin`, `openaccess`, `openfga`, `webhook`, `zitadel` |
+| `packages/inbound-auth` | Pure verification of inbound webhook signatures (`eap_inbound`) |
 | `deploy/`, `infrastructure/docker/` | Deploy manifests and scripts; dev Postgres compose file (`compose.yaml`) |
 | `scripts/` | Dev stack (`dev-*.sh`), `test.sh`, CI helpers (`ci/`), release tooling (`release/`) |
 | `tests/` | Cross-cutting tests: `deploy/` (workflow shapes, selection logic), `ci/`, `recovery/` (crash matrix), `scripts/`, `ag-ui-smoke/` |
@@ -40,7 +41,7 @@ pnpm install --frozen-lockfile         # Studio
 
 | Task | Command |
 |---|---|
-| Import contracts | `uv run lint-imports` (30 contracts, all must be kept) |
+| Import contracts | `uv run lint-imports` (32 contracts, all must be kept) |
 | Undefined names (CI gate) | `uvx pyflakes==3.2.0 apps/*/src packages/*/src plugins/*/src \| grep 'undefined name'` must print nothing (other pyflakes warnings are tolerated) |
 | Python, DB-free (what PR CI runs) | `uv run pytest -p no:eap_db -q packages/pricing` (any paths) |
 | Python, one plugin | `uv run pytest -q -p no:eap_db plugins/iam-zitadel` (tests live in `plugins/<name>/<pkg>_tests/`) |
@@ -65,7 +66,8 @@ pnpm install --frozen-lockfile         # Studio
 
 ## Architecture rules (must follow)
 
-**API layering is strict.** Controller (`eap_api/routes`, `eap_api/mcp_control`, `eap_api/ag_ui`: protocol only)
+**API layering is strict.** Controller (`eap_api/routes`, `eap_api/mcp_control`, `eap_api/external_mcp`,
+`eap_api/external_a2a`, `eap_api/ag_ui`: protocol only)
 -> Service (`eap_api/services`: business logic, collaborators injected through the constructor, raises a
 `ServiceError` subclass, never imports `fastapi` or `starlette`) -> Store (`eap_run_store`: all SQL, every query
 filtered by tenant). Entry points never call a store or import `sqlalchemy`. `eap_api/deps.py` and `app.py` are the
@@ -88,10 +90,10 @@ own Alembic branch, version table `alembic_version_<name>`), and `pytest11` (tes
 **Other import contracts** (root `pyproject.toml`, `[tool.importlinter]`): `eap_schemas` depends on nothing;
 `eap_runtime` has no persistence, web or DBOS; `eap_run_store` has no runtime, web or agent code; `eap_api` never
 imports `eap_worker` or `eap_runtime`; only `eap_observability` imports OpenTelemetry; `eap_secrets` and
-`eap_mcp_runtime` import no platform code. Read the contract before working around it.
+`eap_mcp_runtime` import no platform code; the official `a2a-sdk` is test-only. Read the contract before working around it.
 
 **Migrations** live in `packages/db/src/eap_db/migrations/versions/`, named `NNNN_short_name.py` (latest is
-`0039_api_key_owner.py`; take the next number). Never edit a migration that is on `main`: add a new one.
+`0043_external_access.py`; take the next number). Never edit a migration that is on `main`: add a new one.
 Only `eap_db` creates or alters tables; no `create_all`. Plugin tables go in the plugin's own branch, never with a
 foreign key into a core table. See `packages/db/README.md`.
 

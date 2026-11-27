@@ -4,7 +4,7 @@ Revision ID: 0016_ag_ui
 Revises: 0015_evals
 Create Date: 2026-11-15 18:00:00
 
-- `ag_ui_runs`: one row per AG-UI run (D4 of docs/plans/2026-11-13-milestone-ag-ui.md). It maps the
+- `ag_ui_runs`: one row per AG-UI run (D4 of an internal design note). It maps the
   client's `(threadId, runId)` within one scope (`scope_kind` `agent` | `workflow`, `scope_id` the
   agent or workflow id) of one tenant to our `run_id`, the seq the AG-UI run streams after
   (`from_seq`: -1 for an agent turn, the seq after `step_waiting` for a workflow resume run), the

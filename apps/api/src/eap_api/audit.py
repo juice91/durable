@@ -27,7 +27,9 @@ log = logging.getLogger("eap_api.audit")
 
 MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # Not changes of the platform's data: telemetry ingest and the chat / run transports (every run row names its actor).
-SKIPPED_PREFIXES = ("/api/v1/otlp", "/api/v1/ag-ui")
+# `/api/v1/hooks`: an authenticated delivery has its own log (webhook_deliveries), and a flood must not grow audit_log.
+# `/api/v1/external`: ExternalRunService writes its own rows, naming the external client.
+SKIPPED_PREFIXES = ("/api/v1/otlp", "/api/v1/ag-ui", "/api/v1/hooks", "/api/v1/external/")
 API_PREFIX = "/api/v1/"
 REQUEST_ID_HEADER = b"x-request-id"
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")

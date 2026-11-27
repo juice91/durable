@@ -7,6 +7,7 @@ call by endpoint, which is what the batching tests assert on."""
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Callable
 from typing import Any
@@ -15,6 +16,31 @@ import httpx2
 
 from eap_iam_openfga.client import OpenFgaClient
 from eap_iam_openfga.settings import OpenFgaSettings
+
+# What a real server (v1.23.0) accepts: `type:id` with exactly one ':', no whitespace, control character or '#' in the id,
+# optionally `#relation` on a user; an object of at most 256 characters, a user of at most 512 bytes.
+_ID = r"[a-z_]+:[^:#\s\x00-\x1f\x7f-\x9f]+"
+_OBJECT = re.compile(rf"^{_ID}$")
+_USER = re.compile(rf"^{_ID}(#[a-z_]+)?$")
+
+
+def malformed(body: dict[str, Any]) -> bool:
+    """Whether a real server would answer this request 400 `validation_error` for one of its ids."""
+    keys = [body.get("tuple_key")] + [c.get("tuple_key") for c in body.get("checks") or ()]
+    for holder in (body, *(body.get("checks") or ())):
+        keys += (holder.get("contextual_tuples") or {}).get("tuple_keys") or []
+    for part in ("writes", "deletes"):
+        keys += (body.get(part) or {}).get("tuple_keys") or []
+    keys.append({"user": body.get("user")})
+    for key in keys:
+        user, obj = (key or {}).get("user"), (key or {}).get("object")
+        if user and (not _USER.match(user) or len(user.encode()) > 512):
+            return True
+        # Read takes `type:` to mean every object of a type.
+        if obj and not obj.endswith(":") and (not _OBJECT.match(obj) or len(obj) > 256):
+            return True
+    return False
+
 
 KEY = "fake-preshared-key-0123456789"
 URL = "http://openfga.test:8080"
@@ -60,6 +86,8 @@ class FakeOpenFga:
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
+        if malformed(body):
+            return httpx2.Response(400, json={"code": "validation_error"})
         handler = getattr(self, f"_{name}")
         return httpx2.Response(200, json=handler(request, body))
 

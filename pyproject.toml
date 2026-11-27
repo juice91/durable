@@ -1,6 +1,6 @@
 [project]
 name = "pydanticos"
-version = "0.3.0"
+version = "0.5.0"
 description = "PydanticOS - Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -26,7 +26,7 @@ eap-schemas = { workspace = true }
 eap-mcp-runtime = { workspace = true }
 
 [tool.importlinter]
-root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+root_packages = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_webhook", "eap_iam_zitadel", "eap_inbound"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -99,14 +99,14 @@ source_modules = [
     "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db",
     "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam",
 ]
-forbidden_modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+forbidden_modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_webhook", "eap_iam_zitadel"]
 
 [[tool.importlinter.contracts]]
 name = "IAM plug-ins depend on the interfaces, never on entry points or the worker"
 type = "forbidden"
 # A plug-in may import eap_iam, eap_schemas and eap_run_store (the apikey plug-in for the grandfathered api_keys table; the openfga
 # plug-in for the read-only resource catalog its reconcile job needs).
-source_modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+source_modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_webhook", "eap_iam_zitadel"]
 forbidden_modules = [
     "eap_api", "eap_worker", "eap_runtime", "eap_db", "fastapi", "starlette", "dbos", "pydantic_ai",
 ]
@@ -114,7 +114,7 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "IAM plug-ins are independent of each other"
 type = "independence"
-modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+modules = ["eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_webhook", "eap_iam_zitadel"]
 
 [[tool.importlinter.contracts]]
 name = "IAM interfaces are web- and database-free"
@@ -122,6 +122,16 @@ type = "forbidden"
 source_modules = ["eap_iam"]
 forbidden_modules = [
     "fastapi", "starlette", "sqlalchemy", "psycopg", "eap_run_store", "eap_api", "eap_worker", "eap_db", "dbos", "pydantic_ai",
+]
+
+[[tool.importlinter.contracts]]
+name = "Inbound webhook verification is pure: no platform, web, database or I/O imports"
+type = "forbidden"
+source_modules = ["eap_inbound"]
+forbidden_modules = [
+    "eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_db", "eap_observability", "eap_secrets",
+    "eap_iam", "fastapi", "starlette", "sqlalchemy", "psycopg", "pydantic_ai", "fastmcp", "mcp", "dbos", "httpx",
+    "opentelemetry",
 ]
 
 [[tool.importlinter.contracts]]
@@ -156,7 +166,7 @@ type = "forbidden"
 # D19: ag-ui-protocol is used only inside eap_api.ag_ui; data reaching the run row and the worker
 # uses eap_schemas.client_tools. Direct imports only: the rest of eap_api reaches ag_ui through
 # eap_api.ag_ui (the sanctioned path), and the other roots may not import eap_api at all.
-source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_webhook", "eap_iam_zitadel", "eap_inbound"]
 forbidden_modules = ["ag_ui"]
 ignore_imports = ["eap_api.ag_ui -> ag_ui", "eap_api.ag_ui.** -> ag_ui"]
 unmatched_ignore_imports_alerting = "none"  # eap_api.ag_ui arrives with AGUI.4
@@ -230,6 +240,14 @@ source_modules = [
 forbidden_modules = ["fastapi", "starlette", "eap_observability.http"]
 
 [[tool.importlinter.contracts]]
+name = "The A2A SDK is a test-only conformance target"
+type = "forbidden"
+# The official `a2a-sdk` is a development dependency: the oracle of the A2A tests. No platform package imports it (the
+# production image is built without the development group).
+source_modules = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db", "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources", "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_webhook", "eap_iam_zitadel", "eap_inbound"]
+forbidden_modules = ["a2a"]
+
+[[tool.importlinter.contracts]]
 name = "API services have no web framework imports"
 type = "forbidden"
 # A service receives its collaborators through its constructor and refuses with ServiceError; the
@@ -241,24 +259,24 @@ forbidden_modules = ["fastapi", "starlette", "eap_api.routes", "eap_api.deps"]
 name = "API dependency providers do not import entry points"
 type = "forbidden"
 source_modules = ["eap_api.deps"]
-forbidden_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui", "eap_api.services"]
+forbidden_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.external_mcp", "eap_api.external_a2a", "eap_api.external_door", "eap_api.ag_ui", "eap_api.services"]
 
 [[tool.importlinter.contracts]]
 name = "API ports have no web or platform-entry imports"
 type = "forbidden"
 source_modules = ["eap_api.ports"]
-forbidden_modules = ["fastapi", "starlette", "eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui", "eap_api.deps", "eap_api.service_deps", "eap_api.services"]
+forbidden_modules = ["fastapi", "starlette", "eap_api.routes", "eap_api.mcp_control", "eap_api.external_mcp", "eap_api.external_a2a", "eap_api.external_door", "eap_api.ag_ui", "eap_api.deps", "eap_api.service_deps", "eap_api.services"]
 
 [[tool.importlinter.contracts]]
 name = "Service providers do not import entry points"
 type = "forbidden"
 source_modules = ["eap_api.service_deps"]
-forbidden_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui"]
+forbidden_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.external_mcp", "eap_api.external_a2a", "eap_api.external_door", "eap_api.ag_ui"]
 
 [[tool.importlinter.contracts]]
 name = "API entry points do not query the database"
 type = "forbidden"
-source_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui"]
+source_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.external_mcp", "eap_api.external_a2a", "eap_api.external_door", "eap_api.ag_ui"]
 forbidden_modules = ["sqlalchemy"]
 # Direct imports only: eap_run_store (all SQL) legitimately imports sqlalchemy; an entry point must not.
 allow_indirect_imports = true
@@ -266,17 +284,17 @@ allow_indirect_imports = true
 [[tool.importlinter.contracts]]
 name = "API entry points reach data only through services"
 type = "forbidden"
-source_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.ag_ui"]
+source_modules = ["eap_api.routes", "eap_api.mcp_control", "eap_api.external_mcp", "eap_api.external_a2a", "eap_api.external_door", "eap_api.ag_ui"]
 forbidden_modules = ["eap_run_store"]
 # Direct imports only: services and eap_api.deps (outside the entry points) may import eap_run_store.
 allow_indirect_imports = true
 
 [[tool.importlinter.contracts]]
-name = "MCP control does not import routes"
+name = "MCP servers do not import routes"
 type = "forbidden"
-source_modules = ["eap_api.mcp_control"]
+source_modules = ["eap_api.mcp_control", "eap_api.external_mcp", "eap_api.external_a2a", "eap_api.external_door"]
 forbidden_modules = ["eap_api.routes"]
-# The MCP tools call the services the routes call; shared bodies and response shapes live in
+# The MCP tools (control and external) and the A2A server call the services the routes call; shared bodies and response shapes live in
 # eap_api.bodies and eap_api.views.
 
 [tool.pytest.ini_options]

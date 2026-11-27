@@ -35,6 +35,8 @@ from eap_api.eval_format import (
 from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher
 from eap_api.services.agent_archive import refuse_if_archived
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, ServiceError, Unavailable
 from eap_api.services.run_options import (
     DRAFT,
@@ -280,26 +282,46 @@ def _decode_run_cursor(before: str | None) -> RunCursor | None:
 # ---------------------------------------------------------------------------- the service
 
 
-class EvalService:
-    """Suites, cases and eval runs of one tenant at a time (every method takes the tenant id)."""
+class EvalService(AccessBound):
+    """Suites, cases and eval runs of one tenant at a time (every method takes the tenant id).
 
-    def __init__(self, store: EvalStore, db: Session, run_store: Any, launcher: RunLauncher) -> None:
+    Per-resource authorisation (IAM P2b): a suite is as visible as the agent or workflow it targets, so no tuple is
+    written per suite or case: `read` the target to see its suites, cases and eval runs, `edit` it to change them, `run`
+    it to start an eval run (design 2.1: an eval is a run)."""
+
+    def __init__(self, store: EvalStore, db: Session, run_store: Any, launcher: RunLauncher, access: Access | None = None) -> None:
         self.store = store
         self.db = db
         self.run_store = run_store
         self.launcher = launcher
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _target(self, action: str, *, agent_id: Any = None, workflow_id: Any = None) -> None:
+        if workflow_id is not None:
+            acl.require(self._access, action, "workflow", str(workflow_id))
+        elif agent_id is not None:
+            acl.require(self._access, action, "agent", str(agent_id))
+
+    def _suite_access(self, tenant_id: str, suite_id: uuid.UUID, action: str) -> None:
+        """Check `action` on the agent or workflow the suite targets (an unknown suite is the store's 404)."""
+        if self._access is None:
+            return
+        with _store_refusals():
+            suite = self.store.get_suite(tenant_id, suite_id)
+        self._target(action, agent_id=suite.agent_id, workflow_id=suite.workflow_id)
 
     # ------------------------------------------------------------------------ lookups
 
-    def _agent(self, tenant_id: str, agent_id: uuid.UUID) -> AgentModel:
+    def _agent(self, tenant_id: str, agent_id: uuid.UUID, action: str = "read") -> AgentModel:
         agent = (
             self.db.query(AgentModel).filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id).first()
         )
         if agent is None:
             raise NotFound(AGENT_NOT_FOUND)
+        self._target(action, agent_id=agent.id)
         return agent
 
-    def _workflow(self, tenant_id: str, workflow_id: uuid.UUID) -> WorkflowModel:
+    def _workflow(self, tenant_id: str, workflow_id: uuid.UUID, action: str = "read") -> WorkflowModel:
         workflow = (
             self.db.query(WorkflowModel)
             .filter(WorkflowModel.id == str(workflow_id), WorkflowModel.tenant_id == tenant_id)
@@ -307,6 +329,7 @@ class EvalService:
         )
         if workflow is None or workflow.archived:
             raise NotFound(WORKFLOW_NOT_FOUND)
+        self._target(action, workflow_id=workflow.id)
         return workflow
 
     def _target_name(self, tenant_id: str, suite: EvalSuiteRecord) -> str | None:
@@ -321,6 +344,13 @@ class EvalService:
             .first()
         )
         return None if row is None else WorkflowSpec.model_validate(row.spec)
+
+    def _visible(self) -> dict[str, Any]:
+        """The ids of the agents and workflows the caller may read: two engine calls, whatever the page size."""
+        return {
+            "visible_agent_ids": acl.sql_ids(acl.visible(self._access, "agent")),
+            "visible_workflow_ids": acl.sql_ids(acl.visible(self._access, "workflow")),
+        }
 
     def _overview_agent(self, tenant_id: str, agent_id: uuid.UUID | None) -> str | None:
         return None if agent_id is None else self._agent(tenant_id, agent_id).id
@@ -347,7 +377,7 @@ class EvalService:
         try:
             return eval_overview.list_suite_overview(
                 self.store, self.db, tenant_id, agent_id=agent, include_archived=include_archived, limit=limit,
-                after=after,
+                after=after, **self._visible(),
             )
         except eval_overview.InvalidCursor:
             raise InvalidInput(INVALID_CURSOR) from None
@@ -360,14 +390,16 @@ class EvalService:
         cursor = _decode_run_cursor(before)
         return eval_overview.list_run_overview(
             self.store, self.db, tenant_id, agent_id=agent, suite_id=None if suite_id is None else str(suite_id),
-            limit=limit, before=cursor,
+            limit=limit, before=cursor, **self._visible(),
         )
 
     def list_scorer_overview(
         self, tenant_id: str, *, limit: int, after: str | None
     ) -> tuple[list[dict[str, Any]], str | None]:
         try:
-            return eval_overview.list_scorer_overview(self.store, self.db, tenant_id, limit=limit, after=after)
+            return eval_overview.list_scorer_overview(
+                self.store, self.db, tenant_id, limit=limit, after=after, **self._visible()
+            )
         except eval_overview.InvalidCursor:
             raise InvalidInput(INVALID_CURSOR) from None
 
@@ -378,7 +410,9 @@ class EvalService:
         """`(suite, target name, created)` for an `agent` or `workflow` target. Idempotent by `suite_id`: a
         repeat of the same request (same target and name) answers its suite with `created` False; a
         `suite_id` used otherwise is a Conflict."""
-        target_name = (self._agent(tenant_id, target_id) if kind == "agent" else self._workflow(tenant_id, target_id)).name
+        target_name = (
+            self._agent(tenant_id, target_id, "edit") if kind == "agent" else self._workflow(tenant_id, target_id, "edit")
+        ).name
         existing = self._same_suite(tenant_id, kind, target_id, name, suite_id)
         if existing is not None:
             return existing, target_name, False
@@ -416,17 +450,20 @@ class EvalService:
 
     def get_suite(self, tenant_id: str, suite_id: uuid.UUID) -> tuple[EvalSuiteRecord, list[Any], str | None]:
         """`(suite, cases in execution order, target name)`."""
+        self._suite_access(tenant_id, suite_id, "read")
         with _store_refusals():
             suite = self.store.get_suite(tenant_id, suite_id)
             cases = self.store.list_cases(tenant_id, suite_id)
         return suite, cases, self._target_name(tenant_id, suite)
 
     def suite_revision(self, tenant_id: str, suite_id: uuid.UUID) -> int:
+        self._suite_access(tenant_id, suite_id, "read")
         with _store_refusals():
             return self.store.get_suite(tenant_id, suite_id).revision
 
     def suite_target(self, tenant_id: str, suite_id: uuid.UUID) -> tuple[str | None, str | None]:
         """`(agent_id, workflow_id)` of the tenant's suite (NotFound when there is none)."""
+        self._suite_access(tenant_id, suite_id, "read")
         with _store_refusals():
             suite = self.store.get_suite(tenant_id, suite_id)
         return suite.agent_id, suite.workflow_id
@@ -436,12 +473,14 @@ class EvalService:
     ) -> tuple[EvalSuiteRecord, str | None]:
         """Change the given fields (`name`, `description`, `evaluators`, `archived`); an archived suite
         accepts only `archived: false`. A stale `expected_revision` raises the store's RevisionMismatch."""
+        self._suite_access(tenant_id, suite_id, "edit")
         with _store_refusals():
             check_regex_evaluators(fields.get("evaluators"), "evaluators")
             suite = self.store.update_suite(tenant_id, suite_id, expected_revision=expected_revision, **fields)
         return suite, self._target_name(tenant_id, suite)
 
     def delete_suite(self, tenant_id: str, suite_id: uuid.UUID) -> None:
+        self._suite_access(tenant_id, suite_id, "edit")
         with _store_refusals():
             self.store.delete_suite(tenant_id, suite_id)
 
@@ -462,6 +501,7 @@ class EvalService:
             raise problem
 
     def list_cases(self, tenant_id: str, suite_id: uuid.UUID) -> list[Any]:
+        self._suite_access(tenant_id, suite_id, "read")
         with _store_refusals():
             return self.store.list_cases(tenant_id, suite_id)
 
@@ -472,6 +512,7 @@ class EvalService:
         """Add a case: Conflict for a name already in the suite or an archived suite, InvalidInput for an
         invalid case (for a workflow suite, an input that is not a JSON object valid for the workflow's
         input schema) or past the case cap."""
+        self._suite_access(tenant_id, suite_id, "edit")
         try:
             with _store_refusals():
                 self._check_workflow_case_input(tenant_id, suite_id, case["name"], case["input"])
@@ -481,6 +522,7 @@ class EvalService:
             raise Conflict(CASE_ID_IN_USE) from None
 
     def get_case(self, tenant_id: str, suite_id: uuid.UUID, case_id: uuid.UUID) -> Any:
+        self._suite_access(tenant_id, suite_id, "read")
         with _store_refusals():
             return self.store.get_case(tenant_id, case_id, suite_id=suite_id)
 
@@ -490,6 +532,7 @@ class EvalService:
     ) -> Any:
         """Change the given fields; the merged case is validated. A stale `expected_revision` raises the
         store's RevisionMismatch."""
+        self._suite_access(tenant_id, suite_id, "edit")
         with _store_refusals():
             if isinstance(fields.get("input"), str):
                 name = fields.get("name")
@@ -502,6 +545,7 @@ class EvalService:
             )
 
     def delete_case(self, tenant_id: str, suite_id: uuid.UUID, case_id: uuid.UUID) -> None:
+        self._suite_access(tenant_id, suite_id, "edit")
         with _store_refusals():
             self.store.delete_case(tenant_id, case_id, suite_id=suite_id)
 
@@ -509,6 +553,7 @@ class EvalService:
 
     def export_suite(self, tenant_id: str, suite_id: uuid.UUID, fmt: str) -> tuple[str, str]:
         """`(suite name, the suite as a pydantic_evals dataset file in `fmt`)`."""
+        self._suite_access(tenant_id, suite_id, "read")
         with _store_refusals():
             suite = self.store.get_suite(tenant_id, suite_id)
             cases = self.store.list_cases(tenant_id, suite_id)
@@ -520,6 +565,7 @@ class EvalService:
         """`(result {created, updated}, suite, target name)`. The suite is checked before the file is
         parsed: an unknown or foreign suite is NotFound and an archived one Conflict, whatever the file
         holds. Everything is validated before the one transaction that writes (all or nothing)."""
+        self._suite_access(tenant_id, suite_id, "edit")
         with _store_refusals():
             suite = self.store.get_suite(tenant_id, suite_id)
             if suite.archived:
@@ -556,7 +602,7 @@ class EvalService:
         """Record an eval run of the suite against the agent's target (a published version, null: the
         latest, or the draft) and hand it to the worker. Idempotent by `run_id`: a retry of the same
         request is relaunched as recorded, a different request is a Conflict."""
-        agent = self._agent(tenant_id, agent_id)
+        agent = self._agent(tenant_id, agent_id, "run")
         run = self.run_store.get_run(tenant_id, run_id)
         created = False
         if run is None:
@@ -591,7 +637,7 @@ class EvalService:
         """As the agent's, against a published workflow version; `version: "draft"` is InvalidInput."""
         if version == DRAFT:
             raise InvalidInput("a workflow is evaluated at a published version, not a draft")
-        workflow = self._workflow(tenant_id, workflow_id)
+        workflow = self._workflow(tenant_id, workflow_id, "run")
         run = self.run_store.get_run(tenant_id, run_id)
         created = False
         if run is None:
@@ -658,8 +704,15 @@ class EvalService:
     # ------------------------------------------------------------------------ eval runs
 
     def get_run(self, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any] | None:
-        """The tenant's run row (any kind), or None."""
-        return self.run_store.get_run(tenant_id, run_id)
+        """The tenant's eval run row, or None when there is none or the caller may not read its target."""
+        run = self.run_store.get_run(tenant_id, run_id)
+        if run is None:
+            return None
+        try:
+            self._target("read", agent_id=run.get("agent_id"), workflow_id=run.get("workflow_id"))
+        except NotFound:
+            return None
+        return run
 
     def list_eval_runs(
         self, tenant_id: str, target_id: uuid.UUID, *, workflow: bool, suite_id: uuid.UUID | None, limit: int,
@@ -683,6 +736,7 @@ class EvalService:
         self, tenant_id: str, target_id: uuid.UUID, run_id: uuid.UUID, *, workflow: bool
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """`(run, aggregates)`; NotFound when the run is not an eval run of this agent (workflow)."""
+        self._target("read", **({"workflow_id": target_id} if workflow else {"agent_id": target_id}))
         run = self.run_store.get_run(tenant_id, run_id)
         owner = "workflow_id" if workflow else "agent_id"
         if run is None or run.get("kind") != "eval" or run.get(owner) != str(target_id):
@@ -698,6 +752,7 @@ class EvalService:
         after: str | None,
     ) -> tuple[list[Any], str | None]:
         """`(results by position, next cursor)`, a page at a time."""
+        self._target("read", **({"workflow_id": target_id} if workflow else {"agent_id": target_id}))
         position_after = _decode_result_cursor(after) if after is not None else None
         with _store_refusals():
             results = self.store.list_case_results(
@@ -709,5 +764,6 @@ class EvalService:
 
     def compare(self, tenant_id: str, agent_id: uuid.UUID, base: uuid.UUID, target: uuid.UUID) -> dict[str, Any]:
         """Two eval runs of this agent case by case (NotFound when either is not this agent's eval run)."""
+        self._target("read", agent_id=agent_id)
         with _store_refusals():
             return self.store.compare(tenant_id, base, target, agent_id=agent_id)

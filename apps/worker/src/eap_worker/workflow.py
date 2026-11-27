@@ -1,6 +1,6 @@
 """The durable agent run: one generic DBOSDurability agent driven by one DBOS workflow per run.
 
-Hand-off contract (docs/plans/2026-11-11-milestone-1-vertical-slice.md): the API enqueues
+Hand-off contract (an internal design note): the API enqueues
 `eap.agent_run` on queue `eap-agent-runs` with workflow_id = run_id and positional args
 `(run_id, tenant_id, agent_id, version, spec_json, input_text)`.
 
@@ -300,6 +300,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import dataclasses
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import json
@@ -343,8 +344,10 @@ from eap_runtime import RunDeps, SideEffectOutcomeUnknown, ToolNotAllowedError, 
 from eap_run_store import ENQUEUE_FAILED_ERROR, AgUiStore, ConversationNotFound, KnowledgeStore, MemoryEvent, MemoryStore, ScorerStore
 from eap_schemas import AgentSpec, approval_required_tool_names
 from eap_schemas import ModelSettings as ModelSettingsSpec
+from eap_schemas.architect import ARCHITECT_READ_TOOL_IDS
 from eap_schemas.tools import ungated_always_gated_tools
 from eap_worker.secret_refs import with_secret_refs
+from eap_worker.grants import ensure_grant_set
 from eap_schemas.limits import RunBudgetExceeded, UsageLimitsSpec
 from eap_schemas.output import OUTPUT_TOOL_NAME, OutputInvalid
 from eap_schemas.tools import RETRIEVE_TOOL_NAME
@@ -415,6 +418,7 @@ from eap_worker.observational import observe_after_turn
 from eap_worker.post_turn import finish_post_turn, has_post_turn_steps
 from eap_worker.scoring import score_run_step
 from eap_worker.spans_step import record_spans
+from eap_worker.read_only import READ_ONLY_NOTE, is_read_only, run_is_read_only
 from eap_worker.recall import index_after_turn, recall_before_turn
 from eap_worker.step_processors import StepProcessorCapability
 from eap_worker.agent_tools import AgentToolsCapability, agent_toolset_for_run
@@ -476,7 +480,8 @@ def _instructions(ctx: RunContext[WorkerDeps]) -> str:
     memory = memory_of(ctx.deps)
     text = base if memory is None else instructions_with_memory(base, memory)
     # The built-in Architect's recorded platform-facts block (eap_worker.system_context); other runs have none.
-    return instructions_with_system_context(text, ctx.deps)
+    text = instructions_with_system_context(text, ctx.deps)
+    return f"{text}\n\n{READ_ONLY_NOTE}" if is_read_only(ctx.deps) else text
 
 
 def _knowledge_store() -> KnowledgeStore:
@@ -500,6 +505,12 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     rt = get_runtime()
     spec = ctx.deps.spec
     check_no_hidden_tools(spec)
+    read_only = is_read_only(ctx.deps)
+    if read_only:
+        # Read tools only (eap_worker.read_only): an allowlist over the spec, no MCP server, client tool or agent.
+        spec = spec.model_copy(update={
+            "tools": tuple(t for t in spec.tools if t in ARCHITECT_READ_TOOL_IDS), "mcp_tools": (), "agent_tools": (),
+        })
     builtin: FunctionToolset[RunDeps] = toolset_for_spec(spec, rt.registry, ctx.deps.allowed_tools)
     if spec.tools:  # secret references in arguments are resolved inside the call step (eap_worker.secret_refs)
         builtin = with_secret_refs(builtin, rt.engine)
@@ -507,7 +518,7 @@ async def _toolset_for_run(ctx: RunContext[WorkerDeps]) -> AbstractToolset[Any]:
     platform = platform_toolset_for_run(ctx.deps, knowledge=_knowledge_store, memory=_memory_store)
     # AGUI.7: an AG-UI turn's client tools (`external`: never called here), from the run's recorded
     # declarations (set by _drive_agent); None for every other run.
-    client = client_toolset_for_run()
+    client = None if read_only else client_toolset_for_run()
     # The Architect's bridge to the MCP control plane (`control__*`): only a spec that lists
     # `platform.list_capabilities`, which only a built-in agent may (eap_worker.control_bridge).
     control = control_toolset_for_run(spec)
@@ -943,7 +954,21 @@ async def start_run_step(
             "builtin": rt.agent_is_builtin(tenant_id, agent_id),
         }
 
-    return await asyncio.to_thread(work)
+    started = await asyncio.to_thread(work)
+    if not started.get("superseded"):
+        # Agent-bound grants: the run's start-time set (stored once on the run; nothing while enforcement is off). Not part
+        # of this step's recorded output, so no step layout changes.
+        parsed = _spec_or_none(spec_json) if spec_json is not None else None
+        await ensure_grant_set(rt, tenant_id, run_id, "agent", agent_id, parsed.name if parsed is not None else None)
+        # The built-in Architect's run for a person who may only read (a viewer's turn): recorded, so a replay offers
+        # the same tools. Absent otherwise (and in older checkpoints): not read-only.
+        if (
+            started["builtin"]
+            and await asyncio.to_thread(rt.agent_is_architect, tenant_id, agent_id)
+            and await run_is_read_only(rt, tenant_id, run_id)
+        ):
+            started["read_only"] = True
+    return started
 
 
 MAX_CLIENT_CHAIN_CALLS = 32  # client calls recorded per chain link (MAX_CLIENT_TOOLS-sized)
@@ -2100,6 +2125,8 @@ async def _run_body(
         request_context = link.get("request_context") or None
         _check_request_context(spec, request_context)
         deps = rt.deps_for(run_id, tenant_id, spec, request_context, builtin=builtin)
+        if link.get("read_only"):
+            deps = dataclasses.replace(deps, read_only=True)
         if spec.memory is not None and link.get("conversation_id") is not None:
             # RM.12: the turn's memory snapshot (recorded), then its instructions block and tools.
             loaded = await load_memory_step(

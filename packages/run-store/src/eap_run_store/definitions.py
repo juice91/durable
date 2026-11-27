@@ -37,6 +37,8 @@ from sqlalchemy.engine import Connection, Row
 from sqlalchemy.exc import IntegrityError
 
 from eap_run_store.agent_checks import check_publishable, draft_hash, publish_warnings, validate_stored_draft
+from eap_run_store.external_access import on_workflow_published
+from eap_run_store.external_access import on_workflow_published
 from eap_run_store.definition_errors import (
     AGENT_ARCHIVED,
     BUILTIN_AGENT,
@@ -422,6 +424,7 @@ def publish_workflow(
         conn, tenant_id, workflow_id, (latest.version if latest else 0) + 1, spec.model_dump(mode="json"),
         spec_hash, created_by, created_via,
     )
+    warnings += on_workflow_published(conn, tenant_id, workflow_id, spec)
     return Published(version, warnings, _bump(conn, "workflows", tenant_id, workflow_id))
 
 
@@ -490,6 +493,7 @@ def restore_workflow_version(
         ),
         {"spec": _dump(dict(source.spec)), "name": spec.name, "now": _now(), "id": str(workflow_id), "t": tenant_id},
     ).scalar_one()
+    warnings += on_workflow_published(conn, tenant_id, workflow_id, spec)
     return Published(restored, warnings, int(revision))
 
 

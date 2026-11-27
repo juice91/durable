@@ -10,6 +10,8 @@ import type { VersionRestore } from "../AgentVersionsPanel";
 import type { EditorCompare } from "./useEditorQuery";
 
 export interface CompareSheetProps {
+  /** The caller may publish, so may restore a compared version. */
+  mayRestore?: boolean;
   agentId: string;
   /** The open compare (`?compare=a..b`), or null (closed). */
   compare: EditorCompare | null;
@@ -34,14 +36,14 @@ export function restorableSides(compare: EditorCompare, latest: number): number[
  * restore"): changed fields and the instructions diff (`VersionCompare`), with "Restore vN" for a
  * published side that is not the latest.
  */
-export function CompareSheet({ agentId, compare, latest, onClose, restore, onCloseAutoFocus }: CompareSheetProps) {
+export function CompareSheet({ agentId, compare, latest, onClose, restore, onCloseAutoFocus, mayRestore = true }: CompareSheetProps) {
   return (
     <Sheet open={compare !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
       {compare ? (
         <SheetContent size="wide" aria-describedby={undefined} data-testid="compare-sheet" onCloseAutoFocus={onCloseAutoFocus}>
           <SheetHeader
             title={compareTitle(compare.base, compare.target)}
-            actions={restorableSides(compare, latest).map((version) => (
+            actions={(mayRestore ? restorableSides(compare, latest) : []).map((version) => (
               <Button key={version} size="sm" variant="secondary" onClick={() => restore.start(version)}>
                 <History strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
                 Restore v{version}

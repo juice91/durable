@@ -1,5 +1,6 @@
 "use client";
 
+import { RefusalNotice } from "@/components/access/RefusalNotice";
 import { PendingApprovalToasts } from "@/components/approvals/PendingApprovalToasts";
 import React, { useCallback } from "react";
 import { TooltipProvider } from "@/components/ui/Tooltip";
@@ -68,6 +69,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <MobileNavDrawer />
           <Toaster />
           <PendingApprovalToasts />
+          <RefusalNotice />
         </SidePanelProvider>
       </FrameProvider>
     </TooltipProvider>

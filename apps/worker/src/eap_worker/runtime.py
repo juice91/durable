@@ -139,6 +139,19 @@ class WorkerRuntime:
             ).first()
         return bool(row[0]) if row is not None else False
 
+    def agent_is_architect(self, tenant_id: str, agent_id: str) -> bool:
+        """Whether the run's agent row is the built-in Architect (not one of its helpers)."""
+        try:
+            UUID(str(agent_id))
+        except ValueError:
+            return False
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT 1 FROM agents WHERE id = :a AND tenant_id = :t AND builtin AND slug = 'architect'"),
+                {"a": str(agent_id), "t": tenant_id},
+            ).first()
+        return row is not None
+
     def deps_for(
         self,
         run_id: str,

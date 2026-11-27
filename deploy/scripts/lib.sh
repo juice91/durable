@@ -282,7 +282,7 @@ validate_and_prepare_data_dir() {
   fi
   if [[ -z "$backup_request" ]]; then
     if [[ -L "${logical}/backups" ]]; then
-      printf 'Refusing to start: %s/backups is a symlink. Set PYDANTICOS_BACKUP_DIR to the real backup directory instead (deploy/README.md, "Backup directory on another volume").\n' "$canonical" >&2
+      printf 'Refusing to start: %s/backups is a symlink. Set PYDANTICOS_BACKUP_DIR to the real backup directory instead.\n' "$canonical" >&2
       exit 1
     fi
     if [[ ! -d "${logical}/backups" ]]; then
@@ -337,7 +337,7 @@ host_disk_preflight() { # [DIR]
 }
 
 # `kubernetes.port: 0` in colima.yaml makes Colima pick a new random API port whenever the VM is rebuilt, which breaks the
-# kube-API NetworkPolicies until the next deploy rewrites them. Pin it (deploy/README.md, "Pin the Kubernetes API port").
+# kube-API NetworkPolicies until the next deploy rewrites them. Pin it.
 warn_unpinned_kube_port() { # COLIMA_YAML
   local config=$1 port
   [[ -f "$config" ]] || return 0
@@ -348,7 +348,7 @@ warn_unpinned_kube_port() { # COLIMA_YAML
     k && /^[[:space:]]+port:/ {sub(/^[[:space:]]+port:[[:space:]]*/, ""); sub(/[[:space:]]*(#.*)?$/, ""); print; exit}
   ' "$config")
   if [[ "$port" == 0 ]]; then
-    printf 'Warning: %s has kubernetes.port: 0, so Colima picks a new random API port each time the VM is rebuilt and the kube-API NetworkPolicies stop matching until the next deploy. Pin a fixed port there (deploy/README.md, "Pin the Kubernetes API port").\n' "$config" >&2
+    printf 'Warning: %s has kubernetes.port: 0, so Colima picks a new random API port each time the VM is rebuilt and the kube-API NetworkPolicies stop matching until the next deploy. Pin a fixed port there.\n' "$config" >&2
   fi
 }
 

@@ -15,14 +15,22 @@ from collections.abc import Sequence
 
 from eap_iam import (
     All,
+    AccessRequirement,
     Decision,
     Grant,
     GRANT_RELATIONS,
+    GRANT_SUBJECT_ROLE,
+    GRANT_SUBJECT_USER,
+    GrantableRelation,
     GrantError,
+    MEMBER_ROLES,
     IdFilter,
     Only,
     Principal,
     ResourceRef,
+    UseGrant,
+    USE_RESOURCE_KINDS,
+    USE_SUBJECT_KINDS,
 )
 
 from eap_iam_openfga.client import CheckItem, OpenFgaClient, TupleKey
@@ -30,18 +38,23 @@ from eap_iam_openfga.names import (
     KIND_RUN,
     KIND_TENANT,
     ROLE_RELATIONS,
+    split_object,
     grant_relation_ok,
+    grantable_relations,
     object_ref,
     relation_for,
+    requirements,
     strip_object,
+    subject_object_ref,
+    subject_of,
     tenant_ref,
     user_ref,
-    valid_id,
 )
 
 log = logging.getLogger("eap.iam.openfga")
 
-FEATURES = frozenset({"grants", "list_filter", "explain", "contextual_roles"})
+FEATURES = frozenset({"grants", "list_filter", "explain", "contextual_roles", "agent_grants"})
+GRANTED_TO = "granted_to"  # agent-bound grants: `agent:<t>/<id> granted_to secret:<t>/<name>`
 
 
 def _deny(reason: str, **explain: str) -> Decision:
@@ -59,10 +72,14 @@ class OpenFgaPolicy:
     # --- who is asking ---------------------------------------------------------------------------------------------
 
     @staticmethod
-    def _subject(principal: Principal) -> str | None:
-        """The OpenFGA user a decision is for: the principal itself, or for a run the principal it acts for."""
+    def _user(principal: Principal) -> str | None:
+        """The OpenFGA user a decision is for: the principal itself, or for a run the principal it acts for. None when
+        there is none, or OpenFGA cannot hold it."""
         subject = principal.on_behalf_of if principal.kind == "run" else principal.subject
-        return subject if subject and valid_id(subject) else None
+        try:
+            return None if subject is None else user_ref(subject)
+        except GrantError:
+            return None
 
     @staticmethod
     def _abstains(principal: Principal) -> bool:
@@ -81,8 +98,8 @@ class OpenFgaPolicy:
         """The check to make, or the decision that needs no call."""
         if resource.tenant_id != principal.tenant_id:
             return None, _deny("deny:cross_tenant")
-        subject = self._subject(principal)
-        if subject is None:
+        user = self._user(principal)
+        if user is None:
             return None, _deny("deny:no_subject")
         relation = relation_for(action, resource.kind, resource.id is not None)
         if relation is None:
@@ -94,7 +111,6 @@ class OpenFgaPolicy:
                 obj = object_ref(resource)
         except GrantError:
             return None, _deny("deny:invalid_resource", kind=resource.kind)
-        user = user_ref(subject)
         return CheckItem(TupleKey(user, relation, obj), self._contextual(principal, user)), None
 
     @staticmethod
@@ -162,11 +178,10 @@ class OpenFgaPolicy:
     ) -> IdFilter:
         if self._abstains(principal):
             return All()
-        subject = self._subject(principal)
+        user = self._user(principal)
         relation = relation_for(action, kind, True)
-        if subject is None or relation is None or kind in (KIND_TENANT,):
+        if user is None or relation is None or kind in (KIND_TENANT,):
             return Only(())
-        user = user_ref(subject)
         contextual = self._contextual(principal, user)
         # A tenant admin holds every action on every resource of the tenant: one Check, no list.
         if await self.client.check(TupleKey(user, "admin", tenant_ref(principal.tenant_id)), contextual):
@@ -185,9 +200,11 @@ class OpenFgaPolicy:
             return Only(tuple(ids))
         items = []
         for c in candidates:
-            if not valid_id(c):
+            try:
+                obj = object_ref(ResourceRef(kind, c, principal.tenant_id))
+            except GrantError:
                 continue
-            items.append((c, CheckItem(TupleKey(user, relation, f"{kind}:{principal.tenant_id}/{c}"), contextual)))
+            items.append((c, CheckItem(TupleKey(user, relation, obj), contextual)))
         answers = await self.client.batch_check([i for _, i in items])
         return Only(tuple(c for (c, _), ok in zip(items, answers, strict=True) if ok))
 
@@ -203,7 +220,7 @@ class OpenFgaPolicy:
         if resource.kind == KIND_RUN:
             if parent is None or parent.kind not in ("agent", "workflow") or parent.tenant_id != resource.tenant_id:
                 raise GrantError("invalid_resource", "a run is registered with its agent or workflow")
-            writes.append(TupleKey(object_ref(parent), "parent", obj))
+            writes.append(TupleKey(subject_object_ref(parent), "parent", obj))
         elif resource.kind == KIND_TENANT:
             raise GrantError("invalid_resource", "a tenant is not registered")
         else:
@@ -218,15 +235,35 @@ class OpenFgaPolicy:
         found = await self.client.read({"object": obj})
         if resource.kind in ("agent", "workflow"):
             found += await self.client.read({"user": obj, "object": f"{KIND_RUN}:"})
+            # What this agent or workflow was granted to use goes with it.
+            for kind in USE_RESOURCE_KINDS:
+                found += await self.client.read({"user": obj, "object": f"{kind}:"})
         if found:
             await self.client.write(deletes=found)
 
+    def grantable(self, kind: str) -> list[GrantableRelation]:
+        return grantable_relations(kind)
+
+    def requirements(self, action: str, kind: str, has_id: bool) -> AccessRequirement | None:
+        return requirements(action, kind, has_id)
+
     def _grant_key(self, grant: Grant) -> TupleKey:
-        if not grant_relation_ok(grant.resource.kind, grant.relation):
+        if grant.subject_type not in (GRANT_SUBJECT_USER, GRANT_SUBJECT_ROLE):
+            raise GrantError("invalid_subject", "a grant names a user or a role")
+        role = grant.subject_type == GRANT_SUBJECT_ROLE
+        if not grant_relation_ok(grant.resource.kind, grant.relation, role):
+            allowed = ", ".join(g.relation for g in grantable_relations(grant.resource.kind) if g.roles or not role)
             raise GrantError(
-                "invalid_relation", f"{grant.relation!r} cannot be granted on a {grant.resource.kind} (allowed: {', '.join(GRANT_RELATIONS)})"
+                "invalid_relation",
+                f"{grant.relation!r} cannot be granted to a {grant.subject_type} on a {grant.resource.kind} (allowed: {allowed or 'none'})",
             )
-        return TupleKey(user_ref(grant.subject), grant.relation, object_ref(grant.resource))
+        obj = object_ref(grant.resource)
+        if not role:
+            return TupleKey(user_ref(grant.subject), grant.relation, obj)
+        if grant.subject not in MEMBER_ROLES:
+            raise GrantError("invalid_subject", f"a role is one of {', '.join(MEMBER_ROLES)}")
+        # Everyone holding the role in the resource's own tenant (the role arrives as a contextual tuple per request).
+        return TupleKey(f"{tenant_ref(grant.resource.tenant_id)}#{grant.subject}", grant.relation, obj)
 
     async def grant(self, grant: Grant) -> None:
         await self.client.write([self._grant_key(grant)])
@@ -237,9 +274,50 @@ class OpenFgaPolicy:
     async def list_grants(self, resource: ResourceRef) -> list[Grant]:
         obj = object_ref(resource)
         tuples = await self.client.read({"object": obj})
-        grants = [
-            Grant(t.user.removeprefix("user:"), t.relation, resource)
-            for t in tuples
-            if t.relation in GRANT_RELATIONS and t.user.startswith("user:") and not t.user.startswith("user:*")
-        ]
-        return sorted(grants, key=lambda g: (g.relation, g.subject))
+        roles = {f"{tenant_ref(resource.tenant_id)}#{role}": role for role in MEMBER_ROLES}
+        grants: list[Grant] = []
+        for t in tuples:
+            if t.relation not in GRANT_RELATIONS:
+                continue
+            if (subject := subject_of(t.user)) is not None:
+                grants.append(Grant(subject, t.relation, resource))
+            elif t.user in roles:
+                grants.append(Grant(roles[t.user], t.relation, resource, subject_type=GRANT_SUBJECT_ROLE))
+        return sorted(grants, key=lambda g: (g.relation, g.subject_type, g.subject))
+
+    # --- agent-bound grants (docs/iam.md, "Agent and workflow grants") ----------------------------------------------
+
+    @staticmethod
+    def _use_key(grant: UseGrant) -> TupleKey:
+        if grant.subject.kind not in USE_SUBJECT_KINDS or grant.resource.kind not in USE_RESOURCE_KINDS:
+            raise GrantError("invalid_relation", "an agent or workflow may be granted an MCP server or a secret")
+        if grant.subject.tenant_id != grant.resource.tenant_id:
+            raise GrantError("invalid_resource", "a grant stays inside one tenant")
+        return TupleKey(subject_object_ref(grant.subject), GRANTED_TO, object_ref(grant.resource))
+
+    async def grant_use(self, grant: UseGrant) -> None:
+        await self.client.write([self._use_key(grant)])
+
+    async def revoke_use(self, grant: UseGrant) -> None:
+        await self.client.write(deletes=[self._use_key(grant)])
+
+    async def used_by(self, subject: ResourceRef, kind: str) -> list[str]:
+        """The ids of `kind` the agent or workflow may use: one ListObjects (`can_use_as_agent`). An id the platform
+        could not have made (another tenant) never comes back."""
+        if subject.kind not in USE_SUBJECT_KINDS or kind not in USE_RESOURCE_KINDS:
+            raise GrantError("invalid_relation", "an agent or workflow may use an MCP server or a secret")
+        objects = await self.client.list_objects(object_ref(subject), "can_use_as_agent", kind, ())
+        if len(objects) >= self.client.settings.list_limit:
+            log.warning("openfga list_objects reached its limit (%s) for agent grants", self.client.settings.list_limit)
+        return sorted(i for o in objects if (i := strip_object(o, kind, subject.tenant_id)) is not None)
+
+    async def grantees(self, resource: ResourceRef) -> list[ResourceRef]:
+        if resource.kind not in USE_RESOURCE_KINDS:
+            raise GrantError("invalid_relation", "only an MCP server or a secret has grantees")
+        found = await self.client.read({"object": object_ref(resource), "relation": GRANTED_TO})
+        out: list[ResourceRef] = []
+        for t in found:
+            parts = split_object(t.user)
+            if t.relation == GRANTED_TO and parts and parts[1] == resource.tenant_id and parts[0] in USE_SUBJECT_KINDS:
+                out.append(ResourceRef(parts[0], parts[2], resource.tenant_id))
+        return sorted(out, key=lambda r: (r.kind, str(r.id)))

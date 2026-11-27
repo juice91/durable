@@ -50,9 +50,9 @@ describe("the Tests tab and its route", () => {
     expect(routes.agentTests("a1", { suite: "s1", compare: `${RUN_A}..${RUN_B}` })).toContain("compare=");
   });
 
-  it("the Evaluation group holds Test suites, Scorers and Experiments, and the Tests tab is still not a nav item", () => {
+  it("the Evaluation group holds Test suites, Scorers and Test runs, and the Tests tab is still not a nav item", () => {
     expect(NAV_GROUPS.some((g) => g.id === "evaluation")).toBe(true);
-    expect(navItems.filter((item) => item.group === "evaluation").map((item) => item.label)).toEqual(["Test suites", "Scorers", "Experiments"]);
+    expect(navItems.filter((item) => item.group === "evaluation").map((item) => item.label)).toEqual(["Test suites", "Scorers", "Test runs"]);
     expect(navSections.find((section) => section.group.id === "evaluation")?.items.map((item) => item.href)).toEqual([routes.datasets(), routes.scorers(), routes.experiments()]);
     expect(allNavItems.some((item) => /\/tests/.test(item.href))).toBe(false);
   });

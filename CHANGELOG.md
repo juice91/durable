@@ -6,6 +6,53 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
+### Features
+
+- **iam-zitadel:** The bootstrap creates the Cloudflare Access app only on request
+  - Pass `--cloudflare-access <team>` to the bootstrap to create or repair the Cloudflare Access application; without it the bootstrap leaves an existing application as it is. Breaking: `--access-team`, its default team and the CLI's `EAP_CF_ACCESS_TEAM_DOMAIN` fallback are gone, and `--rotate-access-secret` now needs `--cloudflare-access`.
+- **iam:** Built-in admin account for deployments without ZITADEL
+  - One admin account (username and password), created on a first-run setup page with a one-time setup code. The deploy scripts generate the sign-in signing key for each installation; no key is shipped. Studio uses `EAP_STUDIO_AUTH=local`; for several users or roles, use ZITADEL. See `docs/admin-account.md`.
+  - Breaking: Studio no longer falls back to the `access` sign-in mode when `EAP_STUDIO_AUTH` is unset or unknown; a deployment behind Cloudflare Access must set `EAP_STUDIO_AUTH=access`.
+- **deploy:** Docker Compose quick start
+  - Run `docker compose up -d --wait`, then `docker compose exec api setup-link`, and open the printed link to create the admin account. See `docs/quickstart-compose.md`.
+
+## [0.4.0] - 2026-11-26
+
+### Features
+
+- **webhooks:** Inbound webhooks — an HMAC-verified webhook starts a run
+  - `POST /api/v1/hooks/{trigger_id}` accepts an HMAC-signed delivery (GitHub, Standard Webhooks or a custom preset), deduplicates it and starts exactly one run of the trigger's workflow. Triggers are created disabled and enabled by a person (Studio > Webhooks); API, MCP tools (`webhook.*`) and the Architect can prepare them. See `docs/webhooks.md`.
+- **studio:** Personal API keys on the Profile page
+- **studio:** Workflow draft notice, diff and confirmed publish
+- **iam:** per-resource authorization for agents, workflows, runs and schedules
+- **iam:** per-resource authorization for the data plane, observability, evals and admin
+- **iam:** agent-bound grants for MCP servers and secrets (model, API, worker gates, migration CLI, Studio)
+- **iam:** OpenFGA policy deployment wiring and the switch runbook
+  - The shipped ConfigMap keeps the `openaccess` policy: every signed-in user is an admin, which suits a trial only. To enforce roles (admin, editor, viewer) and per-resource grants, run your own OpenFGA server, bootstrap the store and model (`python -m eap_iam_openfga.bootstrap`), set `EAP_OPENFGA_STORE_ID` and `EAP_OPENFGA_MODEL_ID`, then set `EAP_IAM_POLICY=openfga`. See `docs/iam.md`, "Switching to OpenFGA".
+- **iam:** Studio Access tabs, access and explain API, role grants
+- **studio:** Rename Experiments to Test runs
+- **studio:** Hide controls a role cannot use and explain refusals
+- **iam:** Drop cfaccess, organisation-scoped roles, scoped ZITADEL keys, no self-registration
+- **iam:** Viewers can use the Architect with read-only tools
+- **external:** External agents foundations — external clients, run scope, workflow exports
+  - Adds no route by itself; the run-only MCP server and the A2A server below are the routes. Adds external clients, API keys with the `run` scope, workflow exports that a person enables (Studio > External access), the rules of an external run (idempotency, quotas, ownership, states, deadlines) and the `eap.external_run_sweep` worker schedule. Migration `0043_external_access`; the OpenFGA model gains `can_manage_external_access` and `can_read_external_access` (bootstrap it and update the pinned model id). See `docs/external-access.md`.
+- **external:** Run-only MCP server for external agents
+  - `POST /api/v1/external/mcp`, a second MCP server for `run` keys only (one `run_<export>` tool per export plus `runs.get`, `runs.wait`, `runs.list`, `runs.cancel`, `exports.list`; no approval or answer tool), with rate, concurrency and body limits. Off unless `EAP_EXTERNAL_ACCESS_ENABLED=true`. See `docs/external-access.md` (operator setup, Claude Code and Codex snippets).
+- **external:** A2A server for external agents (read and run)
+  - A2A server for external agents under `/api/v1/external/a2a/{endpoint_id}`: A2A 1.0 JSON-RPC send, get, list and cancel for `run` keys, and per-tenant Agent Cards (the public card lists no workflows). Off unless `EAP_EXTERNAL_ACCESS_ENABLED=true`. See `docs/external-access.md`.
+
+### Fixes
+
+- **studio:** Workflow step details open on the right and stay visible
+- **iam-openfga:** Encode subjects so zitadel:<sub> is a valid OpenFGA id
+- **deploy:** Restore the previous release when a migration fails, and keep backups out of deploys
+
+### Documentation
+
+- **tools:** workflow.history rate-cap example
+
 ## [0.3.0] - 2026-11-24
 
 ### Features
@@ -162,6 +209,6 @@ All notable changes to this project are documented here. The format follows
 - Fix k3s-secrets-encryption.sh: server port and status wait
 - Stop Studio vitest shard timeouts: cap workers per CI shard
 
-[Unreleased]: https://github.com/juice91/durable/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/juice91/durable/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/juice91/durable/releases/tag/v0.2.0
+[Unreleased]: https://github.com/juice91/durable/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/juice91/durable/compare/v0.3.0...v0.5.0
+[0.3.0]: https://github.com/juice91/durable/releases/tag/v0.3.0

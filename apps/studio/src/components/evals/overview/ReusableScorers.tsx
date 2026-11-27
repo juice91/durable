@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -28,11 +30,15 @@ const PRIMARY: Record<ScorerKind, { label: string; placeholder: string } | null>
   max_cost: { label: "Max cost (USD)", placeholder: "0.05" },
 };
 
+const WRITE_ACTION = ["write"] as const;
+
 /**
  * Reusable scorers: named checks the worker applies to the finished runs of the agents they are
  * attached to (attach them in an agent's Config panel). Scores appear in the trace's Scores tab.
  */
 export function ReusableScorers() {
+  // The library belongs to the tenant: creating and deleting a scorer is a tenant `write`.
+  const mayWrite = useCan("tenant", null, "write");
   const [items, setItems] = useState<ReusableScorer[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -63,6 +69,7 @@ export function ReusableScorers() {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (!mayWrite) return;
     if (!name.trim()) return setFormError("Enter a name.");
     const evaluator = evaluatorFromForm(kind, primary, secondary, { negate, field: regexField });
     if (typeof evaluator === "string") return setFormError(evaluator);
@@ -111,7 +118,9 @@ export function ReusableScorers() {
               <Badge variant="outline">{SCORER_KIND_LABELS[s.evaluator.kind]}</Badge>
               <span className="min-w-0 flex-1 truncate text-caption text-muted-foreground">{describeEvaluator(s.evaluator)}</span>
               <span className="text-caption text-muted-foreground">{s.agent_ids.length} {s.agent_ids.length === 1 ? "agent" : "agents"}</span>
-              <Button size="sm" variant="secondary" aria-label={`Delete scorer ${s.name}`} onClick={() => void remove(s)}>Delete</Button>
+              {mayWrite ? (
+                <Button size="sm" variant="secondary" aria-label={`Delete scorer ${s.name}`} onClick={() => void remove(s)}>Delete</Button>
+              ) : null}
             </li>
           ))}
         </ul>
@@ -119,44 +128,47 @@ export function ReusableScorers() {
         <p className="text-label text-muted-foreground" data-testid="reusable-scorers-empty">No reusable scorers yet.</p>
       ) : null}
 
-      <form onSubmit={submit} className="flex flex-wrap items-end gap-3" aria-label="New scorer">
-        <label className="flex flex-col gap-1 text-caption text-muted-foreground">
-          Name
-          <input className={field} value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
-        </label>
-        <label className="flex flex-col gap-1 text-caption text-muted-foreground">
-          Check
-          <Select className={field} value={kind} onValueChange={(v) => setKind(v as ScorerKind)}>
-            {SCORER_KINDS.map((k) => <option key={k} value={k}>{SCORER_KIND_LABELS[k]}</option>)}
-          </Select>
-        </label>
-        {primaryField ? (
+      {mayWrite ? (
+        <form onSubmit={submit} className="flex flex-wrap items-end gap-3" aria-label="New scorer">
           <label className="flex flex-col gap-1 text-caption text-muted-foreground">
-            {primaryField.label}
-            <input className={field} value={primary} placeholder={primaryField.placeholder} onChange={(e) => setPrimary(e.target.value)} />
+            Name
+            <input className={field} value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
           </label>
-        ) : null}
-        {kind === "regex" ? (
-          <>
-            <label className="flex items-center gap-2 text-caption text-muted-foreground">
-              <input type="checkbox" checked={negate} onChange={(e) => setNegate(e.target.checked)} />
-              Must not match
-            </label>
+          <label className="flex flex-col gap-1 text-caption text-muted-foreground">
+            Check
+            <Select className={field} value={kind} onValueChange={(v) => setKind(v as ScorerKind)}>
+              {SCORER_KINDS.map((k) => <option key={k} value={k}>{SCORER_KIND_LABELS[k]}</option>)}
+            </Select>
+          </label>
+          {primaryField ? (
             <label className="flex flex-col gap-1 text-caption text-muted-foreground">
-              Field path (optional)
-              <input className={field} value={regexField} placeholder="post" onChange={(e) => setRegexField(e.target.value)} />
+              {primaryField.label}
+              <input className={field} value={primary} placeholder={primaryField.placeholder} onChange={(e) => setPrimary(e.target.value)} />
             </label>
-          </>
-        ) : null}
-        {kind === "field_equals" ? (
-          <label className="flex flex-col gap-1 text-caption text-muted-foreground">
-            Value (JSON)
-            <input className={field} value={secondary} placeholder={'"ok"'} onChange={(e) => setSecondary(e.target.value)} />
-          </label>
-        ) : null}
-        <Button type="submit" size="sm" disabled={saving}>Add scorer</Button>
-        {formError ? <p role="alert" className="w-full text-label text-destructive-text">{formError}</p> : null}
-      </form>
+          ) : null}
+          {kind === "regex" ? (
+            <>
+              <label className="flex items-center gap-2 text-caption text-muted-foreground">
+                <input type="checkbox" checked={negate} onChange={(e) => setNegate(e.target.checked)} />
+                Must not match
+              </label>
+              <label className="flex flex-col gap-1 text-caption text-muted-foreground">
+                Field path (optional)
+                <input className={field} value={regexField} placeholder="post" onChange={(e) => setRegexField(e.target.value)} />
+              </label>
+            </>
+          ) : null}
+          {kind === "field_equals" ? (
+            <label className="flex flex-col gap-1 text-caption text-muted-foreground">
+              Value (JSON)
+              <input className={field} value={secondary} placeholder={'"ok"'} onChange={(e) => setSecondary(e.target.value)} />
+            </label>
+          ) : null}
+          <Button type="submit" size="sm" disabled={saving}>Add scorer</Button>
+          {formError ? <p role="alert" className="w-full text-label text-destructive-text">{formError}</p> : null}
+        </form>
+      ) : null}
+      {mayWrite ? null : <PermissionNotice kind="tenant" id={null} actions={WRITE_ACTION} />}
     </section>
   );
 }

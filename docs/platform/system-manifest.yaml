@@ -6,7 +6,7 @@
 #     capability under a pattern's `needs`.
 #   - generated (between the markers): produced from code constants and the capability registry. Never edit by
 #     hand: run `uv run python scripts/ci/system_manifest.py --write`. CI runs `--check` and fails on any drift.
-# Design: docs/superpowers/specs/2026-11-22-architect-system-context-design.md (section 3).
+# Design: an internal design note (section 3).
 manifest_version: 2
 platform:
   name: pydanticos
@@ -111,6 +111,7 @@ generated:
   - settings.
   - shell.
   - update_working_memory
+  - webhook.
   - workflow.
   known_gaps:
   - alternatives:
@@ -141,13 +142,6 @@ generated:
     entry_ids:
     - feature.iam_per_user
     id: gap.iam_per_user
-    status: designed_not_built
-  - alternatives:
-    - trigger.schedule
-    designed_in: pr:111
-    entry_ids:
-    - trigger.webhook
-    id: gap.inbound_webhook
     status: designed_not_built
   - alternatives: []
     designed_in: null
@@ -487,5 +481,5 @@ generated:
   - id: trigger.schedule
     status: available
   - id: trigger.webhook
-    status: designed_not_built
+    status: available
   # END GENERATED

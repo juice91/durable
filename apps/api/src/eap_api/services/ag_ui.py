@@ -26,6 +26,8 @@ from eap_api import model_discovery
 from eap_api.approvals import DecisionResult, decide
 from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher
+from eap_api.services.access import Access
+from eap_api.services.converse import require_own_conversation
 from eap_api.services.conversations import ConversationService
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, ServiceError
 from eap_api.services.run_filters import plain_refusals
@@ -190,6 +192,9 @@ class AgUiService:
 
     def approval_rows(self, tenant_id: str, run_id: str) -> list[dict[str, Any]]:
         return self.approvals.list_for_run(tenant_id, run_id)
+
+    def require_own_thread(self, access: Access, tenant_id: str, conversation_id: str) -> None:
+        require_own_conversation(access, self.run_store, tenant_id, conversation_id)
 
     def require_agent(self, tenant_id: str, agent_id: str) -> None:
         """404 `Agent not found` for an agent that is not the tenant's."""

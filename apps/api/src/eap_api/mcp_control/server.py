@@ -21,6 +21,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ResourceError
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.tools.base import ToolResult
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -41,7 +42,7 @@ MOUNT_PATH = "/api/v1/mcp"
 MAX_RESULT_BYTES = 256 * 1024
 INSTRUCTIONS = (
     "PydanticOS control plane for one tenant. Tools are named by function: agent.*, workflow.*, kb.*, "
-    "settings.*, mcp.*, approvals.*. Read tools need any API key of the tenant; tools that change anything "
+    "settings.*, mcp.*, approvals.*, webhook.*. Read tools need any API key of the tenant; tools that change anything "
     "need a key with the `manage` scope. Errors are {error: {code, message}}. Secrets are never exposed."
 )
 
@@ -114,6 +115,11 @@ def register(mcp: FastMCP) -> Callable[..., Callable[[Callable[..., Any]], Calla
                 token = _ctx.set(ctx)
                 bind_agui_actor(ctx.principal)  # a run this tool starts names who started it
                 try:
+                    if manage and ctx.principal.kind == "architect_run":
+                        # Design 8: the Architect acts with the requesting user's rights and never more. A viewer's
+                        # Architect turn gets the read tools only; the services check each resource for the same user.
+                        if not await run_in_threadpool(ctx.access.allowed, "write", "tenant", None):
+                            raise McpToolError("forbidden", f"{name} changes things, and the person this turn acts for may only read")
                     data = await fn(*args, **kwargs)
                     audit_call(tool=name, tenant_id=ctx.tenant_id, principal_id=who, outcome="ok")
                     if manage:
@@ -209,13 +215,14 @@ class McpControlASGI:
 
 
 def build_server() -> FastMCP:
-    from eap_api.mcp_control import resources, tools_evals, tools_manage, tools_read
+    from eap_api.mcp_control import resources, tools_evals, tools_manage, tools_read, tools_webhooks
 
     mcp = FastMCP("PydanticOS", instructions=INSTRUCTIONS)
     tool, resource = register(mcp)
     tools_read.register_tools(tool)
     tools_manage.register_tools(tool)
     tools_evals.register_tools(tool)
+    tools_webhooks.register_tools(tool)
     resources.register_resources(resource)
     return mcp
 

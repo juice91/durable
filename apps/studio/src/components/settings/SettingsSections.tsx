@@ -15,7 +15,8 @@ import { ApiKeysSection } from "@/components/apiKeys/ApiKeysSection";
 import { AuditSection } from "@/components/audit/AuditSection";
 import { MembersSection } from "./MembersSection";
 import { ProfileSection } from "./ProfileSection";
-import { hasMembers, loadCapabilities, type IamCapabilities } from "@/lib/iam";
+import { canReadAudit, hasMembers } from "@/lib/iam";
+import { useCapabilities } from "@/lib/useIam";
 import { SecretsSection } from "./SecretsSection";
 import { ConnectionsSection } from "./ConnectionsSection";
 import { ProvidersSettings } from "./ProvidersSettings";
@@ -269,16 +270,12 @@ function parseTab(value: string | null): SettingsTab {
 export function SettingsSections() {
   const router = useRouter();
   const requested = parseTab(useSearchParams().get("tab"));
-  // The Members tab exists only when the API reports a membership source (design 7.2); the server refuses the calls anyway.
-  const [caps, setCaps] = useState<IamCapabilities | null>(null);
-  useEffect(() => {
-    let live = true;
-    loadCapabilities().then((c) => live && setCaps(c)).catch(() => undefined);
-    return () => {
-      live = false;
-    };
-  }, []);
-  const visible = SETTINGS_TABS.filter((id) => id !== "members" || hasMembers(caps));
+  // A tab that would only say "not allowed" is not shown: Members needs a membership source and the right to manage it
+  // (design 7.2), Audit the right to read it. While the capabilities load neither is there; the server refuses anyway.
+  const caps = useCapabilities();
+  const visible = SETTINGS_TABS.filter(
+    (id) => (id !== "members" || hasMembers(caps ?? null)) && (id !== "audit" || (caps !== undefined && canReadAudit(caps))),
+  );
   const tab: SettingsTab = visible.includes(requested) ? requested : "appearance";
   return (
     <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4 px-4 py-6">

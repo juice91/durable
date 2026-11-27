@@ -1,7 +1,7 @@
 import { seg, withQuery } from "./query";
 
 /** The knowledge base page's tabs (RM.16). Documents is the default and is left out of URLs. */
-export const KNOWLEDGE_TABS = ["documents", "search", "runs", "sources"] as const;
+export const KNOWLEDGE_TABS = ["documents", "search", "runs", "sources", "access"] as const;
 export type KnowledgeTab = (typeof KNOWLEDGE_TABS)[number];
 /** The detail page's own tab parameter (`/knowledge/:id?tab=search`). */
 export const KNOWLEDGE_TAB_PARAM = "tab";
@@ -16,7 +16,7 @@ export function parseKnowledgeTab(raw: string | null | undefined): KnowledgeTab 
 }
 
 export interface KnowledgeBaseRouteOptions {
-  /** `documents` (default, left out), `search`, `runs` or `sources`. */
+  /** `documents` (default, left out), `search`, `runs`, `sources` or `access`. */
   tab?: KnowledgeTab | null;
   /** A document key: opens that document's Sheet (on the Documents tab). */
   document?: string | null;
@@ -25,7 +25,7 @@ export interface KnowledgeBaseRouteOptions {
 export const knowledgeRoutes = {
   /** `/knowledge`: the knowledge bases list. */
   knowledge: (): string => "/knowledge",
-  /** `/knowledge/:id[?tab=search|runs][&doc=<document key>]`: one knowledge base. */
+  /** `/knowledge/:id[?tab=search|runs|sources|access][&doc=<document key>]`: one knowledge base. */
   knowledgeBase: (id: string, { tab = null, document = null }: KnowledgeBaseRouteOptions = {}): string =>
     withQuery(`/knowledge/${seg(id)}`, {
       [KNOWLEDGE_TAB_PARAM]: tab && tab !== "documents" ? tab : null,

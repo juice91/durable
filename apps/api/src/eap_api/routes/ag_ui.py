@@ -1,6 +1,6 @@
 """AG-UI agent endpoints (AGUI.6): an AG-UI client runs a published agent over SSE.
 
-Plan: docs/plans/2026-11-13-milestone-ag-ui.md (D2-D5, D7, D9, D13, D16, D18 and "### AGUI.6").
+Plan: an internal design note (D2-D5, D7, D9, D13, D16, D18 and "### AGUI.6").
 
 - `POST /api/v1/ag-ui/agents/{agent_id}`: a `RunAgentInput` body, an AG-UI SSE answer. The API
   records the turn and hands it to the worker, then streams the translation of the run's durable
@@ -64,7 +64,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -128,11 +128,13 @@ from eap_api.attachments_shared import (
     read_upload,
     store_upload,
 )
+from eap_api.service_deps.iam import require_access, require_converse_access
 from eap_api.auth import AgUiPrincipal, AgUiPrincipalDep, feedback_viewer, require_agui_agent
 from eap_api.request_guard import guarded_json_route, unstorable_params, unstorable_strings
 from eap_api.schemas import ErrorDetail
 from eap_api.service_deps.agui import AgUiServiceDep
 from eap_api.service_errors import to_http_exception
+from eap_api.services.access import Access
 from eap_api.services.ag_ui import (
     UNKNOWN_RUN_DETAIL,
     AgUiRunRecord,
@@ -212,6 +214,8 @@ class _Ctx:
     svc: AgUiService
     principal: AgUiPrincipal
     agent_id: str
+    # Set when only the viewer's Architect exception allows this caller: they continue their own threads only.
+    own_threads: Access | None = None
 
     @property
     def tenant_id(self) -> str:
@@ -646,6 +650,8 @@ def _prepare_post(
         attachment_capabilities = _check_attachments(c, effective, options.model_id)
         if thread.exists:
             assert thread.conversation is not None
+            if c.own_threads is not None:
+                c.svc.require_own_thread(c.own_threads, c.tenant_id, thread.conversation_id)
             check_thread_resource(thread.conversation, effective.options)
             pending = c.svc.pending_client_tool_calls(c.tenant_id, thread.conversation_id, before_run_id=native_run_id)
             latest = _latest_turn_id(c, thread.conversation_id)
@@ -847,12 +853,17 @@ async def run_agent(
 ) -> StreamingResponse:
     """Run the agent for one AG-UI run (`RunAgentInput`), answering with AG-UI SSE (D2, D7)."""
     agent = _agent_id_or_404(principal, agent_id)
+    own_threads = await require_converse_access(request, svc.engine, principal, agent)
     body = await _checked_json_body(request)
     mapped = await parse_run_agent_input_async(body)
     check_agent_input(mapped)
     check_principal_options(mapped.options, is_api_key=principal.is_api_key)
     decisions = resume_decisions(mapped.resume)  # the D15 payload rules: 422 before anything else
-    c = _ctx(svc, principal, agent)
+    if decisions:
+        # A resume decides the thread's open approvals (approve or reject a tool call): the same right as the approvals
+        # route, `approve` on the agent (design 2.1), on top of `run`.
+        await require_access(request, principal, "approve", "agent", agent)
+    c = replace(_ctx(svc, principal, agent), own_threads=own_threads)
     lease = _acquire(limiter, principal)
     try:
         prepared = await run_in_threadpool(_prepare_post, c, body, mapped, last_event_id, decisions)
@@ -905,6 +916,7 @@ async def get_thread(
     `activeRunId`: the AG-UI runId of an unfinished turn to attach to (else null). An unknown
     thread is empty (200), like a thread before its first run."""
     agent = _agent_id_or_404(principal, agent_id)
+    await require_access(request, principal, "read", "agent", agent)
     _check_params(request)
     thread_id = _path_id(thread_id, "Thread not found")
     c = _ctx(svc, principal, agent)
@@ -941,6 +953,7 @@ async def attach_run(
     """Attach to a recorded AG-UI run (after a reload, D7): from the start, or a continuation after
     `Last-Event-ID: {runId}:{seq}` (wins) or `?after=<seq>`. Nothing is started."""
     agent = _agent_id_or_404(principal, agent_id)
+    await require_access(request, principal, "read", "agent", agent)
     _check_params(request)
     thread_id = _path_id(thread_id, UNKNOWN_RUN_DETAIL)
     run_id = _path_id(run_id, UNKNOWN_RUN_DETAIL)
@@ -975,6 +988,7 @@ _attachment_routes = APIRouter(
 async def upload_attachment(request: Request, principal: AgUiPrincipalDep, file: UploadFile) -> JSONResponse:
     """Upload a file (multipart field `file`) to reference from a run's message as an `image` or
     `document` part. Same limits and codes as `POST /attachments`; 201 {id, name, media_type, size}."""
+    await require_access(request, principal, "write", "tenant", None)
     uploaded = await read_upload(request, file, max_attachment_bytes())
     return await store_upload(request, principal.tenant_id, file, uploaded, created_by_for(principal))
 
@@ -985,6 +999,7 @@ async def get_attachment(
 ) -> Response:
     """The bytes. A key sees what it uploaded and what is linked to a message of a conversation of an
     agent it may use; anything else (and another tenant's) is 404. The dev bearer sees the tenant's."""
+    await require_access(request, principal, "read", "tenant", None)
     meta = await run_in_threadpool(
         svc.attachment_for_download, principal.tenant_id, attachment_id,
         created_by=created_by_for(principal), via_api_key=principal.is_api_key,
@@ -1002,6 +1017,7 @@ async def delete_attachment(attachment_id: str, request: Request, principal: AgU
     """Discard an upload of the caller (the key that made it) before a message sends it: 204; 409
     `attachment_in_use` once a message references it; 404 when unknown, another tenant's or another
     caller's."""
+    await require_access(request, principal, "write", "tenant", None)
     return await delete_unsent_attachment(request, principal.tenant_id, attachment_id, created_by_for(principal))
 
 

@@ -602,6 +602,10 @@ RunEventType = Literal[
     # Data carries provenance and hashes (versions, manifest and registry hashes, the principal summary,
     # truncated and degraded layer names, estimated sizes), never the context's text.
     "system_context_loaded",
+    # Agent-bound grants: a gated use of an MCP server or a secret was refused for the run's start-time set, key
+    # `permission_denied:{kind}:{name}`. Data: {code, reason (not_granted | authz_unavailable), resource_kind, name, message,
+    # subject_kind, subject_id}; names only, never a value.
+    "permission_denied",
 ]
 
 

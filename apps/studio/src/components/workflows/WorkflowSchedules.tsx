@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan, usePermissions } from "@/lib/permissions";
 import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
@@ -22,6 +23,25 @@ export interface WorkflowSchedulesProps {
   /** Called with the schedule count after every load or change (the tab badge). */
   onCountChange?: (count: number) => void;
 }
+
+/** One schedule's actions: pause and resume need `edit` on it, delete needs `archive`. */
+function ScheduleActions({ row, busy, onSetActive, onDelete }: { row: WorkflowSchedule; busy: boolean; onSetActive: (active: boolean) => void; onDelete: () => void }) {
+  const permissions = usePermissions("schedule", row.id, SCHEDULE_ACTIONS);
+  return (
+    <span className="flex justify-end gap-1">
+      {!permissions.can("edit") ? null : row.active ? (
+        <Button size="sm" disabled={busy} aria-label={`Pause ${row.name}`} onClick={() => onSetActive(false)}>Pause</Button>
+      ) : (
+        <Button size="sm" disabled={busy} aria-label={`Resume ${row.name}`} onClick={() => onSetActive(true)}>Resume</Button>
+      )}
+      {permissions.can("archive") ? (
+        <Button size="sm" variant="ghost" disabled={busy} aria-label={`Delete ${row.name}`} onClick={onDelete}>Delete</Button>
+      ) : null}
+    </span>
+  );
+}
+
+const SCHEDULE_ACTIONS = ["edit", "archive"] as const;
 
 /**
  * The Schedules table: Target, Schedule ID, Cron, Next run, State, and Pause / Resume / Delete per
@@ -66,6 +86,9 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
+
+  const mayRunWorkflow = useCan("workflow", workflowId, "run");
+  const mayCreateSchedule = useCan("schedule", null, "create");
 
   // 412: someone else changed the schedule; 重新載入 shows their version, 覆寫 resends on top of it.
   const conflict = useConflict<WorkflowSchedule>({ onSaved: (saved) => replaceRow(saved as WorkflowSchedule) });
@@ -129,14 +152,12 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
     {
       id: "actions", header: <span className="sr-only">Actions</span>, align: "end",
       cell: (row) => (
-        <span className="flex justify-end gap-1">
-          {row.active ? (
-            <Button size="sm" disabled={busyId === row.id} aria-label={`Pause ${row.name}`} onClick={() => void setActive(row, false)}>Pause</Button>
-          ) : (
-            <Button size="sm" disabled={busyId === row.id} aria-label={`Resume ${row.name}`} onClick={() => void setActive(row, true)}>Resume</Button>
-          )}
-          <Button size="sm" variant="ghost" disabled={busyId === row.id} aria-label={`Delete ${row.name}`} onClick={() => { setDeleteError(null); setDeleting(row); }}>Delete</Button>
-        </span>
+        <ScheduleActions
+          row={row}
+          busy={busyId === row.id}
+          onSetActive={(active) => void setActive(row, active)}
+          onDelete={() => { setDeleteError(null); setDeleting(row); }}
+        />
       ),
     },
   ];
@@ -155,7 +176,7 @@ export function WorkflowSchedules({ workflowId, target, spec = null, onCountChan
           const q = query.toLowerCase();
           return row.id.toLowerCase().includes(q) || row.name.toLowerCase().includes(q) || (row.workflow_name ?? "").toLowerCase().includes(q);
         }}
-        toolbar={workflowId ? <Button variant="primary" onClick={() => setCreating(true)}>New schedule</Button> : undefined}
+        toolbar={workflowId && mayRunWorkflow && mayCreateSchedule ? <Button variant="primary" onClick={() => setCreating(true)}>New schedule</Button> : undefined}
         loading={rows === null && !loadError}
         error={loadError}
         onRetry={() => void load()}

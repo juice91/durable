@@ -1,5 +1,6 @@
 "use client";
 
+import { useKnowledgePermissions } from "./useKnowledgePermissions";
 import React, { useEffect, useId, useRef, useState } from "react";
 import Link from "next/link";
 import { TraceLink } from "@/components/traces/TraceLink";
@@ -24,6 +25,7 @@ function headingPath(hit: SearchHit): string | null {
  * score, title, anchor link and the section text.
  */
 export function SearchTab({ kbId }: { kbId: string }) {
+  const mayRun = useKnowledgePermissions(kbId).can("run");
   const id = useId();
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState("8");
@@ -57,6 +59,7 @@ export function SearchTab({ kbId }: { kbId: string }) {
       setError(filter.reason);
       return;
     }
+    if (!mayRun) return; // Enter in a field submits too
     abort.current?.abort();
     const controller = new AbortController();
     abort.current = controller;
@@ -101,7 +104,7 @@ export function SearchTab({ kbId }: { kbId: string }) {
         {error ? <p role="alert" data-testid="knowledge-search-error" className={alertClass}>{error}</p> : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {busy ? <span className="text-caption text-muted-foreground" aria-live="polite">Searching…</span> : null}
-          <Button type="submit" variant="primary" disabled={busy} data-testid="knowledge-search-submit">Search</Button>
+          {mayRun ? <Button type="submit" variant="primary" disabled={busy} data-testid="knowledge-search-submit">Search</Button> : null}
         </div>
       </form>
 

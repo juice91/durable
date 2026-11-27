@@ -380,6 +380,46 @@ def test_sanitize_strips_internal_applies_replacements_and_drops_private_pr_link
     assert "[0.2.0]: https://github.com/public/widget/releases/tag/v0.2.0" in clean
 
 
+LINKED = """## [Unreleased]
+
+## [0.5.0] - 2026-01-05
+
+## [0.4.0] - 2026-01-04
+
+## [0.3.0] - 2026-01-03
+
+## [0.2.0] - 2026-01-02
+
+[Unreleased]: https://github.com/public/widget/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/public/widget/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/public/widget/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/public/widget/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/public/widget/releases/tag/v0.2.0
+"""
+
+
+def test_links_never_point_at_a_version_the_public_repository_has_no_tag_for():
+    clean = public_notes.sanitize(LINKED, [], [], unpublished={"0.2.0", "0.4.0"})
+    assert clean.split("\n\n")[-1].splitlines() == [
+        "[Unreleased]: https://github.com/public/widget/compare/v0.5.0...HEAD",
+        "[0.5.0]: https://github.com/public/widget/compare/v0.3.0...v0.5.0",
+        "[0.3.0]: https://github.com/public/widget/releases/tag/v0.3.0",
+    ]
+    assert "## [0.4.0] - 2026-01-04" in clean and "## [0.2.0] - 2026-01-02" in clean  # the sections stay
+    assert public_notes.sanitize(LINKED, [], []) == LINKED
+
+
+def test_the_unpublished_file_is_read_by_the_command(rules, tmp_path):
+    replacements, patterns = rules
+    changelog_file, unpublished = tmp_path / "CHANGELOG.md", tmp_path / "unpublished.txt"
+    changelog_file.write_text(LINKED)
+    unpublished.write_text("# never tagged\n0.4.0\n")
+    argv = ["sanitize", str(changelog_file), "--replacements", str(replacements), "--patterns", str(patterns)]
+    assert public_notes.main([*argv, "--unpublished", str(unpublished), "--write"]) == 0
+    assert "v0.4.0" not in changelog_file.read_text()
+    assert "compare/v0.3.0...v0.5.0" in changelog_file.read_text()
+
+
 def test_a_planted_internal_string_blocks_the_public_release(rules, tmp_path, capsys):
     replacements, patterns = rules
     changelog_file = tmp_path / "CHANGELOG.md"

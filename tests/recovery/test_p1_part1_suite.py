@@ -1,4 +1,4 @@
-"""RAG P1.A7: the part 1 suite, whole-system (docs/plans/2026-11-14-milestone-rag-p1.md, "P1.A7").
+"""RAG P1.A7: the part 1 suite, whole-system (an internal design note, "P1.A7").
 
 Everything goes through the real API and a real `python -m eap_worker` whose extractions run in the
 real sandbox child (eap_worker.extract_sandbox). The worker-level suites (apps/worker/worker_tests:

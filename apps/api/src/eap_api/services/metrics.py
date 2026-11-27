@@ -15,6 +15,8 @@ from eap_api.models import AgentModel
 from eap_api.ports import RunLauncher
 from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, Unavailable
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_run_store import METRICS, MetricsQuery, MetricsQueryTimeout, MetricsRangeError, MetricsStore
 from eap_run_store.metrics import MAX_GROUPS, default_interval
 
@@ -81,11 +83,22 @@ def _call(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 @plain_refusals
-class MetricsService:
-    def __init__(self, store: MetricsStore, db: Session, launcher: RunLauncher) -> None:
+class MetricsService(AccessBound):
+    """Aggregates of the tenant's runs. One agent's metrics are `read` on that agent; the tenant-wide aggregates (and the
+    breakdown by agent) span every resource, so they are the tenant's `read_telemetry` (admin): a viewer's visible set may
+    be narrower than the tenant and a total would leak what it may not read."""
+
+    def __init__(self, store: MetricsStore, db: Session, launcher: RunLauncher, access: Access | None = None) -> None:
         self.store = store
         self.db = db
         self.launcher = launcher
+        self._access = access  # None: no caller to check
+
+    def _authorize(self, q: MetricsQuery) -> None:
+        if q.agent_id is not None:
+            acl.require(self._access, "read", "agent", str(q.agent_id))
+        else:
+            acl.require(self._access, "read_telemetry", "tenant", None)
 
     def build_query(
         self,
@@ -124,6 +137,7 @@ class MetricsService:
     eap_run_store.metrics; `fallback_rate` null without agent chat requests or exhausted runs).
     Each period also has `recovered_runs`: the tenant's top-level runs that DBOS resumed at least once
     (`recovery_attempts > 1`, read from the DBOS system database) whose last update falls in the period."""
+        self._authorize(q)
         result = _call(self.store.summary, q, compare_previous=compare == "previous")
         prev = q.previous()
         result["current"]["recovered_runs"] = self._recovered_runs(q)
@@ -140,6 +154,7 @@ class MetricsService:
         }
 
     def timeseries(self, q: MetricsQuery, interval: str | None, metric: list[str] | None) -> dict[str, Any]:
+        self._authorize(q)
         chosen = interval or default_interval(q.start, q.end)
         buckets = _call(self.store.timeseries, q, chosen)
         only = list(dict.fromkeys(metric)) if metric else None
@@ -152,6 +167,7 @@ class MetricsService:
         }
 
     def breakdown(self, q: MetricsQuery, by: str, sort: str, limit: int, compare: str | None) -> dict[str, Any]:
+        self._authorize(q)
         items = _call(self.store.breakdown, q, by, sort=sort, limit=limit)
         previous: dict[str, dict[str, Any]] = {}
         if compare == "previous" and items:

@@ -12,11 +12,19 @@ import { TooltipProvider } from "@/components/ui/Tooltip";
 import { TestsTab } from "./TestsTab";
 import { AGENT, SUITE, callsTo, installFakeApi, suiteOf, type FakeApi } from "./evalsFakeApi";
 import { getSelectOption, optionsOf } from "@/test/select";
+import { fetchModels } from "@/components/agents/specSections";
+import { modelListLoaded } from "@/test/modelList";
 
 vi.mock("next/navigation", async () => (await import("@/test/nextRouterMock")).navigationModule);
+// The real loader (it reads the fake API), watched so a test can wait for the judge's model list.
+vi.mock("@/components/agents/specSections", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/agents/specSections")>();
+  return { ...actual, fetchModels: vi.fn(actual.fetchModels) };
+});
 
 let fake: FakeApi;
 beforeEach(() => {
+  vi.mocked(fetchModels).mockClear();
   fake = installFakeApi();
 });
 afterEach(() => {
@@ -86,6 +94,8 @@ describe("suite evaluators: all 8 kinds", () => {
     set(within(field).getByTestId("evaluator-field-value"), '"x"');
     set(within(await addEvaluator(sheet, "max_duration")).getByTestId("evaluator-seconds"), "2.5");
     set(within(await addEvaluator(sheet, "max_cost")).getByTestId("evaluator-usd"), "0.05");
+    // A new judge takes its model from the list, so the list must be there first.
+    await modelListLoaded(fetchModels);
     const judge = await addEvaluator(sheet, "llm_judge");
     set(within(judge).getByTestId("evaluator-rubric"), "Polite");
     fireEvent.click(within(judge).getByTestId("evaluator-include-input"));
@@ -214,6 +224,7 @@ describe("evaluator validation", () => {
 describe("the judge model picker", () => {
   it("offers the listed providers, and a provider's concrete models in a searchable list", async () => {
     const sheet = await openSuiteSheet();
+    await modelListLoaded(fetchModels);
     const judge = await addEvaluator(sheet, "llm_judge");
     const provider = await within(judge).findByTestId("model-picker-provider");
     expect(optionsOf(provider).map((o) => o.getAttribute("value"))).toEqual(["", "test", "openai"]);

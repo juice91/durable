@@ -33,6 +33,8 @@ fi
 
 # Export shared defaults before any service or migration starts.
 ensure_env
+ensure_local_admin_env
+ensure_studio_dev_env
 
 # If EAP_LITELLM_API_KEY_CMD is set, execute it to get the key
 if [[ -n "${EAP_LITELLM_API_KEY_CMD:-}" ]]; then
@@ -94,6 +96,11 @@ for service in "${SERVICES[@]}"; do
                     echo "ERROR: database migrations failed" >&2
                     exit 1
                 fi
+                # The branches of the IAM plug-ins listed in EAP_IAM_* that own tables (`localadmin`); else a no-op.
+                if ! uv run eap-db plugins upgrade; then
+                    echo "ERROR: plug-in database migrations failed" >&2
+                    exit 1
+                fi
             fi
             ;;
         worker|api|studio)
@@ -141,3 +148,6 @@ for service in "${SERVICES[@]}"; do
 done
 
 echo "[dev-up] All services started successfully"
+for service in "${SERVICES[@]}"; do
+    if [[ "$service" == api ]]; then print_dev_setup; fi
+done

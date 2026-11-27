@@ -84,7 +84,10 @@ def test_triggers_step_kinds_and_gaps_never_truncate_even_with_a_tiny_budget():
     gaps = section(block.text, "Known gaps")
     for gap in known_gaps():
         assert gap.id in gaps
-    assert "trigger.webhook [designed_not_built" in cap
+    # each trigger/step line carries whatever status the registry gives it today (no status is pinned here)
+    for entry in lines():
+        if entry.kind in ("trigger", "step"):
+            assert f"- {entry.id} [{entry.status}" in cap, entry.id
 
 
 def test_a_tenant_with_500_agents_truncates_with_counts_and_a_pointer():

@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from eap_api.deps import MemoryStoreDep, RunLauncherDep, SessionDep, StoresDep
 from eap_api.ports import RunLauncher
+from eap_api.service_deps.iam import AccessDep
+from eap_api.services.access import Access
 from eap_api.services.agents import AgentService
 from eap_api.services.conversations import ConversationService
 from eap_api.services.models import ModelService
@@ -19,23 +21,24 @@ from eap_run_store import MemoryStore, RunStore
 
 
 def build_conversation_service(
-    db: Session, run_store: RunStore, launcher: RunLauncher, memory: MemoryStore | None = None
+    db: Session, run_store: RunStore, launcher: RunLauncher, memory: MemoryStore | None = None,
+    access: Access | None = None,
 ) -> ConversationService:
     """A ConversationService without a Request (MCP control and the AG-UI helpers build theirs from the app)."""
-    return ConversationService(db, run_store, launcher, memory)
+    return ConversationService(db, run_store, launcher, memory, access)
 
 
 def get_conversation_service(
-    db: SessionDep, stores: StoresDep, launcher: RunLauncherDep, memory: MemoryStoreDep
+    db: SessionDep, stores: StoresDep, launcher: RunLauncherDep, memory: MemoryStoreDep, access: AccessDep
 ) -> ConversationService:
-    return build_conversation_service(db, stores[0], launcher, memory)
+    return build_conversation_service(db, stores[0], launcher, memory, access)
 
 
 ConversationServiceDep = Annotated[ConversationService, Depends(get_conversation_service)]
 
 
-def get_agent_service(db: SessionDep) -> AgentService:
-    return AgentService(db)
+def get_agent_service(db: SessionDep, access: AccessDep) -> AgentService:
+    return AgentService(db, access)
 
 
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
@@ -48,23 +51,23 @@ def get_request_context_service(db: SessionDep) -> RequestContextService:
 RequestContextServiceDep = Annotated[RequestContextService, Depends(get_request_context_service)]
 
 
-def get_tool_catalog() -> ToolService:
+def get_tool_catalog(access: AccessDep) -> ToolService:
     """The tool catalog needs no stores."""
-    return ToolService()
+    return ToolService(access=access)
 
 
 ToolCatalogDep = Annotated[ToolService, Depends(get_tool_catalog)]
 
 
-def get_tool_run_service(stores: StoresDep, launcher: RunLauncherDep) -> ToolService:
-    return ToolService(stores[0], launcher)
+def get_tool_run_service(stores: StoresDep, launcher: RunLauncherDep, access: AccessDep) -> ToolService:
+    return ToolService(stores[0], launcher, access)
 
 
 ToolRunServiceDep = Annotated[ToolService, Depends(get_tool_run_service)]
 
 
-def get_processor_service(db: SessionDep) -> ProcessorService:
-    return ProcessorService(db)
+def get_processor_service(db: SessionDep, access: AccessDep) -> ProcessorService:
+    return ProcessorService(db, access)
 
 
 ProcessorServiceDep = Annotated[ProcessorService, Depends(get_processor_service)]

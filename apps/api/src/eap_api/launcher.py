@@ -1,6 +1,6 @@
 """Starting runs on the orchestration side, per the run hand-off contract.
 
-docs/plans/2026-11-11-milestone-1-vertical-slice.md, "Run hand-off contract": the API never
+an internal design note, "Run hand-off contract": the API never
 imports worker code; it enqueues by name through `dbos.DBOSClient` against the DBOS system
 database, with workflow_id = run_id, so a repeated enqueue for the same run attaches to the
 existing workflow instead of starting a second one (DBOS's default

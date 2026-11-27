@@ -2,6 +2,7 @@
 // /api/v1/knowledge-bases/{kb}/sources) and the published "KB Source Synchronization" workflow
 // Studio starts syncs through. A connection holds `secret:<name>` references only: no value is ever
 // typed into, returned by or shown through this module.
+import { refusedMessage } from "./access";
 import { load as loadYaml } from "js-yaml";
 import { apiErrorFromResponse, apiHeaders, BASE_URL, type ApiError } from "./api";
 import { revisionKey, track, trackAll, writeResource } from "./revisions";
@@ -107,6 +108,8 @@ async function failure(response: Response): Promise<KbSourceError | ApiError> {
   let detail = "";
   try {
     const data = await response.json();
+    const refused = await refusedMessage(response.status, data);
+    if (refused) return new KbSourceError(response.status, "forbidden", refused);
     if (typeof data?.code === "string") code = data.code;
     if (typeof data?.detail === "string") detail = data.detail;
   } catch {

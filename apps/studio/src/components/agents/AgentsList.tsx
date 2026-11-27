@@ -1,5 +1,6 @@
 "use client";
 
+import { Can } from "@/lib/permissions";
 import React, { useEffect, useId, useState } from "react";
 import Link from "next/link";
 import { LayoutGrid, List } from "lucide-react";
@@ -204,15 +205,17 @@ export function AgentsListUI({
   const empty = archivedScope ? EMPTY_ARCHIVED : EMPTY;
   const unarchiveButton = (agent: AgentListItem) =>
     onUnarchive && archivedScope ? (
-      <Button
-        size="sm"
-        disabled={unarchivingId === agent.id}
-        aria-label={`Unarchive ${agent.name}`}
-        data-testid="agent-unarchive-row"
-        onClick={() => onUnarchive(agent)}
-      >
-        Unarchive
-      </Button>
+      <Can kind="agent" id={agent.id} action="archive">
+        <Button
+          size="sm"
+          disabled={unarchivingId === agent.id}
+          aria-label={`Unarchive ${agent.name}`}
+          data-testid="agent-unarchive-row"
+          onClick={() => onUnarchive(agent)}
+        >
+          Unarchive
+        </Button>
+      </Can>
     ) : null;
   const listColumns: DataListColumn<AgentListItem>[] =
     onUnarchive && archivedScope

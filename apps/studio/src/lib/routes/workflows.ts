@@ -1,7 +1,7 @@
 import { seg, withQuery } from "./query";
 
 /** The workflow detail page's tabs (SL.14). Graph is the default and is left out of URLs. */
-export const WORKFLOW_TABS = ["graph", "runs", "traces"] as const;
+export const WORKFLOW_TABS = ["graph", "runs", "traces", "access"] as const;
 export type WorkflowTab = (typeof WORKFLOW_TABS)[number];
 /** The detail page's own tab parameter (`/workflows/:id?tab=runs`). */
 export const WORKFLOW_TAB_PARAM = "tab";
@@ -11,9 +11,9 @@ export const WORKFLOW_TAB_PARAM = "tab";
  */
 export const WORKFLOW_TRACE_TAB_PARAM = "traceTab";
 
-/** The `?tab=` value of `/workflows/:id`: `runs`, else `graph`. (Traces is its own path.) */
+/** The `?tab=` value of `/workflows/:id`: `runs` or `access`, else `graph`. (Traces is its own path.) */
 export function parseWorkflowTab(raw: string | null | undefined): Exclude<WorkflowTab, "traces"> {
-  return raw === "runs" ? "runs" : "graph";
+  return raw === "runs" || raw === "access" ? raw : "graph";
 }
 
 /**
@@ -114,8 +114,8 @@ export const workflowRoutes = {
   /** `/workflows/:id[?tab=runs]`: the workflow detail page (Graph, or the Runs tab). */
   workflow: (id: string, { tab = null, collapsed = null }: WorkflowRouteOptions = {}): string =>
     `/workflows/${seg(id)}${query([
-      [WORKFLOW_TAB_PARAM, tab === "runs" ? "runs" : null],
-      [WORKFLOW_COLLAPSED_PARAM, tab === "runs" ? null : collapsedParam(collapsed)],
+      [WORKFLOW_TAB_PARAM, tab === "runs" || tab === "access" ? tab : null],
+      [WORKFLOW_COLLAPSED_PARAM, tab === "runs" || tab === "access" ? null : collapsedParam(collapsed)],
     ])}`,
   /** `/workflows/schedules`: every workflow schedule. */
   workflowSchedules: (): string => "/workflows/schedules",

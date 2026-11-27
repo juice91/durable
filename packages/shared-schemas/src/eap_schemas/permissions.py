@@ -12,6 +12,7 @@ places it could not resolve statically (`dynamic_paths`): a secret, host or agen
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -180,6 +181,30 @@ def implied_permissions(spec: dict[str, Any], kind: Literal["agent", "workflow"]
     return ImpliedReport(permissions=permissions, dynamic=bool(dynamic), dynamic_paths=tuple(dynamic))
 
 
+@dataclass(frozen=True)
+class GrantUses:
+    """What a spec uses that an admin must authorise (agent-bound grants): MCP servers by name and literal `secret:`
+    names. `dynamic` is true when some reference is computed at run time (only the static part is listed)."""
+
+    mcp_servers: tuple[str, ...] = ()
+    secrets: tuple[str, ...] = ()
+    dynamic: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.mcp_servers or self.secrets)
+
+
+def grant_uses(spec: dict[str, Any], kind: Literal["agent", "workflow"]) -> GrantUses:
+    """The MCP servers and secrets a stored spec uses, from the same extractor the implied-permissions report runs (so the
+    publish check, the migration report and the report endpoint cannot drift)."""
+    report = implied_permissions(spec if isinstance(spec, dict) else {}, kind)
+    return GrantUses(
+        mcp_servers=tuple(sorted({m.server for m in report.permissions.mcp})),
+        secrets=tuple(report.permissions.secrets),
+        dynamic=report.dynamic,
+    )
+
+
 __all__ = [
-    "AgentPermission", "ImpliedReport", "McpPermission", "Permissions", "implied_permissions",
+    "AgentPermission", "GrantUses", "ImpliedReport", "McpPermission", "Permissions", "grant_uses", "implied_permissions",
 ]

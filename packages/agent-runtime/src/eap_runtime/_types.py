@@ -55,6 +55,9 @@ class RunDeps:
     # The built-in Architect's recorded `eap.load_system_context` output ({"block", "provenance"}); None for every
     # other run. Read-only, rendered into the instructions by the worker; never stored or logged.
     system_context: dict[str, Any] | None = field(default=None, kw_only=True, repr=False, compare=False)
+    # The run acts for a person who may only read: it is offered read tools only and write tools refuse
+    # (eap_worker.read_only). Decided once, recorded with the run's start.
+    read_only: bool = field(default=False, kw_only=True)
 
 
 class SideEffectStore(Protocol):
