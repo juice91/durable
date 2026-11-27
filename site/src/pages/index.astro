@@ -1,0 +1,247 @@
+---
+import fs from "node:fs";
+import path from "node:path";
+import { Image } from "astro:assets";
+import Recorder from "../components/Recorder.astro";
+import { BASE, REPO_URL } from "../../scripts/config.mjs";
+import "../styles/fonts.css";
+import "../styles/tokens.css";
+import "../styles/landing.css";
+import approvalLight from "../../../docs/assets/studio/workflow-run-approval-light.png";
+import approvalDark from "../../../docs/assets/studio/workflow-run-approval-dark.png";
+import traceLight from "../../../docs/assets/studio/trace-spans-light.png";
+import traceDark from "../../../docs/assets/studio/trace-spans-dark.png";
+
+// The slide deck is kept in the public repository only (docs/slides); it is linked when the build has it.
+const slides = fs.existsSync(path.resolve(process.cwd(), "../docs/slides/index.html"));
+const home = `${BASE}/`;
+const docs = (slug = "") => `${BASE}/docs/${slug ? `${slug}/` : ""}`;
+const title = "Durable: AI agents and workflows that survive restarts";
+const description =
+  "A self-hosted, open-source platform for AI agents and workflows. Every step is recorded in Postgres: runs resume after a crash, wait for people, run on schedules and webhooks, and can be read back afterwards.";
+const canonical = new URL(home, Astro.site);
+
+const features = [
+  ["Agents", "guides/agents", "Versioned instructions, tools, knowledge, memory, guardrails, structured output and fallback models."],
+  ["Workflows", "guides/workflows", "Typed steps with branches, parallel paths, loops and judges. A workflow is data, checked before it is published."],
+  ["Approvals", "guides/approvals", "A run waits hours or days for a person, on a workflow step or before a tool call."],
+  ["Schedules", "guides/schedules", "Cron expressions with time zones. A missed window fires once."],
+  ["Webhooks", "guides/webhooks", "Signed inbound deliveries start a run, deduplicated and validated against a schema."],
+  ["Knowledge bases", "guides/knowledge-bases", "Upload or sync documents, embed them in pgvector and retrieve them with citations."],
+  ["MCP servers", "guides/mcp-servers", "Give agents the tools of your Model Context Protocol servers, under an outbound policy."],
+  ["External agents", "guides/external-agents", "Export chosen workflows to outside agents over MCP or A2A, with run-only keys."],
+  ["Observability", "guides/observability", "Event logs, traces, token usage and cost for every run, plus OTLP ingest from your own programs."],
+  ["Evals", "guides/eval-rules", "Test suites and scorers that check a published version before and after you change it."],
+  ["Identity and access", "guides/identity-and-access", "A built-in admin or ZITADEL sign-in, tenants, API keys, and roles with OpenFGA."],
+  ["AG-UI", "guides/ag-ui", "Connect an AG-UI frontend; it replays a run from the durable log after it reconnects."],
+];
+
+const steps = [
+  ["Get the code", "git clone https://github.com/juice91/durable.git && cd durable"],
+  ["Start the platform", "docker compose up -d --wait"],
+  ["Create your admin account", "docker compose exec api setup-link"],
+];
+---
+
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href={`${BASE}/favicon.svg`} type="image/svg+xml" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
+    <script is:inline>
+      // The same preference the documentation pages keep ("light", "dark", or empty for the system's).
+      (() => {
+        let saved = "";
+        try { saved = localStorage.getItem("starlight-theme") || ""; } catch {}
+        const system = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.dataset.theme = saved === "light" || saved === "dark" ? saved : system;
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="top wrap">
+      <a class="brand" href={home}><img src={`${BASE}/favicon.svg`} alt="" width="28" height="28" />Durable</a>
+      <nav aria-label="Site">
+        <a href={docs()}>Docs</a>
+        <a href={docs("quickstart")} class="wide">Quick start</a>
+        {slides && <a href={`${BASE}/slides/`}>Slides</a>}
+        <a href={REPO_URL}>GitHub</a>
+        <button type="button" data-theme-toggle hidden>Dark theme</button>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap">
+        <div class="pitch">
+          <h1>Agent runs that survive the crash</h1>
+          <p>
+            Durable is a self-hosted platform for AI agents and workflows. Every step is recorded in Postgres, so a restart
+            resumes a run from where it stopped, an approval can wait for days, and you can read back what happened.
+          </p>
+          <div class="actions">
+            <a class="button primary" href="#quick-start">Quick start</a>
+            <a class="button" href={docs()}>Read the docs</a>
+            <a class="button" href={REPO_URL}>View on GitHub</a>
+          </div>
+          <p class="fine">Apache-2.0. FastAPI, DBOS, Pydantic AI, Next.js and Postgres.</p>
+        </div>
+        <Recorder />
+      </section>
+
+      <section class="band" id="quick-start" aria-labelledby="qs">
+        <div class="wrap split">
+          <div>
+            <h2 id="qs">Running on your machine in three commands</h2>
+            <p>
+              You need Docker with Compose 2.24 or later, about 8 GB of memory for the first build and 5 GB of disk. The
+              platform starts without a model key; add one in <code>.env</code> when you want a real model to answer.
+            </p>
+            <p><a href={docs("quickstart")}>Providers, upgrades and backups</a></p>
+          </div>
+          <ol class="commands">
+            {steps.map(([label, command]) => (
+              <li>
+                <span>{label}</span>
+                <div class="command">
+                  <code>{command}</code>
+                  <button type="button" data-copy={command} hidden>Copy</button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </section>
+
+      <section class="wrap studio" aria-labelledby="st">
+        <h2 id="st">Studio shows the run, not just the result</h2>
+        <figure>
+          <div class="shot">
+            <Image src={approvalLight} widths={[640, 1100, 1600]} sizes="(min-width: 70rem) 68rem, 100vw" class="only-light" alt="Studio showing a workflow run paused at an approval step, with the Approve and Reject buttons beside the graph." />
+            <Image src={approvalDark} widths={[640, 1100, 1600]} sizes="(min-width: 70rem) 68rem, 100vw" class="only-dark" alt="Studio showing a workflow run paused at an approval step, with the Approve and Reject buttons beside the graph." />
+          </div>
+          <figcaption>A run waiting for a person. The graph shows what is done, what is waiting and what has not started.</figcaption>
+        </figure>
+        <figure>
+          <div class="shot">
+            <Image src={traceLight} widths={[640, 1100, 1600]} sizes="(min-width: 70rem) 68rem, 100vw" class="only-light" alt="Studio's trace view of a workflow run: duration, model requests, tokens and cost above a timeline of spans." />
+            <Image src={traceDark} widths={[640, 1100, 1600]} sizes="(min-width: 70rem) 68rem, 100vw" class="only-dark" alt="Studio's trace view of a workflow run: duration, model requests, tokens and cost above a timeline of spans." />
+          </div>
+          <figcaption>The same run as a trace: every loop iteration, agent call and model request, with tokens and cost. These screenshots use the scripted test models.</figcaption>
+        </figure>
+      </section>
+
+      <section class="band" aria-labelledby="why">
+        <div class="wrap">
+          <h2 id="why">Built for work you have to answer for</h2>
+          <div class="reasons">
+            <div>
+              <h3>Durable execution underneath</h3>
+              <p>One run is one durable workflow. Recorded steps are not run again, and a call whose outcome cannot be known stops the run instead of being repeated.</p>
+            </div>
+            <div>
+              <h3>Every run on the record</h3>
+              <p>A gap-free event log you can stream from any point, a trace with usage and cost, and a tenant audit log.</p>
+            </div>
+            <div>
+              <h3>Nothing goes live by accident</h3>
+              <p>Drafts change nothing. Published versions are immutable and earlier ones can be restored. What the built-in Architect drafts needs a person's approval to publish.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap" aria-labelledby="box">
+        <h2 id="box">What is in the box</h2>
+        <dl class="features">
+          {features.map(([name, slug, text]) => (
+            <div>
+              <dt><a href={docs(slug)}>{name}</a></dt>
+              <dd>{text}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section class="band" aria-labelledby="arch">
+        <div class="wrap">
+          <h2 id="arch">Three processes and one database</h2>
+          <p class="lead">The API and the worker never call each other. They meet in Postgres, which holds the definitions, the queue, the events and the workflow state. No Redis, no message broker.</p>
+          <div class="arch">
+            <ul class="edge" aria-label="Callers">
+              <li><b>Studio</b><span>the web console</span></li>
+              <li><b>Your applications</b><span>HTTP API, AG-UI</span></li>
+              <li><b>External agents</b><span>MCP, A2A</span></li>
+              <li><b>Other systems</b><span>signed webhooks</span></li>
+            </ul>
+            <p class="flow" aria-hidden="true"></p>
+            <div class="core">
+              <div class="node"><b>API</b><span>validates, authorises, records runs</span></div>
+              <p class="link">writes runs, reads events</p>
+              <div class="node db"><b>Postgres</b><span>definitions, runs, events, queue, workflow state, vectors</span></div>
+              <p class="link">takes work, writes steps</p>
+              <div class="node"><b>Worker</b><span>agents, workflows, schedules, ingest</span></div>
+            </div>
+            <p class="flow" aria-hidden="true"></p>
+            <ul class="edge" aria-label="What the worker calls">
+              <li><b>Model providers</b><span>OpenAI, Anthropic, compatible gateways</span></li>
+              <li><b>MCP servers and HTTP APIs</b><span>under an outbound policy</span></li>
+              <li><b>OpenTelemetry</b><span>traces to your collector</span></li>
+            </ul>
+          </div>
+          <p><a href={docs("concepts/architecture")}>How Durable works</a></p>
+        </div>
+      </section>
+
+      <section class="wrap closing" aria-labelledby="next">
+        <h2 id="next">Try it, then read how it works</h2>
+        <div class="actions">
+          <a class="button primary" href={docs("quickstart")}>Quick start</a>
+          <a class="button" href={docs()}>Documentation</a>
+          <a class="button" href={REPO_URL}>GitHub</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wrap">
+      <p>Durable is licensed under the <a href={`${REPO_URL}/blob/main/LICENSE`}>Apache License 2.0</a>.</p>
+      <p><a href={docs("contributing")}>Contributing</a> <a href={`${REPO_URL}/security/policy`}>Security policy</a> <a href={`${REPO_URL}/releases`}>Releases</a></p>
+    </footer>
+
+    <script>
+      const root = document.documentElement;
+      const toggle = document.querySelector<HTMLButtonElement>("[data-theme-toggle]")!;
+      const label = () => (toggle.textContent = root.dataset.theme === "dark" ? "Light theme" : "Dark theme");
+      toggle.addEventListener("click", () => {
+        root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+        try { localStorage.setItem("starlight-theme", root.dataset.theme); } catch {}
+        label();
+      });
+      toggle.hidden = false;
+      label();
+
+      if (navigator.clipboard) {
+        document.querySelectorAll<HTMLButtonElement>("[data-copy]").forEach((button) => {
+          button.hidden = false;
+          button.addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(button.dataset.copy!);
+              button.textContent = "Copied";
+              setTimeout(() => (button.textContent = "Copy"), 2000);
+            } catch {
+              button.textContent = "Select the text";
+            }
+          });
+        });
+      }
+    </script>
+  </body>
+</html>

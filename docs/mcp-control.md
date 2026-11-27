@@ -1,4 +1,4 @@
-# Controlling PydanticOS through MCP
+# Controlling Durable through MCP
 
 An external agent or client (Claude Code, Codex, another tenant's agent, an operator's script) can
 manage a tenant's platform through the [Model Context Protocol](https://modelcontextprotocol.io)
@@ -54,7 +54,7 @@ to call `agent.list`, or `agent.chat` with the Architect (below).
 
 1. Create a key with Connect over MCP (read), or Allow changes for mutations, in Settings → API keys and export it as `PYDANTICOS_API_KEY`.
 2. Register the server as above, then `claude mcp list` shows `pydanticos` connected.
-3. In Claude Code: "list my PydanticOS agents" calls `agent.list`.
+3. In Claude Code: "list my Durable agents" calls `agent.list`.
 4. "Ask the Architect to draft a support-triage agent" calls `agent.list` to find the Architect and
    `agent.chat`; approvals it asks for come back in `pending_approvals` and are decided with
    `approvals.decide` (or in Studio).

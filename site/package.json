@@ -1,0 +1,32 @@
+{
+  "name": "durable-site",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.15.9",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "dev": "node scripts/sync-docs.mjs && astro dev",
+    "build": "node scripts/sync-docs.mjs && astro build",
+    "preview": "astro preview",
+    "check-links": "node scripts/check-links.mjs dist",
+    "test": "node --test tests/*.test.mjs",
+    "verify": "pnpm test && pnpm build && pnpm check-links"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.0",
+    "@astrojs/starlight": "0.42.10",
+    "@fontsource-variable/archivo": "5.2.8",
+    "@fontsource/ibm-plex-mono": "5.2.7",
+    "astro": "7.4.9",
+    "cookie": "2.0.2",
+    "sharp": "0.35.5"
+  },
+  "//": "cookie is listed for resolution only: Astro leaves it external in the prerender code, Node then looks for it from dist/ upwards, and without it here an older copy in a parent folder of the checkout can break the build. pnpm.overrides sharp: astro resolves an older sharp whose bundled librsvg has GHSA-wq5f-xc86-pv6w.",
+  "pnpm": {
+    "overrides": {
+      "sharp": "0.35.5"
+    }
+  }
+}

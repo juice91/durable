@@ -98,6 +98,8 @@ def test_unrelated_members_are_untouched(workspace):
     [
         "docs/ci.md",
         "apps/docs/content/a.mdx",
+        "site/src/pages/index.astro",
+        "site/pnpm-lock.yaml",
         "README.md",
         "packages/base/README.md",
         "examples/a.py",

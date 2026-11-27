@@ -16,7 +16,7 @@ The Architect has three groups of tools.
 
 ### It discovers the control plane
 
-The control plane is the same one external agents drive over MCP ([Controlling PydanticOS through MCP](mcp-control.md)):
+The control plane is the same one external agents drive over MCP ([Controlling Durable through MCP](mcp-control.md)):
 test suites, cases, scorers and eval runs, schedules, knowledge base sources and syncs, MCP servers, connections and
 more. The Architect is not given a hand-picked subset. When a request is not covered by its other tools it calls
 `platform__list_capabilities` (optionally with a `query`, for example `eval` or `schedule`), which lists every control
