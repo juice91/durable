@@ -10,7 +10,8 @@ from collections.abc import Sequence
 
 from eap_iam.protocols import GROUP_IDENTITY, GROUP_POLICY
 from eap_iam.registry import PluginContext, register_local
-from eap_iam.types import AuthError, Decision, IdFilter, All, Principal, RequestView, ResourceRef
+from eap_iam.types import AuthError, Decision, IdFilter, All, PolicyUnavailable, Principal, RequestView, ResourceRef
+from eap_iam.use_grants import UseGrant
 
 _SAFE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -70,9 +71,38 @@ class FakePolicyEngine:
         return None
 
 
+class FakeGrantEngine(FakePolicyEngine):
+    """`FakePolicyEngine` that also keeps agent-bound grants in memory (`features` has `agent_grants`). `unavailable` makes
+    `used_by` fail like an engine that cannot answer."""
+
+    features = frozenset({"agent_grants"})
+
+    def __init__(self, allow: bool = True) -> None:
+        super().__init__(allow)
+        self.grants: set[tuple[str, str, str, str]] = set()  # (subject kind, subject id, resource kind, resource id)
+        self.unavailable = False
+        self.asked = 0
+
+    async def grant_use(self, grant: UseGrant) -> None:
+        self.grants.add((grant.subject.kind, str(grant.subject.id), grant.resource.kind, str(grant.resource.id)))
+
+    async def revoke_use(self, grant: UseGrant) -> None:
+        self.grants.discard((grant.subject.kind, str(grant.subject.id), grant.resource.kind, str(grant.resource.id)))
+
+    async def used_by(self, subject: ResourceRef, kind: str) -> list[str]:
+        self.asked += 1
+        if self.unavailable:
+            raise PolicyUnavailable("fake engine unavailable")
+        return sorted(r for sk, si, rk, r in self.grants if (sk, si, rk) == (subject.kind, str(subject.id), kind))
+
+    async def grantees(self, resource: ResourceRef) -> list[ResourceRef]:
+        found = [(sk, si) for sk, si, rk, r in self.grants if (rk, r) == (resource.kind, str(resource.id))]
+        return [ResourceRef(k, i, resource.tenant_id) for k, i in sorted(found)]
+
+
 def register_fakes() -> None:
     register_local(GROUP_IDENTITY, "fake", lambda ctx: FakeIdentityProvider())
     register_local(GROUP_POLICY, "fake", lambda ctx: FakePolicyEngine())
 
 
-__all__ = ["FakeIdentityProvider", "FakePolicyEngine", "PluginContext", "register_fakes"]
+__all__ = ["FakeGrantEngine", "FakeIdentityProvider", "FakePolicyEngine", "PluginContext", "register_fakes"]

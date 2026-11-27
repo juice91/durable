@@ -108,7 +108,7 @@ def test_a_valid_access_jwt_authenticates_with_the_email_as_the_subject(cf):
     r = cf.client.get("/api/v1/iam/capabilities", headers=cf.headers())
     assert r.status_code == 200
     body = r.json()
-    assert [p["name"] for p in body["identity"]] == ["apikey", "cfaccess", "devloopback"]
+    assert [p["name"] for p in body["identity"]] == ["apikey", "cfaccess", "devloopback", "webhook"]
     assert body["me"] == {
         "subject": EMAIL, "email": EMAIL, "tenant_id": cf.tenant, "kind": "user", "roles": [], "provider": "cf-access",
     }

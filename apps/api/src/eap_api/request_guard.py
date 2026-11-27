@@ -42,6 +42,9 @@ from starlette.concurrency import run_in_threadpool
 
 from eap_api.auth import Principal, current_principal
 from eap_api.text_checks import (  # noqa: F401 - re-exported: the checks live in a framework-free module
+    UTF8_BOM,
+    decode_utf8_json_body,
+    json_depth_exceeds,
     MAX_REPORTED_ERRORS,
     UNSTORABLE_ERROR_TYPE,
     unstorable_reason,
@@ -54,7 +57,6 @@ DEFAULT_MAX_BODY_DEPTH = 32
 INLINE_SCAN_MAX_BYTES = 256 * 1024
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
-UTF8_BOM = b"\xef\xbb\xbf"
 NOT_UTF8_DETAIL = "request body must be UTF-8 encoded JSON (no NUL bytes)"
 
 _STATE_KEY = "eap_unstorable_errors"
@@ -63,44 +65,6 @@ _LOC_PART_MAX = 100
 
 def too_large_detail(limit: int) -> str:
     return f"request body too large (max {limit} bytes)"
-
-
-def decode_utf8_json_body(body: bytes) -> str | None:
-    """The body as text, or None unless it is strict UTF-8 (an optional BOM) with no NUL byte.
-
-    FastAPI parses with json.loads(bytes), which guesses UTF-16/32 from BOMs and NUL bytes. A body
-    that passes here has neither (UTF-16 BOMs are not valid UTF-8, UTF-32's contain NUL), so
-    json.loads decodes it as UTF-8 too: the text scanned below is exactly the text parsed next."""
-    if b"\x00" in body:
-        return None
-    try:
-        return body.removeprefix(UTF8_BOM).decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return None
-
-
-def json_depth_exceeds(text: str, limit: int) -> bool:
-    """Whether JSON text nests objects/arrays deeper than ``limit``, by scanning its characters
-    (no parsing, no recursion); brackets inside strings are ignored."""
-    depth = 0
-    in_string = escaped = False
-    for char in text:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-        elif char in "[{":
-            depth += 1
-            if depth > limit:
-                return True
-        elif char in "]}":
-            depth -= 1
-    return False
 
 
 async def read_capped_body(

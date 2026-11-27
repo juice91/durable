@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FlaskConical, Plus } from "lucide-react";
@@ -146,7 +147,7 @@ export function TestsTab({ agentId }: { agentId: string }) {
 // ---------------------------------------------------------------------------- suite list
 
 /** The suites of an agent or a workflow, with the newest run of each (agent runs only: a workflow's
- * runs are read on Experiments). A row opens the suite on the target's Tests tab. */
+ * runs are read on Test runs (/experiments)). A row opens the suite on the target's Tests tab. */
 export function SuiteList({ target, runs }: { target: EvalTargetRef; runs: EvalRun[] | null }) {
   const router = useRouter();
   const isWorkflow = target.kind === "workflow";
@@ -155,7 +156,8 @@ export function SuiteList({ target, runs }: { target: EvalTargetRef; runs: EvalR
   const [error, setError] = useState<string | null>(null);
   const [key, setKey] = useState(0);
   const [creating, setCreating] = useState(false);
-  useCreateAction(() => setCreating(true));
+  const mayEdit = useCan(target.kind, target.id, "edit");
+  useCreateAction(mayEdit ? () => setCreating(true) : null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -190,7 +192,7 @@ export function SuiteList({ target, runs }: { target: EvalTargetRef; runs: EvalR
     },
   ];
 
-  const newSuiteButton = (
+  const newSuiteButton = !mayEdit ? null : (
     <Button variant="primary" size="sm" onClick={() => setCreating(true)} data-testid="eval-suite-new">
       <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
       New suite

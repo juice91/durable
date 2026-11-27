@@ -2,7 +2,7 @@
 // on the tool-run ledger (tool_id `mcp:<server id>/<tool>`), listed with the built-in tools' runs.
 import { apiErrorFromResponse, apiHeaders, BASE_URL } from "./api";
 import type { Run } from "./runs";
-import { mapToolRunError, type ToolRunAccepted } from "./toolRuns";
+import { toolRunFailure, type ToolRunAccepted } from "./toolRuns";
 import type { McpDiscoveredTool } from "./mcpServers";
 import type { ToolDefinition } from "./tools";
 
@@ -48,7 +48,7 @@ export async function startMcpToolRun(
     } catch {
       // Non-JSON error body: fall back to the status message.
     }
-    throw mapToolRunError(response.status, data, MCP_RUN_FALLBACKS);
+    throw await toolRunFailure(response.status, data, MCP_RUN_FALLBACKS);
   }
   return response.json();
 }

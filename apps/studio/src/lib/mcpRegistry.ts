@@ -2,7 +2,7 @@
  * Resolve a `github.com/mcp/<slug>` URL to a prefilled MCP server registration so a Studio user
  * can paste from the GitHub MCP registry (<https://github.com/mcp>) without retyping. Resolution
  * is purely client-side: no network call, no credentials. A tenant always enters their own auth
- * token in the Headers section; the registry never carries secrets (docs/plans/2026-11-15-milestone-mcp-catalog.md).
+ * token in the Headers section; the registry never carries secrets (an internal design note).
  *
  * Prefilled URLs are best-effort via a small in-source allowlist of well-known remote endpoints.
  * A slug not in the allowlist still prefills a safe-slugged `name` and leaves `url` null, so the

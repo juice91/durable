@@ -90,6 +90,7 @@ from eap_schemas import AgentSpec, approval_required_tool_names
 from eap_schemas.approvals import DEFAULT_APPROVAL_TIMEOUT_HOURS, EVAL_DENIED_MESSAGE, TIMED_OUT_MESSAGE, denial_message
 from eap_schemas.architect import CONTROL_TOOL_PREFIX
 from eap_schemas.http_request import http_request_secret_names
+from eap_worker.grants import denial_for_secrets
 from eap_schemas.tools import HTTP_REQUEST_TOOL_ID, builtin_tool_name
 from eap_schemas.output import MAX_OUTPUT_ERROR_BYTES, MAX_OUTPUT_ERRORS, OUTPUT_TOOL_NAME
 from eap_worker.crash import crash_point
@@ -679,7 +680,13 @@ class SpecCapability(AbstractCapability[Any]):
         person's approval, whatever the spec's `approvals`; one without runs as any tool. Pure (the
         approved re-run passes)."""
         if tool_def.name == HTTP_REQUEST_TOOL_NAME and not ctx.tool_call_approved and _names_secret(args):
-            raise ApprovalRequired()
+            # Agent-bound grants come first: a secret the run was not granted asks no one (the call is refused with
+            # `permission_denied` when it runs), so there is no approval card for it.
+            denial = await asyncio.to_thread(
+                denial_for_secrets, ctx.deps.tenant_id, getattr(ctx.deps, "run_id", None), http_request_secret_names(args)
+            )
+            if denial is None:
+                raise ApprovalRequired()
         return args
 
     async def handle_deferred_tool_calls(

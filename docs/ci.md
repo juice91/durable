@@ -1,11 +1,12 @@
 # Continuous integration
 
-Three workflows live in `.github/workflows/`:
+The test workflows live in `.github/workflows/`:
 
 | Workflow | Runs on | What it does |
 | --- | --- | --- |
 | `ci.yml` (**CI**) | pull requests, pushes to main, manual | Hosted runners: `python` (import contracts, DB-free unit tests), `studio` (lint, tsc), `studio-test` (five vitest shards), `deploy-checks` (manifests, workflow lint, deploy tests). A `changes` job decides which of them apply. |
 | `ci-heavy.yml` (**CI Heavy**) | same-repository pull requests, pushes to main, nightly, manual | The self-hosted Mac Studio: Postgres-backed package suites, run-store suite and API suite. The nightly adds the worker suite and the recovery suite. |
+| `compose.yml` (**Compose quick start**) | pull requests that touch the quick start, pushes to main that touch what its images carry, nightly, manual | Builds the images, runs `docker compose up` from fresh volumes, creates the admin with the setup code, signs in, starts it again and removes it (`scripts/ci/compose_smoke.py`). Afterwards it removes its images and caps the build cache (`scripts/ci/compose_runner.sh`). Not part of the deploy gate. |
 | `deploy.yml` | manual | The deploy gate needs CI and CI Heavy green on the commit (or on an identical tree). |
 
 ## What runs on a pull request
@@ -45,7 +46,7 @@ First match wins, per changed file:
 | --- | --- |
 | `docs/`, `apps/docs/`, `examples/`, `spikes/`, `.planning/`, any `*.md` | No tests. (CI Heavy does not start for these at all.) |
 | `apps/studio/`, `package.json`, `pnpm-*.yaml`, `.npmrc` | Studio tests only, no Python tests. |
-| `tests/deploy/`, `deploy/`, `.dockerignore`, other `.github/` files | The deploy checks (their own `deploy-checks` job), no member tests. |
+| `tests/deploy/`, `deploy/`, `compose.yaml`, `.dockerignore`, other `.github/` files | The deploy checks (their own `deploy-checks` job), no member tests. |
 | root `pyproject.toml`, `uv.lock`, `.github/workflows/ci*.yml`, `scripts/ci/`, any `conftest.py`, the rest of `tests/` | **Everything.** |
 | `packages/db` | Everything: its pytest plugin (`eap_db.testing`) loads in every session. |
 | the model modules `eap_db` imports (`eap_api/models.py`, `eap_api/{mcp_servers,workflows}/models.py`, `eap_worker/tickets.py`) | Everything, for the same reason. |
@@ -104,7 +105,7 @@ What changes while it is set:
 - Pull request jobs run only for branches of this repository (the same guard as CI Heavy); a pull
   request from a fork gets no CI jobs rather than running its code on the Studio.
 - The five Studio shards queue behind each other on the four runners instead of running in parallel,
-  and the four share one Mac, so they also compete for CPU (`deploy/runner/README.md`).
+  and the four share one Mac, so they also compete for CPU.
   Each job has a `timeout-minutes` so a stuck job cannot hold a runner.
 - Nothing else differs: the token stays `contents: read`, and the job names the deploy gate reads are the same.
 

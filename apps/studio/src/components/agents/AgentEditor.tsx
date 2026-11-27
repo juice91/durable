@@ -26,6 +26,8 @@ export interface AgentEditorStepper {
 }
 
 interface AgentEditorProps {
+  /** The caller may not change the agent: the fields are shown, disabled, and there is no submit. */
+  readOnly?: boolean;
   initialData?: AgentSpec;
   onSubmit: (spec: AgentSpec) => Promise<void>;
   submitLabel: string;
@@ -52,7 +54,7 @@ const NO_LOCATIONS: readonly (readonly (string | number)[])[] = [];
  * (`stepper/registry.ts`) with it. Every step stays mounted; under the stepper only the active one
  * is shown, so a step's own state (loaded MCP tools, an open picker) survives switching steps.
  */
-export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError = null, serverErrorLocations = NO_LOCATIONS, stepper, steps = EDITOR_STEPS }: AgentEditorProps) {
+export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange, serverError = null, serverErrorLocations = NO_LOCATIONS, stepper, steps = EDITOR_STEPS, readOnly = false }: AgentEditorProps) {
   const [draft, setDraft] = useState<EditorDraft>(() => draftFromSpec(initialData));
   const [submitting, setSubmitting] = useState(false);
   const instructionsRef = useRef<HTMLTextAreaElement>(null);
@@ -100,7 +102,7 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (submitting) return;
+    if (readOnly || submitting) return;
     if (stepper) {
       // Hidden steps' inputs cannot show the browser's own message: open the step first.
       const missing = missingFields(draft, spec, steps)[0];
@@ -175,12 +177,15 @@ export function AgentEditor({ initialData, onSubmit, submitLabel, onDirtyChange,
             {readableError(stepAlert)}
           </div>
         ) : null}
-        <step.Component {...stepProps} />
+        {/* A disabled fieldset disables every control inside it; `contents` keeps the layout. */}
+        <fieldset disabled={readOnly} className="contents">
+          <step.Component {...stepProps} />
+        </fieldset>
       </section>
     );
   });
 
-  const submitButton = (
+  const submitButton = readOnly ? null : (
     <Button type="submit" disabled={submitting} variant={stepper ? (stepper.submitVariant ?? "secondary") : "primary"} size={stepper ? "sm" : "lg"} className={stepper ? undefined : "w-full"}>
       {submitting ? "Saving..." : submitLabel}
     </Button>

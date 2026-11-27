@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { StatusPill } from "@/components/runs/StatusPill";
@@ -23,6 +24,7 @@ import { PageHeader } from "@/components/frame/PageHeader";
 import { TraceLink } from "@/components/traces/TraceLink";
 import { WorkflowCanvas, WorkflowStepList } from "./WorkflowGraph";
 import { StepIoPanel } from "./StepIoPanel";
+import { StepExplanation } from "./StepExplanation";
 import { useWorkflowExplanation } from "@/lib/workflowExplanations";
 import { ApprovalCard, formatDateTime } from "@/components/approvals/ApprovalCard";
 import { formatRunDuration } from "./WorkflowRunHistory";
@@ -120,8 +122,9 @@ export function WorkflowRunView({
   const setCollapsed = onCollapsedLoopsChange ?? setOwnCollapsed;
   const [run, setRun] = useState<Run | null>(null);
   const [spec, setSpec] = useState<WorkflowSpec | null>(null);
-  // The cached AI explanation of the run's workflow version: each step's note shows in its panel (never generated here).
-  const aiNotes = useWorkflowExplanation(run?.workflow_id ?? "", run?.workflow_version ?? null).notes;
+  // The cached AI explanation of the run's workflow version: the selected step's note shows in its panel,
+  // which also offers an explicit 「產生說明」 (never generated automatically).
+  const explanationControl = useWorkflowExplanation(run?.workflow_id ?? "", run?.workflow_version ?? null);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [status, setStatus] = useState<RunStatus>("queued");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -281,6 +284,7 @@ export function WorkflowRunView({
     <span data-testid="workflow-run-cancelled-secondary" className="text-caption text-muted-foreground">cancelled</span>
   ) : null;
   const effectiveWorkflowId = run?.workflow_id ?? workflowId ?? null;
+  const mayRun = useCan("workflow", effectiveWorkflowId ?? undefined, "run") || effectiveWorkflowId === null;
   // The newest later run that re-ran this one, from the workflow's run history (no extra API).
   // The "Scheduled: <name>" lookup reads the first 200 schedules (one request, no paging loop); a deleted
   // or uncached schedule leaves the name null and the tag reads plain "Scheduled".
@@ -358,7 +362,7 @@ export function WorkflowRunView({
             )}
           </span>
           <RecoveredBadge run={run} />
-          {canCancel ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
+          {canCancel && mayRun ? <CancelRunButton runId={runId} cancelRequested={view.cancelRequested} onSettled={() => void refresh()} /> : null}
           {run && onRerunStarted && isTerminal(view.status) ? <RerunButton run={run} onStarted={onRerunStarted} /> : null}
         </>
       }
@@ -396,6 +400,7 @@ export function WorkflowRunView({
       {view.waiting.map((id) => view.steps[id]?.pause ? (
         <PausedBanner
           key={id}
+          workflowId={effectiveWorkflowId}
           runId={runId}
           stepId={id}
           deadline={view.steps[id]?.deadline ?? null}
@@ -407,6 +412,7 @@ export function WorkflowRunView({
       ) : (
         <ApprovalCard
           key={id}
+          subject={effectiveWorkflowId ? { kind: "workflow", id: effectiveWorkflowId } : null}
           approval={{ kind: "step", runId, stepId: id, prompt: view.steps[id]?.prompt ?? null, deadline: view.steps[id]?.deadline ?? null, resumeSchema: (view.steps[id]?.resumeSchema as JsonSchema | null | undefined) ?? null }}
           onRefresh={refresh}
           onDecided={() => {
@@ -417,7 +423,7 @@ export function WorkflowRunView({
     </section>
   ) : null;
   const floatingDetail = selectedDetail && layout.stepDetail === "floating" ? (
-    <StepIoPanel aiNote={selectedStep ? aiNotes.get(selectedStep.id) ?? null : null} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
+    <StepIoPanel explanation={<StepExplanation control={explanationControl} stepId={selectedDetail.stepId} published />} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="pointer-events-auto min-w-0 space-y-3 rounded-lg border border-border bg-surface-raised p-4 shadow-overlay">{loopExtras}</StepIoPanel>
   ) : null;
   const rightLeft = layout.leftOccupied > 0 ? layout.leftOccupied + 2 * CANVAS_INSET_PX : CANVAS_INSET_PX;
 
@@ -608,7 +614,7 @@ export function WorkflowRunView({
           <SheetContent size="md" aria-describedby={undefined} data-testid="workflow-step-sheet">
             <SheetHeader title={`Step ${selectedDetail.stepId}`} />
             <SheetBody>
-              <StepIoPanel aiNote={selectedStep ? aiNotes.get(selectedStep.id) ?? null : null} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
+              <StepIoPanel explanation={<StepExplanation control={explanationControl} stepId={selectedDetail.stepId} published />} step={selectedStep} detail={selectedDetail} iterationLabel={iterationLabel} iterations={selectedPager?.iterations} onClose={() => setSelected(null)} className="min-w-0 space-y-3">{loopExtras}</StepIoPanel>
             </SheetBody>
           </SheetContent>
         </Sheet>

@@ -24,6 +24,9 @@ from eap_api.models import AgentModel
 from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, NotFound, Unavailable
 from eap_observability.redaction import log_failure
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
+from eap_api.services.run_access import authorize_run
 from eap_run_store import RunStore
 
 log = logging.getLogger("eap_api")
@@ -310,10 +313,14 @@ def _unprocessable(message: str) -> InvalidInput:
 
 
 @plain_refusals
-class LogService:
-    def __init__(self, run_store: RunStore, db: Session) -> None:
+class LogService(AccessBound):
+    """Log search. A run's logs are `read` on its agent or workflow, an agent's `read` on the agent; a search over the whole
+    tenant spans every resource, so it is the tenant's `read_telemetry` (admin, as for the tenant-wide metrics)."""
+
+    def __init__(self, run_store: RunStore, db: Session, access: Access | None = None) -> None:
         self.run_store = run_store
         self.db = db
+        self._access = access  # None: no caller to check
 
     def search(
         self,
@@ -345,6 +352,12 @@ class LogService:
             )
             if agent is None:
                 raise NotFound("Agent not found")
+        if run is not None:
+            authorize_run(self._access, run_store, run)
+        if agent_id is not None:
+            acl.require(self._access, "read", "agent", str(agent_id))
+        if run is None and agent_id is None:
+            acl.require(self._access, "read_telemetry", "tenant", None)
 
         if _before_epoch(from_) or _before_epoch(to):
             raise _unprocessable("from and to must not be before 1970-01-01")

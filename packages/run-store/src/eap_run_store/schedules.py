@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -114,12 +115,16 @@ class ScheduleStore:
 
     def list(
         self, tenant_id: str, workflow_id: str | None = None, limit: int = 50, before: RunCursor | None = None,
+        schedule_ids: Sequence[str] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Newest first by (created_at, id). The second item is an opaque cursor when a full page
-        came back (pass it as `before`), else None."""
+        came back (pass it as `before`), else None. `schedule_ids` limits the list to those schedules (per-resource
+        access); None is no limit."""
         stmt = select(WorkflowScheduleModel).where(WorkflowScheduleModel.tenant_id == tenant_id)
         if workflow_id is not None:
             stmt = stmt.where(WorkflowScheduleModel.workflow_id == str(workflow_id))
+        if schedule_ids is not None:
+            stmt = stmt.where(WorkflowScheduleModel.id.in_(list(schedule_ids)))
         if before is not None:
             stmt = stmt.where(
                 tuple_(WorkflowScheduleModel.created_at, WorkflowScheduleModel.id)

@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useEffect, useRef, useState } from "react";
 import { ToolRunError } from "@/lib/toolRuns";
 import type { Run } from "@/lib/runs";
@@ -31,6 +32,7 @@ export interface RerunButtonProps {
 export function RerunButton({ run, onStarted, size = "sm" }: RerunButtonProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mayRun = useCan("workflow", run.workflow_id ?? undefined, "run");
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -40,7 +42,7 @@ export function RerunButton({ run, onStarted, size = "sm" }: RerunButtonProps) {
   }, []);
 
   const input = parseRunInput(run.input);
-  if (run.kind !== "workflow" || !run.workflow_id || run.workflow_version == null || input === null) return null;
+  if (run.kind !== "workflow" || !run.workflow_id || run.workflow_version == null || input === null || !mayRun) return null;
   const workflowId = run.workflow_id;
   const version = run.workflow_version;
   const rerunOf = run.run_id;

@@ -1,5 +1,5 @@
 # OpenFGA model tests (`fga model test --tests durable.fga.yaml`). Section 2.2 matrix, per-resource grants (2.3),
-# `usable_by`, run inheritance and tenant isolation. Roles are stored tuples here; on a live platform they arrive as
+# agent-bound grants (granted_to / can_use_as_agent), run inheritance and tenant isolation. Roles are stored tuples here; on a live platform they arrive as
 # contextual tuples (docs/iam.md), which the integration test exercises against a real OpenFGA.
 name: durable authorization model
 model_file: ./durable.fga
@@ -27,11 +27,13 @@ tuples:
   - {user: tenant:acme, relation: tenant, object: secret:acme/r2}
   - {user: user:rita, relation: runner, object: workflow:acme/r1}
   - {user: user:abel, relation: approver, object: workflow:acme/r1}
-  - {user: tenant:acme#editor, relation: usable_by, object: secret:acme/r1}
   - {user: workflow:acme/r1, relation: parent, object: run:acme/run1}
   - {user: agent:acme/r1, relation: parent, object: run:acme/run2}
   - {user: user:ann, relation: owner, object: workflow:acme/r1}
   - {user: user:ann, relation: editor, object: tenant:acme}
+  - {user: agent:acme/r1, relation: granted_to, object: mcp_server:acme/r1}
+  - {user: agent:acme/r1, relation: granted_to, object: secret:acme/r1}
+  - {user: workflow:acme/r1, relation: granted_to, object: secret:acme/r1}
 tests:
   - name: "matrix agent: roles"
     check:
@@ -185,7 +187,7 @@ tests:
           can_read: true
           can_edit: false
           can_archive: false
-          can_grant_use: true
+          can_grant_use: false
       - user: user:alice
         object: mcp_server:acme/r1
         assertions:
@@ -194,7 +196,7 @@ tests:
           can_archive: true
           can_grant_use: true
           can_manage_access: true
-  - name: "matrix: secrets (metadata for everyone, writes for admins, use only where marked)"
+  - name: "matrix: secrets (metadata for everyone, writes and grants for admins)"
     check:
       - user: user:vera
         object: secret:acme/r1
@@ -209,7 +211,7 @@ tests:
           can_read: true
           can_edit: false
           can_archive: false
-          can_grant_use: true
+          can_grant_use: false
       - user: user:eddie
         object: secret:acme/r2
         assertions:
@@ -233,7 +235,7 @@ tests:
         assertions:
           can_edit: true
           can_archive: true
-          can_grant_use: true
+          can_grant_use: false
   - name: "matrix: API keys (admin only)"
     check:
       - user: user:vera
@@ -293,6 +295,79 @@ tests:
           can_manage_members: true
           can_read_audit: true
           can_manage_settings: true
+  - name: "matrix: external access (external agents)"
+    check:
+      - user: user:vera
+        object: tenant:acme
+        assertions:
+          can_manage_external_access: false
+          can_read_external_access: false
+      - user: user:eddie
+        object: tenant:acme
+        assertions:
+          can_manage_external_access: false
+          can_read_external_access: true
+      - user: user:alice
+        object: tenant:acme
+        assertions:
+          can_manage_external_access: true
+          can_read_external_access: true
+      - user: user:zed
+        object: tenant:acme
+        assertions:
+          can_manage_external_access: false
+          can_read_external_access: false
+  - name: "matrix: tenant-wide data and telemetry (P2b wave 2)"
+    check:
+      - user: user:vera
+        object: tenant:acme
+        assertions:
+          can_read: true
+          can_write: false
+          can_run: false
+          can_manage_connections: false
+          can_read_telemetry: false
+          can_otlp: false
+      - user: user:eddie
+        object: tenant:acme
+        assertions:
+          can_read: true
+          can_write: true
+          can_run: true
+          can_manage_connections: false
+          can_read_telemetry: false
+          can_otlp: false
+      - user: user:alice
+        object: tenant:acme
+        assertions:
+          can_write: true
+          can_run: true
+          can_manage_connections: true
+          can_read_telemetry: true
+          can_otlp: true
+      - user: user:zed
+        object: tenant:acme
+        assertions:
+          can_write: false
+          can_read_telemetry: false
+  - name: "matrix: an MCP server is used (run) by editors and admins, not viewers"
+    check:
+      - user: user:vera
+        object: mcp_server:acme/r1
+        assertions:
+          can_read: true
+          can_run: false
+          can_edit: false
+      - user: user:eddie
+        object: mcp_server:acme/r1
+        assertions:
+          can_run: true
+          can_edit: false
+      - user: user:alice
+        object: mcp_server:acme/r1
+        assertions:
+          can_run: true
+          can_edit: true
   - name: "grant: a runner grant on one workflow lets a viewer run exactly that workflow"
     check:
       - user: user:rita
@@ -466,8 +541,6 @@ tests:
       - user: user:eddie
         type: secret
         assertions:
-          can_grant_use:
-            - secret:acme/r1
           can_read:
             - secret:acme/r1
             - secret:acme/r2
@@ -476,3 +549,49 @@ tests:
         assertions:
           can_read:
             - agent:other/r9
+  - name: "grants: granted agent allowed, ungranted refused"
+    check:
+      - {user: "agent:acme/r1", object: "mcp_server:acme/r1", assertions: {can_use_as_agent: true}}
+      - {user: "agent:acme/r2", object: "mcp_server:acme/r1", assertions: {can_use_as_agent: false}}
+  - name: "grants: a server grant does not grant its secrets; a secret ref needs its own grant"
+    check:
+      - {user: "agent:acme/r1", object: "secret:acme/r1", assertions: {can_use_as_agent: true}}
+      - {user: "agent:acme/r2", object: "secret:acme/r1", assertions: {can_use_as_agent: false}}
+  - name: "grants: workflow is a grantee"
+    check:
+      - {user: "workflow:acme/r1", object: "secret:acme/r1", assertions: {can_use_as_agent: true}}
+      - {user: "workflow:acme/r2", object: "secret:acme/r1", assertions: {can_use_as_agent: false}}
+  - name: "grants: only admins grant; roles never imply agent use"
+    check:
+      - {user: "user:alice", object: "secret:acme/r1", assertions: {can_grant_use: true, can_use_as_agent: false}}
+      - {user: "user:alice", object: "mcp_server:acme/r1", assertions: {can_grant_use: true, can_use_as_agent: false}}
+      - {user: "user:eddie", object: "mcp_server:acme/r1", assertions: {can_grant_use: false}}
+      - {user: "user:eddie", object: "secret:acme/r1", assertions: {can_grant_use: false}}
+      - {user: "user:owen", object: "secret:acme/r2", assertions: {can_grant_use: false, can_use_as_agent: false}}
+  - name: "grants: no tuple refuses; tenant isolation"
+    check:
+      - {user: "agent:acme/r1", object: "secret:acme/r2", assertions: {can_use_as_agent: false}}
+      - {user: "agent:other/r9", object: "secret:acme/r1", assertions: {can_use_as_agent: false}}
+  - name: "grants: list what an agent may use"
+    list_objects:
+      - user: "agent:acme/r1"
+        type: secret
+        assertions:
+          can_use_as_agent:
+            - secret:acme/r1
+      - user: "agent:acme/r1"
+        type: mcp_server
+        assertions:
+          can_use_as_agent:
+            - mcp_server:acme/r1
+  - name: "role grants: a role and the roles above it, on that resource only"
+    tuples:
+      - {user: "tenant:acme#viewer", relation: runner, object: workflow:acme/r2}
+      - {user: "tenant:acme#editor", relation: approver, object: agent:acme/r2}
+    check:
+      - {user: "user:vera", object: "workflow:acme/r2", assertions: {can_run: true, can_edit: false, can_approve: false}}
+      - {user: "user:vera", object: "workflow:acme/r1", assertions: {can_run: false}}
+      - {user: "user:eddie", object: "agent:acme/r2", assertions: {can_approve: true}}
+      - {user: "user:vera", object: "agent:acme/r2", assertions: {can_approve: false}}
+      - {user: "user:eddie", object: "agent:acme/r1", assertions: {can_approve: false}}
+      - {user: "user:zed", object: "workflow:acme/r2", assertions: {can_read: false, can_run: false}}

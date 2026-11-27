@@ -78,6 +78,11 @@ export function ProvidersSettings({ embedded = false }: { embedded?: boolean } =
           Read-only. Provider keys come from the server&apos;s environment (deployment secrets); Studio never shows or stores them. Which models an agent may use is set by the platform allowlist (EAP_ALLOWED_MODELS).
         </p>
       </div>
+      {providers && providers.length > 0 && providers.every((p) => p.status === "not_configured") ? (
+        <p className="min-w-0 break-words rounded-lg border border-border p-3 text-label text-foreground" data-testid="providers-none-configured">
+          No model provider is configured yet. Set the key variable of one of the providers below in the server&apos;s environment and restart. With Docker Compose, put it in <code className="font-mono">.env</code> next to <code className="font-mono">compose.yaml</code> and run <code className="font-mono">docker compose up -d</code>.
+        </p>
+      ) : null}
       {error ? (
         <div role="alert" className="flex flex-wrap items-center gap-2 text-label text-destructive-text">
           <span className="min-w-0 break-words">{error}</span>

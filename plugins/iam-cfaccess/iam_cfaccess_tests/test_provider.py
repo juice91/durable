@@ -204,3 +204,41 @@ def test_a_fetch_error_with_an_empty_cache_fails_closed():
     fetcher.fail = True
     with pytest.raises(JwksUnavailable):
         key_for(cache(fetcher, clock), "k1")
+
+
+# ---- F1: legacy, single-tenant only (tenant provisioning design, 0.1) -------------------------------------------------
+# Access has no tenant concept: every Access-authenticated person becomes a user of one tenant. With a second tenant that
+# is a way into the first one, so the plug-in refuses to start as soon as the configuration names another tenant.
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"EAP_ZITADEL_ORG_TENANT_MAP": "org-1=studio,org-2=acme"},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": "org-2=acme"},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": '{"org-1": "studio", "org-2": "acme"}'},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": "{not json"},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": "garbage"},
+        {"EAP_TENANT_REGISTRY": "enforce"},
+    ],
+    ids=repr,
+)
+def test_cfaccess_refuses_to_start_when_there_is_more_than_one_tenant(extra):
+    with pytest.raises(IamConfigError, match="single-tenant"):
+        provider(**extra)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": ""},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": "org-1=studio"},
+        {"EAP_ZITADEL_ORG_TENANT_MAP": ' {"org-1": "studio"} '},
+        {"EAP_TENANT_REGISTRY": "off"},
+    ],
+    ids=repr,
+)
+def test_cfaccess_still_starts_for_its_one_tenant_and_warns_that_it_is_legacy(extra, caplog):
+    assert provider(**extra).tenant_id == TENANT
+    assert any(r.levelno == logging.WARNING and "legacy" in r.getMessage() for r in caplog.records)

@@ -31,6 +31,7 @@ export function MembersSection() {
   const [caps, setCaps] = useState<IamCapabilities | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [mutable, setMutable] = useState(false);
+  const [canCreate, setCanCreate] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -46,6 +47,7 @@ export function MembersSection() {
       const list = await listMembers();
       setMembers(list.items);
       setMutable(list.mutable);
+      setCanCreate(list.canCreateUsers);
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -75,13 +77,14 @@ export function MembersSection() {
   };
 
   const idp = caps?.membership?.name ? providerLabel(caps.membership.name) : "the identity provider";
+  const builtIn = caps?.membership?.name === "localadmin";
   return (
     <section aria-labelledby="settings-members" data-testid="settings-members" className="flex min-w-0 flex-col gap-3 rounded-lg border border-border p-4">
       <div className="flex min-w-0 flex-col gap-1">
         <h2 id="settings-members" className="text-title font-semibold text-foreground">Members</h2>
         <p className="text-label text-muted-foreground">
-          Who can sign in to this tenant and what they may do: admin (everything), editor (build and run), viewer (read). Changes are
-          made in {idp}, the single source of truth.
+          Who can sign in to this tenant and what they may do: admin (everything), editor (build and run), viewer (read).{" "}
+          {builtIn ? "This deployment has one built-in admin account." : `Changes are made in ${idp}, the single source of truth.`}
         </p>
         {membersAreOpen(caps) ? (
           <p data-testid="members-open-notice" className="text-label text-muted-foreground">
@@ -89,7 +92,13 @@ export function MembersSection() {
           </p>
         ) : null}
         {!loading && !mutable && !error ? (
-          <p data-testid="members-readonly" className="text-label text-muted-foreground">Read only: members are managed in {idp}.</p>
+          <p data-testid="members-readonly" className="text-label text-muted-foreground">{builtIn ? "Read only. For several users or roles, switch this deployment to ZITADEL." : `Read only: members are managed in ${idp}.`}</p>
+        ) : null}
+        {mutable && !canCreate ? (
+          <p data-testid="members-no-create" className="text-label text-muted-foreground">
+            New users cannot be created from here for this organisation. Create the person in the {idp} console first, then add
+            them here with the same e-mail address and give them a role.
+          </p>
         ) : null}
       </div>
       {mutable ? (
@@ -112,7 +121,7 @@ export function MembersSection() {
               {MEMBER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </label>
-          <Button type="submit" data-testid="members-invite-submit" disabled={busy !== null || !email.trim()}>Invite</Button>
+          <Button type="submit" data-testid="members-invite-submit" disabled={busy !== null || !email.trim()}>{canCreate ? "Invite" : "Add member"}</Button>
         </form>
       ) : null}
       {error ? <p role="alert" data-testid="members-error" className="text-label text-destructive-text">{error}</p> : null}

@@ -136,7 +136,10 @@ def test_the_architect_gets_the_recorded_block_an_event_and_one_extra_step(worke
     out = row["output"]
     assert out.startswith("Instructions: BASE-INSTRUCTIONS\n\n" + BLOCK_OPEN)
     block = block_in(out)
-    assert "trigger.webhook [designed_not_built" in block and "gap.inbound_webhook" in block
+    for entry in collect_declared():  # each trigger carries the status the registry gives it now, never a pinned one
+        if entry.kind == "trigger":
+            assert f"- {entry.id} [{entry.status}" in block, entry.id
+    assert all(gap.id in block for gap in known_gaps())
     assert "Support triage" in block and "slack-token" in block  # names, inside the untrusted element
     names = step_names(worker.settings.dbos_system_schema, run_id)
     assert names.count("eap.load_system_context") == 1

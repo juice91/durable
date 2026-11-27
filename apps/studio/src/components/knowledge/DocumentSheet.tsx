@@ -1,5 +1,6 @@
 "use client";
 
+import { useKnowledgePermissions } from "./useKnowledgePermissions";
 import React, { useEffect, useState } from "react";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
 import { TraceLink } from "@/components/traces/TraceLink";
@@ -66,6 +67,7 @@ export const DOCUMENT_POLL_MS = 3_000;
  * with it).
  */
 export function DocumentSheet({ kbId, documentKey, listed, progress, startedRuns, onOpenChange, onDeleted, onLoaded, onReextracted, pollMs = DOCUMENT_POLL_MS }: DocumentSheetProps) {
+  const mayEdit = useKnowledgePermissions(kbId).can("edit");
   const [loaded, setLoaded] = useState<KnowledgeDocument | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -254,7 +256,7 @@ export function DocumentSheet({ kbId, documentKey, listed, progress, startedRuns
             }
             description={<span className="font-mono">{documentKey}</span>}
             actions={
-              doc ? (
+              doc && mayEdit ? (
                 <>
                   <Button size="sm" variant="ghost" onClick={openReextract} disabled={isIngestInFlight(doc)} data-testid="knowledge-document-reextract">
                     Re-extract

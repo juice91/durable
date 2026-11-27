@@ -55,10 +55,10 @@ afterEach(() => {
 });
 
 describe("Evaluation navigation", () => {
-  it("shows the Evaluation group with Scorers, Test suites and Experiments", () => {
+  it("shows the Evaluation group with Scorers, Test suites and Test runs", () => {
     const section = navSections.find((s) => s.group.id === "evaluation");
     expect(section?.group.title).toBe("Evaluation");
-    expect(section?.items.map((i) => i.label)).toEqual(["Test suites", "Scorers", "Experiments"]);
+    expect(section?.items.map((i) => i.label)).toEqual(["Test suites", "Scorers", "Test runs"]);
     expect(section?.items.map((i) => i.href)).toEqual(["/datasets", "/scorers", "/experiments"]);
   });
 });
@@ -189,7 +189,7 @@ describe("Scorers", () => {
   }, AXE_TIMEOUT_MS);
 });
 
-describe("Experiments", () => {
+describe("Test runs", () => {
   it("lists eval runs across agents with status and scores, linking to the run view", async () => {
     responses["/evals/runs"] = () => json({ items: [evalRun("er2", { agent_id: "a2", agent_name: "Other bot", suite_id: "s7", suite_name: "Suite 7", display_status: "running", status: "running", aggregates: { cases: 0, passed: 0, failed: 0, errors: 0, pass_rate: null, scores_avg: {}, duration_ms_p50: null, cost_usd: null } }), evalRun("er1")], next_cursor: null });
     render(<ExperimentsPage />);
@@ -221,12 +221,12 @@ describe("Experiments", () => {
   it("has empty, error and load-more states", async () => {
     responses["/evals/runs"] = () => json({ items: [], next_cursor: null });
     const { unmount } = render(<ExperimentsPage />);
-    expect(await screen.findByText("No experiments yet")).toBeInTheDocument();
+    expect(await screen.findByText("No test runs yet")).toBeInTheDocument();
     unmount();
     responses["/evals/runs"] = (url) => (url.searchParams.get("before") ? json({ detail: "page failed" }, 500) : json({ items: [evalRun("er1")], next_cursor: "c2" }));
     render(<ExperimentsPage />);
     await screen.findAllByTestId("experiment-row");
-    fireEvent.click(screen.getByRole("button", { name: "Load more experiments" }));
+    fireEvent.click(screen.getByRole("button", { name: "Load more test runs" }));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("page failed"));
     expect(screen.getAllByTestId("experiment-row")).toHaveLength(1);
   });

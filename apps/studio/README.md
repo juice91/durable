@@ -10,6 +10,10 @@ send `NEXT_PUBLIC_EAP_DEV_TOKEN` as the `Authorization` header (`src/lib/api.ts`
 
 ## Running and checking
 
+`scripts/dev-up.sh` (repository root) starts Studio with a sign-in that works out of the box on `http://localhost:3000`.
+Started on its own, Studio needs `EAP_STUDIO_AUTH` ([sign-in modes](../../docs/admin-account.md)) or
+`NEXT_PUBLIC_EAP_DEV_TOKEN`, else it says that no sign-in method is configured.
+
 ```sh
 pnpm -C apps/studio dev                 # dev server (next dev)
 pnpm -C apps/studio exec vitest run     # unit and component tests
@@ -42,6 +46,8 @@ components never write paths by hand. Query parameters below are part of the URL
 | `/tools[?tool=<name>&server=<mcp server>&tab=run]` | Tools page; `tool` opens that tool's Sheet (`server` for an MCP tool; `tab=run` opens the Run tab, Overview is the default). |
 | `/mcp` | MCP servers list. |
 | `/mcp/:id` | One MCP server (connection, tools, used by, delete). |
+| `/webhooks` | Inbound webhook triggers: create, the enable card, secret rotation, delivery log and history. |
+| `/external-access` | External agents: clients and their `run` keys, workflow exports and the enable card (`docs/external-access.md`). |
 | `/processors` | Processor catalog. |
 | `/processors/:type` | One processor type (overview, test console, recent outcomes, used by). |
 | `/knowledge` | Knowledge bases list. |
@@ -100,10 +106,12 @@ for the second key.
 | `g` then `o` | Go to Tools |
 | `g` then `m` | Go to MCP Servers |
 | `g` then `p` | Go to Processors |
+| `g` then `b` | Go to Webhooks |
+| `g` then `y` | Go to External access |
 | `g` then `k` | Go to Knowledge |
 | `g` then `d` | Go to Test suites |
 | `g` then `s` | Go to Scorers |
-| `g` then `e` | Go to Experiments |
+| `g` then `e` | Go to Test runs |
 | `g` then `n` | Go to Metrics |
 | `g` then `h` | Go to Threads |
 | `g` then `t` | Go to Traces |

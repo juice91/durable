@@ -17,9 +17,16 @@ done
 validate_and_prepare_data_dir
 
 tmp_files=()
-secret_file="" rendered_file="" migrate_status_file="" migrate_err_file="" runs_err_file="" platform_secret_file="" iam_rendered_file="" cloudflared_secret_file="" zitadel_secret_file="" openfga_secret_file=""
+secret_file="" rendered_file="" migrate_status_file="" migrate_err_file="" migrate_log_file="" runs_err_file="" platform_secret_file="" iam_rendered_file="" zitadel_secret_file="" openfga_secret_file=""
+# Set by the deploy stages below; read by the EXIT trap, so that a failure after a scale-down puts the platform back.
+platform_armed=0 iam_armed=0 marker_set=0
 cleanup() {
-  local path
+  local status=$? path
+  # A second signal (a cancelled workflow sends two) must not cut the restore short.
+  trap '' INT TERM HUP
+  if ((status != 0 && platform_armed)); then restore_platform || true; fi
+  if ((status != 0 && iam_armed)); then restore_iam || true; fi
+  if ((marker_set)); then remove_deploy_marker || true; fi
   if ((${#tmp_files[@]})); then
     for path in "${tmp_files[@]}"; do
       rm -f -- "$path"
@@ -160,7 +167,7 @@ elif colima_profiles=$(colima list 2>/dev/null) \
 else
   # A new cluster encrypts Secrets at rest from its first start (--secrets-encryption). Passing --k3s-arg replaces
   # Colima's built-in --disable=traefik, so that one is repeated. An existing cluster is converted once with
-  # deploy/scripts/k3s-secrets-encryption.sh (deploy/README.md, "Secrets encryption at rest").
+  # deploy/scripts/k3s-secrets-encryption.sh.
   RUNNER_TRACKING_ID="" XDG_CACHE_HOME="$cache_home" colima start "$PROFILE" --activate=false "${mount_args[@]}" --kubernetes --runtime docker --cpu 8 --memory 32 --disk 100 \
     --k3s-arg=--disable=traefik --k3s-arg=--secrets-encryption
 fi
@@ -300,6 +307,9 @@ else
   for key in "${base_keys[@]}" EAP_DATABASE_URL EAP_DBOS_URL; do
     [[ -z "${!key:-}" ]] || printf '%s=%s\n' "$key" "${!key}" >>"$secret_file"
   done
+  for key in EAP_LOCAL_ADMIN_USERNAME EAP_LOCAL_ADMIN_INITIAL_PASSWORD EAP_LOCAL_AUTH_SIGNING_KEY; do
+    [[ -z "${!key:-}" ]] || printf '%s=%s\n' "$key" "${!key}" >>"$secret_file"
+  done
 fi
 if [[ -n "$source_file" ]]; then
   cat -- "$source_file" >>"$secret_file"
@@ -311,7 +321,7 @@ for key in "${base_keys[@]}"; do
   value=$(dotenv_get "$secret_file" "$key")
   if [[ -z "$value" ]]; then
     case "$key" in
-      EAP_BLOB_*) printf 'Required secret is missing or empty: %s. Attachment bytes live in Cloudflare R2: create the bucket and an S3 API token and fill the two EAP_BLOB_* credential fields (deploy/README.md, "Object storage").\n' "$key" >&2 ;;
+      EAP_BLOB_*) printf 'Required secret is missing or empty: %s. Attachment bytes live in S3-compatible object storage: create the bucket and an access key and fill the two EAP_BLOB_* credential fields (deploy/k8s/secrets.example.env).\n' "$key" >&2 ;;
       *) printf 'Required secret is missing or empty: %s\n' "$key" >&2 ;;
     esac
     exit 1
@@ -319,6 +329,21 @@ for key in "${base_keys[@]}"; do
   # An unreplaced placeholder must never reach the cluster.
   [[ "$value" != CHANGE_ME* ]] || { printf 'Secret %s is still a placeholder.\n' "$key" >&2; exit 1; }
 done
+
+# The built-in admin account (the ConfigMap's EAP_IAM_IDENTITY lists localadmin): the signing key is generated here
+# when neither the secrets input nor the cluster's Secret has one (never overwritten, never printed). Half of the
+# optional account pair stops the deploy now, before anything is drained: the API would refuse to start.
+local_admin=""
+if grep -Eq '^[[:space:]]*EAP_IAM_IDENTITY:.*localadmin' "${REPO_ROOT}/deploy/k8s/configmap.yaml"; then
+  local_admin=1
+  # shellcheck source=deploy/scripts/local-admin.sh
+  source "${SCRIPT_DIR}/local-admin.sh"
+  ensure_cluster_signing_key "$secret_file"
+  if [[ -z "$(dotenv_get "$secret_file" EAP_LOCAL_ADMIN_USERNAME)" && -n "$(dotenv_get "$secret_file" EAP_LOCAL_ADMIN_INITIAL_PASSWORD)" ]]; then
+    printf 'EAP_LOCAL_ADMIN_INITIAL_PASSWORD is set without EAP_LOCAL_ADMIN_USERNAME: set both, or empty both to create the account in Studio (docs/admin-account.md).\n' >&2
+    exit 1
+  fi
+fi
 
 # EAP_DATABASE_URL / EAP_DBOS_URL follow from the roles in deploy/k8s/configmap.yaml (eap_app,
 # eap_dbos), their databases, and the in-cluster Postgres service. They are derived unless a
@@ -375,11 +400,10 @@ if [[ "$openfga_state" == on ]]; then
 fi
 
 # One Secret per component, the same split a secret manager would produce. The platform Secret
-# never carries the identity secrets, except the two database passwords the backup job needs; the tunnel token has its own.
+# never carries the identity secrets, except the two database passwords the backup job needs and the OpenFGA preshared
+# key the API and the worker present.
   make_tmp platform-secrets platform_secret_file
-  grep -v -E '^(CLOUDFLARE_TUNNEL_TOKEN|ZITADEL_MASTERKEY|ZITADEL_ADMIN_USERNAME|ZITADEL_ADMIN_PASSWORD|OPENFGA_PRESHARED_KEY)=' "$secret_file" >"$platform_secret_file" || true
-  make_tmp cloudflared-secrets cloudflared_secret_file
-  grep -E '^CLOUDFLARE_TUNNEL_TOKEN=.' "$secret_file" >"$cloudflared_secret_file" || true
+  grep -v -E '^(ZITADEL_MASTERKEY|ZITADEL_ADMIN_USERNAME|ZITADEL_ADMIN_PASSWORD)=' "$secret_file" >"$platform_secret_file" || true
   make_tmp zitadel-secrets zitadel_secret_file
   grep -E '^ZITADEL_[A-Z_]+=.' "$secret_file" >"$zitadel_secret_file" || true
   make_tmp openfga-secrets openfga_secret_file
@@ -387,8 +411,6 @@ fi
 
   kubectl_for_profile -n "$NAMESPACE" create secret generic pydanticos-secrets \
     --from-env-file="$platform_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
-  kubectl_for_profile -n "$NAMESPACE" create secret generic cloudflared-secrets \
-    --from-env-file="$cloudflared_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
   kubectl_for_profile -n iam create secret generic zitadel-secrets \
     --from-env-file="$zitadel_secret_file" --dry-run=client -o yaml | kubectl_for_profile apply -f - >/dev/null
   kubectl_for_profile -n iam create secret generic openfga-secrets \
@@ -404,10 +426,14 @@ secrets_checksum() { # KEY...
   local key
   for key in "$@"; do printf '%s=%s\n' "$key" "$(dotenv_get "$secret_file" "$key")"; done | shasum -a 256 | cut -c1-16
 }
-checksum_platform=$(secrets_checksum EAP_DATABASE_URL EAP_DBOS_URL EAP_SECRETS_KEY EAP_AUDIT_HASH_SALT EAP_BLOB_S3_ACCESS_KEY EAP_BLOB_S3_SECRET_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY ANTHROPIC_API_KEY CLOUDFLARE_API_TOKEN EAP_ZITADEL_MACHINE_KEY EAP_ZITADEL_PROJECT_ID EAP_ZITADEL_ORG_TENANT_MAP EAP_ZITADEL_STUDIO_CLIENT_ID)
+checksum_platform=$(secrets_checksum EAP_LOCAL_ADMIN_USERNAME EAP_LOCAL_ADMIN_INITIAL_PASSWORD EAP_LOCAL_AUTH_SIGNING_KEY EAP_DATABASE_URL EAP_DBOS_URL EAP_SECRETS_KEY EAP_AUDIT_HASH_SALT EAP_BLOB_S3_ACCESS_KEY EAP_BLOB_S3_SECRET_KEY EAP_LITELLM_API_KEY EAP_LITELLM_EMBEDDING_API_KEY ANTHROPIC_API_KEY EAP_ZITADEL_MACHINE_KEY EAP_ZITADEL_PROJECT_ID EAP_ZITADEL_ORG_TENANT_MAP EAP_ZITADEL_STUDIO_CLIENT_ID OPENFGA_PRESHARED_KEY)
 # Studio reads only its two OIDC values from the Secret (the switch and the issuer come from the ConfigMap).
-checksum_studio=$(secrets_checksum EAP_ZITADEL_STUDIO_CLIENT_ID EAP_ZITADEL_PROJECT_ID)
-checksum_cloudflared=$(secrets_checksum CLOUDFLARE_TUNNEL_TOKEN)
+checksum_studio=$(secrets_checksum EAP_ZITADEL_STUDIO_CLIENT_ID EAP_ZITADEL_PROJECT_ID EAP_LOCAL_ADMIN_USERNAME)
+# The platform manifests' placeholders (the identity ones are substituted where that directory is rendered).
+checksum_sed=(
+  -e "s|@@CHECKSUM_PLATFORM@@|${checksum_platform}|g"
+  -e "s|@@CHECKSUM_STUDIO@@|${checksum_studio}|g"
+)
 checksum_zitadel=$(secrets_checksum "${zitadel_keys[@]}")
 checksum_openfga=$(secrets_checksum "${openfga_keys[@]}")
 
@@ -445,26 +471,220 @@ if [[ -n "$exclude_list" ]]; then
 fi
 drain_sql+="), count(*) FILTER (WHERE ${excluded_sql}) FROM public.runs r WHERE r.status IN ('queued', 'running') AND NOT EXISTS (SELECT 1 FROM public.pending_approvals a WHERE a.run_id = r.id AND a.decided_at IS NULL)"
 
-# The API's replica count before this deploy, so a failed drain can put it back.
-api_replicas=1
-api_exists=0
-if kubectl_for_profile -n "$NAMESPACE" get deployment/api >/dev/null 2>&1; then
-  api_exists=1
-  current_replicas=$(kubectl_for_profile -n "$NAMESPACE" get deployment/api -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
-  if [[ "$current_replicas" =~ ^[1-9][0-9]*$ ]]; then api_replicas=$current_replicas; fi
-fi
+# ---- No backup during a deploy ----------------------------------------------------------------------------------------
+# pg_dump holds ACCESS SHARE on every table until it ends, so a migration that alters a table fails with
+# LockNotAvailable (2026-11-26). The deploy first sets the ConfigMap
+# deploy-in-progress, which the backup pod mounts (optional volume) and waits on before it dumps, then waits for any
+# backup pod that is older than the marker. In that order no backup can start between the check and the migration. A pod
+# newer than the marker is waiting on it and is not waited for here. The marker carries an expiry, so a deploy host that
+# dies cannot stop backups for good.
+deploy_marker=deploy-in-progress
+marker_ttl=${PYDANTICOS_DEPLOY_MARKER_TTL:-5400}
+# One backup (dumps and upload) took about 17 minutes on 2026-11-26.
+backup_wait=${PYDANTICOS_BACKUP_WAIT:-1800}
+for setting in marker_ttl backup_wait; do
+  [[ "${!setting}" =~ ^[0-9]+$ ]] || {
+    printf 'PYDANTICOS_DEPLOY_MARKER_TTL and PYDANTICOS_BACKUP_WAIT must be whole numbers of seconds.\n' >&2
+    exit 1
+  }
+done
 
-# A failed drain must not leave the platform down: put the API back to what it was.
-restore_api() {
-  if ((api_exists)) && [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]]; then
-    kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas="$api_replicas" >&2 || true
-    printf 'The API was scaled back to %s.\n' "$api_replicas" >&2
+remove_deploy_marker() {
+  kubectl_for_profile -n "$NAMESPACE" delete configmap "$deploy_marker" --ignore-not-found >/dev/null || {
+    printf 'Warning: could not delete the ConfigMap %s; backups wait until it expires. Delete it: kubectl --context %s -n %s delete configmap %s\n' \
+      "$deploy_marker" "$EXPECTED_CONTEXT" "$NAMESPACE" "$deploy_marker" >&2
+  }
+}
+
+# Names of the unfinished postgres-backup pods (nightly or created by hand) that are not newer than the marker.
+active_backups() { # MARKER_TIMESTAMP
+  local pods
+  pods=$(kubectl_for_profile -n "$NAMESPACE" get pods -l app.kubernetes.io/name=postgres-backup \
+    -o 'jsonpath={range .items[*]}{.metadata.name} {.status.phase} {.metadata.creationTimestamp}{"\n"}{end}') || return 1
+  # RFC 3339 UTC timestamps order as text.
+  awk -v marker="$1" '$1 != "" && $2 != "Succeeded" && $2 != "Failed" && $3 <= marker {printf "%s%s", sep, $1; sep=" "}' <<<"$pods"
+}
+
+# Delete first: a marker left by an earlier deploy would carry an old creation time.
+remove_deploy_marker
+marker_set=1
+kubectl_for_profile -n "$NAMESPACE" create configmap "$deploy_marker" \
+  --from-literal="expires-at=$(($(date +%s) + marker_ttl))" >/dev/null
+marker_created=$(kubectl_for_profile -n "$NAMESPACE" get configmap "$deploy_marker" -o 'jsonpath={.metadata.creationTimestamp}')
+[[ -n "$marker_created" ]] || { printf 'Could not read the ConfigMap %s back; the deploy stops before touching anything.\n' "$deploy_marker" >&2; exit 1; }
+
+backup_started=$SECONDS
+backup_reported=0
+while true; do
+  backups=$(active_backups "$marker_created") || {
+    printf 'Could not list the postgres-backup pods; the deploy stops before touching anything.\n' >&2
+    exit 1
+  }
+  [[ -n "$backups" ]] || break
+  if ((SECONDS - backup_started >= backup_wait)); then
+    printf 'A postgres-backup job is still running after %s seconds (pods: %s). The deploy stops before touching anything: its locks would fail the migration. Wait for it, or delete the Job (kubectl --context %s -n %s get jobs), then rerun up.sh.\n' \
+      "$backup_wait" "$backups" "$EXPECTED_CONTEXT" "$NAMESPACE" >&2
+    exit 1
   fi
+  if ((! backup_reported)); then
+    printf 'Waiting up to %s seconds for the running postgres-backup job to finish (pods: %s).\n' "$backup_wait" "$backups"
+    backup_reported=1
+  fi
+  sleep 5
+done
+
+# ---- The release that is running now ----------------------------------------------------------------------------------
+# Recorded before anything is scaled or applied, so a failed deploy can put it back.
+
+# Prints "<replicas> <image of CONTAINER>"; nothing when the object does not exist. A read error stops the deploy here.
+running_state() { # NAMESPACE KIND/NAME [CONTAINER]
+  local jsonpath='{.spec.replicas}'
+  [[ -z "${3:-}" ]] || jsonpath+=" {.spec.template.spec.containers[?(@.name==\"$3\")].image}"
+  kubectl_for_profile -n "$1" get "$2" --ignore-not-found -o "jsonpath=${jsonpath}"
+}
+worker_before=$(running_state "$NAMESPACE" statefulset/worker worker)
+api_before=$(running_state "$NAMESPACE" deployment/api api)
+studio_before=$(running_state "$NAMESPACE" deployment/studio studio)
+openfga_before=$(running_state iam deployment/openfga)
+zitadel_before=$(running_state iam deployment/zitadel)
+
+api_exists=0
+[[ -z "$api_before" ]] || api_exists=1
+api_replicas=${api_before%% *}
+[[ "$api_replicas" =~ ^[0-9]+$ ]] || api_replicas=1
+
+# ---- Putting the running release back ---------------------------------------------------------------------------------
+# How far the deploy got. restore_platform reads these.
+worker_stopped=0 manifests_applied=0 migrate_started=0 migrate_succeeded_seen=0 schema_before="" restore_failed=0
+
+# Runs SQL in eap_app and prints the result. The SQL is a positional argument of the remote sh, so it needs no quoting.
+psql_app() { # SQL
+  # Single quotes are deliberate: the postgres container expands its own password.
+  # shellcheck disable=SC2016
+  kubectl_for_profile -n "$NAMESPACE" exec postgres-0 -- \
+    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d eap_app -v ON_ERROR_STOP=1 -tAc "$1"' sh "$1"
+}
+
+# The core Alembic revision ("none" before the first migration). The API and the worker start only at exactly the
+# revision their image was built for, so this decides which images a failed deploy may run.
+schema_revision() {
+  local output
+  if output=$(psql_app "SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version" 2>"$runs_err_file"); then
+    output=$(printf '%s' "$output" | tr -d '[:space:]')
+    [[ "$output" =~ ^[A-Za-z0-9_,]*$ ]] || return 1
+    printf '%s\n' "${output:-none}"
+  elif grep -q 'alembic_version" does not exist' "$runs_err_file"; then
+    printf 'none\n'
+  else
+    return 1
+  fi
+}
+
+restore_step() { # kubectl args...
+  kubectl_for_profile "$@" >&2 || { restore_failed=1; printf 'Restore step failed: kubectl %s\n' "$*" >&2; }
+}
+
+wait_for_no_worker_pods() { # TIMEOUT_SECONDS
+  local started=$SECONDS pods
+  while true; do
+    pods=$(kubectl_for_profile -n "$NAMESPACE" get pods -l app.kubernetes.io/name=worker --no-headers 2>/dev/null || true)
+    [[ -n "${pods//[[:space:]]/}" ]] || return 0
+    ((SECONDS - started < $1)) || return 1
+    sleep 2
+  done
+}
+
+# Scales one component back to what it ran, with its previous image when KEEP_NEW is 0 and the manifests were applied.
+restore_component() { # KIND/NAME CONTAINER STATE KEEP_NEW
+  local target=$1 container=$2 replicas image
+  read -r replicas image <<<"$3"
+  if [[ -z "$replicas" ]]; then
+    printf '%s did not exist before this deploy; nothing to restore.\n' "$target" >&2
+    return 0
+  fi
+  if ((manifests_applied && ! $4)) && [[ -n "$image" ]]; then
+    # A StatefulSet does not replace a pod that never became ready when only its template changes: stop it first.
+    if [[ "$target" == statefulset/worker ]]; then
+      restore_step -n "$NAMESPACE" scale "$target" --replicas=0
+      wait_for_no_worker_pods "${PYDANTICOS_WORKER_STOP_TIMEOUT:-180}" || printf 'Worker pods are still terminating.\n' >&2
+    fi
+    restore_step -n "$NAMESPACE" set image "$target" "${container}=${image}"
+  fi
+  restore_step -n "$NAMESPACE" scale "$target" --replicas="$replicas"
+  if (($4)); then
+    printf 'Restored %s to %s replicas with the NEW image.\n' "$target" "$replicas" >&2
+  else
+    printf 'Restored %s to %s replicas with image %s.\n' "$target" "$replicas" "${image:-unchanged}" >&2
+  fi
+}
+
+restore_platform() {
+  local keep_new=0 schema_after="" attempt replicas
+  platform_armed=0
+  if ((! worker_stopped)); then
+    # Only the API has been touched (the drain).
+    if ((api_exists)); then
+      kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas="$api_replicas" >&2 || true
+      printf 'The API was scaled back to %s.\n' "$api_replicas" >&2
+    fi
+    return 0
+  fi
+  printf 'The deploy failed after the platform was scaled down; restoring service.\n' >&2
+  if ((migrate_started)); then
+    # Stop the migration first: a Job still running could commit after the old images are back.
+    restore_step -n "$NAMESPACE" delete job migrate --ignore-not-found --cascade=foreground --wait=true --timeout=3m
+    for attempt in 1 2 3; do
+      schema_after=$(schema_revision) && break
+      ((attempt == 3)) || sleep 3
+    done
+    if [[ -n "$schema_after" && -n "$schema_before" ]]; then
+      [[ "$schema_after" == "$schema_before" ]] || keep_new=1
+    else
+      # Unreadable: a Job that did not succeed has rolled back (one transaction); one that succeeded has not.
+      keep_new=$migrate_succeeded_seen
+      printf 'Warning: the database revision could not be read; judging by the migrate Job.\n' >&2
+    fi
+  fi
+  if ((keep_new)); then
+    printf 'The database was migrated (%s -> %s). The previous images cannot start on this schema, so the new images stay; fix forward.\n' \
+      "${schema_before:-unknown}" "${schema_after:-unknown}" >&2
+  else
+    printf 'The database schema is unchanged%s: the previous release is put back.\n' "${schema_before:+ (revision ${schema_before})}" >&2
+  fi
+  restore_component statefulset/worker worker "$worker_before" "$keep_new"
+  restore_component deployment/api api "$api_before" "$keep_new"
+  restore_component deployment/studio studio "$studio_before" "$keep_new"
+  # Every scale first (a cancelled workflow gives only seconds), then wait and report.
+  [[ -z "$worker_before" ]] || restore_step -n "$NAMESPACE" rollout status statefulset/worker --timeout=3m
+  [[ -z "$api_before" ]] || restore_step -n "$NAMESPACE" rollout status deployment/api --timeout=3m
+  [[ -z "$studio_before" ]] || restore_step -n "$NAMESPACE" rollout status deployment/studio --timeout=3m
+  if ((restore_failed)); then
+    printf 'THE RESTORE IS INCOMPLETE: check the platform now (deploy/scripts/status.sh).\n' >&2
+  else
+    printf 'Service was restored. The deploy itself failed.\n' >&2
+  fi
+}
+
+# The iam manifests hold replicas 0 too: put each identity service back, under the same rule as a deploy (up only when
+# its secrets are complete). Their images are pinned third-party releases and stay as applied.
+restore_iam() {
+  local name state before replicas
+  iam_armed=0
+  for name in openfga zitadel; do
+    if [[ "$name" == openfga ]]; then state=$openfga_state before=$openfga_before; else state=$zitadel_state before=$zitadel_before; fi
+    replicas=${before%% *}
+    [[ -n "$replicas" ]] || continue
+    [[ "$state" == on ]] || replicas=0
+    kubectl_for_profile -n iam scale "deployment/$name" --replicas="$replicas" >&2 \
+      || printf 'Restore step failed: could not scale iam deployment/%s to %s.\n' "$name" "$replicas" >&2
+    printf 'Restored iam deployment/%s to %s replicas.\n' "$name" "$replicas" >&2
+  done
 }
 
 if [[ "${PYDANTICOS_SKIP_DRAIN:-}" == 1 ]]; then
   printf 'Drain skipped (PYDANTICOS_SKIP_DRAIN=1): queued and running runs are not waited for. The API stays up until right before the migration.\n'
 elif ((api_exists)); then
+  platform_armed=1
   kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
 fi
 
@@ -476,11 +696,7 @@ query_active_runs() {
   local output err rc
   err=$runs_err_file
   set +e
-  # Single quotes are deliberate: the postgres container expands its own password.
-  # shellcheck disable=SC2016
-  output=$(kubectl_for_profile -n "$NAMESPACE" exec postgres-0 -- \
-    sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d eap_app -v ON_ERROR_STOP=1 -tAc "$1"' sh "$drain_sql" \
-    2>"$err")
+  output=$(psql_app "$drain_sql" 2>"$err")
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then
@@ -506,7 +722,7 @@ if [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]] && kubectl_for_profile -n "$NAMESPACE
   drain_started=$SECONDS
   excluded_reported=0
   while true; do
-    counts=$(query_active_runs) || { restore_api; exit 1; }
+    counts=$(query_active_runs) || exit 1
     active_runs=${counts%%|*}
     excluded_runs=${counts#*|}
     if ((! excluded_reported && excluded_runs > 0)); then
@@ -518,29 +734,21 @@ if [[ "${PYDANTICOS_SKIP_DRAIN:-}" != 1 ]] && kubectl_for_profile -n "$NAMESPACE
     fi
     if (( SECONDS - drain_started >= drain_timeout )); then
       printf 'Timed out after %s seconds waiting for queued and running runs to finish (%s still active). Scaling the API back to %s replicas so the platform stays up; rerun up.sh once the runs have finished (or set PYDANTICOS_SKIP_DRAIN=1).\n' "$drain_timeout" "$active_runs" "$api_replicas" >&2
-      restore_api
       exit 1
     fi
     sleep 5
   done
 fi
 
-if kubectl_for_profile -n "$NAMESPACE" get statefulset/worker >/dev/null 2>&1; then
+if [[ -n "$worker_before" ]]; then
+  platform_armed=1 worker_stopped=1
   kubectl_for_profile -n "$NAMESPACE" scale statefulset/worker --replicas=0
   # terminationGracePeriodSeconds is 120; wait past that grace period.
   worker_stop_timeout=${PYDANTICOS_WORKER_STOP_TIMEOUT:-180}
-  worker_stop_started=$SECONDS
-  while true; do
-    worker_pods=$(kubectl_for_profile -n "$NAMESPACE" get pods -l app.kubernetes.io/name=worker --no-headers 2>/dev/null || true)
-    if [[ -z "${worker_pods//[[:space:]]/}" ]]; then
-      break
-    fi
-    if (( SECONDS - worker_stop_started >= worker_stop_timeout )); then
-      printf 'Timed out after %s seconds waiting for worker pods to terminate (terminationGracePeriodSeconds is 120). A worker may still be finishing its current step. Rerun up.sh after the pods are gone.\n' "$worker_stop_timeout" >&2
-      exit 1
-    fi
-    sleep 2
-  done
+  wait_for_no_worker_pods "$worker_stop_timeout" || {
+    printf 'Timed out after %s seconds waiting for worker pods to terminate (terminationGracePeriodSeconds is 120). A worker may still be finishing its current step. Rerun up.sh after the pods are gone.\n' "$worker_stop_timeout" >&2
+    exit 1
+  }
 fi
 
 make_tmp rendered rendered_file
@@ -550,71 +758,102 @@ kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s" \
     -e "s|pydanticos-studio:dev|${studio_image}|g" \
     -e "s|/var/lib/pydanticos-backup-dir|${PYDANTICOS_BACKUP_DIR}|g" \
     -e "s|EAP_MCP_API_SERVER_PORTS: 443,6443|EAP_MCP_API_SERVER_PORTS: 443,${api_endpoint_port}|g" \
-    -e "s|@@CHECKSUM_PLATFORM@@|${checksum_platform}|g" \
-    -e "s|@@CHECKSUM_CLOUDFLARED@@|${checksum_cloudflared}|g" \
-    -e "s|@@CHECKSUM_STUDIO@@|${checksum_studio}|g" \
+    "${checksum_sed[@]}" \
   >"$rendered_file"
 if [[ -n "${PYDANTICOS_RENDER_OUT:-}" ]]; then
   cp "$rendered_file" "$PYDANTICOS_RENDER_OUT"
 fi
 
+# From here on the whole platform is down or being changed, even when there was no worker to stop.
+if [[ -n "${api_before}${worker_before}${studio_before}" ]]; then platform_armed=1 worker_stopped=1; fi
 # Skipped drain: the API took new runs until now. Stop it only for the migration window; it comes back
 # up at the end, after the workers.
 if [[ "${PYDANTICOS_SKIP_DRAIN:-}" == 1 ]] && ((api_exists)); then
   kubectl_for_profile -n "$NAMESPACE" scale deployment/api --replicas=0
 fi
-kubectl_for_profile -n "$NAMESPACE" delete job migrate --ignore-not-found --wait=true
-kubectl_for_profile apply -f "$rendered_file"
-kubectl_for_profile -n "$NAMESPACE" rollout status statefulset/postgres --timeout=5m
-kubectl_for_profile -n "$NAMESPACE" patch job migrate --type=merge --patch '{"spec":{"suspend":false}}'
 
-# One foreground poll. `kill` of a background subshell does not kill its
-# `kubectl wait` child, so the losing watch kept running after this script exited.
+# The migrate Job runs Alembic once, in one transaction (packages/db/src/eap_db/migrations/env.py), with a short
+# lock_timeout. Only a lock that could not be taken (LockNotAvailable) is worth another attempt.
 migrate_timeout=${PYDANTICOS_MIGRATE_TIMEOUT:-600}
-migrate_started=$SECONDS
-migrate_errors=0
+lock_attempts=${PYDANTICOS_MIGRATE_LOCK_ATTEMPTS:-3}
+lock_delay=${PYDANTICOS_MIGRATE_LOCK_DELAY:-20}
+[[ "$lock_attempts" =~ ^[1-9]$ && "$lock_delay" =~ ^[0-9]+$ ]] || {
+  printf 'PYDANTICOS_MIGRATE_LOCK_ATTEMPTS must be 1 to 9 and PYDANTICOS_MIGRATE_LOCK_DELAY a number of seconds.\n' >&2
+  exit 1
+}
 make_tmp migrate-status migrate_status_file
 make_tmp migrate-status-err migrate_err_file
-while true; do
-  if (( SECONDS - migrate_started >= migrate_timeout )); then
-    printf 'Timed out after %s seconds waiting for the migrate Job to succeed or fail.\n' "$migrate_timeout" >&2
-    exit 1
-  fi
-  if kubectl_for_profile -n "$NAMESPACE" get job migrate -o jsonpath='{.status.succeeded} {.status.failed}' >"$migrate_status_file" 2>"$migrate_err_file"; then
-    migrate_errors=0
-    migrate_status=$(<"$migrate_status_file")
-    # "<succeeded> <failed>". A missing field is empty. `read` strips the
-    # leading space and would treat a failed-only status (" 1") as succeeded.
-    if [[ "$migrate_status" == *" "* ]]; then
-      migrate_succeeded=${migrate_status%% *}
-      migrate_failed=${migrate_status#* }
+make_tmp migrate-log migrate_log_file
+
+# Returns 0 when the Job succeeded and 2 when it failed (its log is then in migrate_log_file). Exits on anything else.
+wait_for_migrate_job() {
+  local started=$SECONDS errors=0 status succeeded failed
+  # One foreground poll. `kill` of a background subshell does not kill its
+  # `kubectl wait` child, so the losing watch kept running after this script exited.
+  while true; do
+    if (( SECONDS - started >= migrate_timeout )); then
+      printf 'Timed out after %s seconds waiting for the migrate Job to succeed or fail.\n' "$migrate_timeout" >&2
+      exit 1
+    fi
+    if kubectl_for_profile -n "$NAMESPACE" get job migrate -o jsonpath='{.status.succeeded} {.status.failed}' >"$migrate_status_file" 2>"$migrate_err_file"; then
+      errors=0
+      status=$(<"$migrate_status_file")
+      # "<succeeded> <failed>". A missing field is empty. `read` strips the
+      # leading space and would treat a failed-only status (" 1") as succeeded.
+      if [[ "$status" == *" "* ]]; then
+        succeeded=${status%% *}
+        failed=${status#* }
+      else
+        succeeded=
+        failed=
+      fi
+      if [[ "$succeeded" =~ ^[0-9]+$ ]] && (( succeeded >= 1 )); then
+        migrate_succeeded_seen=1
+        kubectl_for_profile -n "$NAMESPACE" logs job/migrate || true
+        return 0
+      fi
+      if [[ "$failed" =~ ^[0-9]+$ ]] && (( failed >= 1 )); then
+        printf 'Migration Job failed; Alembic output follows.\n' >&2
+        kubectl_for_profile -n "$NAMESPACE" logs job/migrate >"$migrate_log_file" 2>&1 || true
+        cat "$migrate_log_file" >&2
+        return 2
+      fi
     else
-      migrate_succeeded=
-      migrate_failed=
-    fi
-    if [[ "$migrate_succeeded" =~ ^[0-9]+$ ]] && (( migrate_succeeded >= 1 )); then
-      kubectl_for_profile -n "$NAMESPACE" logs job/migrate || true
-      break
-    fi
-    if [[ "$migrate_failed" =~ ^[0-9]+$ ]] && (( migrate_failed >= 1 )); then
-      printf 'Migration Job failed; Alembic output follows.\n' >&2
-      kubectl_for_profile -n "$NAMESPACE" logs job/migrate >&2 || true
-      exit 1
-    fi
-  else
-    # A single blip is retried. Three consecutive get failures are the error.
-    migrate_errors=$((migrate_errors + 1))
-    if (( migrate_errors >= 3 )); then
-      if [[ -s "$migrate_err_file" ]]; then
-        cat "$migrate_err_file" >&2
+      # A single blip is retried. Three consecutive get failures are the error.
+      errors=$((errors + 1))
+      if (( errors >= 3 )); then
+        if [[ -s "$migrate_err_file" ]]; then
+          cat "$migrate_err_file" >&2
+        fi
+        if [[ -s "$migrate_status_file" ]]; then
+          cat "$migrate_status_file" >&2
+        fi
+        exit 1
       fi
-      if [[ -s "$migrate_status_file" ]]; then
-        cat "$migrate_status_file" >&2
-      fi
-      exit 1
     fi
+    sleep 2
+  done
+}
+
+migrate_attempt=1
+while true; do
+  kubectl_for_profile -n "$NAMESPACE" delete job migrate --ignore-not-found --wait=true
+  manifests_applied=1
+  kubectl_for_profile apply -f "$rendered_file"
+  kubectl_for_profile -n "$NAMESPACE" rollout status statefulset/postgres --timeout=5m
+  if ((! migrate_started)); then
+    schema_before=$(schema_revision) || {
+      printf 'Could not read the database revision, so a failed migration could not be judged; not migrating.\n' >&2
+      exit 1
+    }
   fi
-  sleep 2
+  migrate_started=1
+  kubectl_for_profile -n "$NAMESPACE" patch job migrate --type=merge --patch '{"spec":{"suspend":false}}'
+  wait_for_migrate_job && break
+  ((migrate_attempt < lock_attempts)) && grep -q 'LockNotAvailable' "$migrate_log_file" || exit 1
+  migrate_attempt=$((migrate_attempt + 1))
+  printf 'The migration could not take a lock (LockNotAvailable); attempt %s of %s in %s seconds.\n' "$migrate_attempt" "$lock_attempts" "$lock_delay" >&2
+  sleep "$lock_delay"
 done
 
 kubectl_for_profile -n "$NAMESPACE" scale statefulset/worker --replicas=1
@@ -624,15 +863,8 @@ kubectl_for_profile -n "$NAMESPACE" rollout status deployment/api --timeout=5m
 kubectl_for_profile -n "$NAMESPACE" scale deployment/studio --replicas=1
 kubectl_for_profile -n "$NAMESPACE" rollout status deployment/studio --timeout=5m
 
-# The Cloudflare Tunnel connector (deploy/k8s/cloudflared.yaml) runs only when the deploy secret carries a tunnel
-# token. Without one it stays at 0 replicas and the deploy still succeeds. The token is never printed.
-if [[ -n "$(dotenv_get "$secret_file" CLOUDFLARE_TUNNEL_TOKEN)" ]]; then
-  kubectl_for_profile -n "$NAMESPACE" scale deployment/cloudflared --replicas=1
-  kubectl_for_profile -n "$NAMESPACE" rollout status deployment/cloudflared --timeout=5m
-else
-  kubectl_for_profile -n "$NAMESPACE" scale deployment/cloudflared --replicas=0
-  printf 'No CLOUDFLARE_TUNNEL_TOKEN in the deploy secrets: the Cloudflare Tunnel connector stays at 0 replicas.\n'
-fi
+# The new release serves. A failure below leaves it in place and concerns the identity services only.
+platform_armed=0
 
 # Identity (ZITADEL) and authorization (OpenFGA): deploy/k8s/iam, namespace iam. The manifests are always applied (both
 # Deployments at 0 replicas, plus the policies); a service is scaled up only when its deploy secrets are complete.
@@ -662,6 +894,7 @@ SQL
 make_tmp iam-rendered iam_rendered_file
 kubectl_for_profile kustomize "$REPO_ROOT/deploy/k8s/iam" \
   | sed "${cluster_sed[@]}" -e "s|@@CHECKSUM_ZITADEL@@|${checksum_zitadel}|g" -e "s|@@CHECKSUM_OPENFGA@@|${checksum_openfga}|g" >"$iam_rendered_file"
+iam_armed=1
 kubectl_for_profile apply -f "$iam_rendered_file"
 
 if [[ "$openfga_state" == on ]]; then
@@ -682,3 +915,5 @@ else
 fi
 
 printf 'Deployed %s and %s to %s.\n' "$python_image" "$studio_image" "$EXPECTED_CONTEXT"
+# Last, so it is on screen: how to create the admin account, while there is none.
+if [[ -n "$local_admin" ]]; then print_cluster_setup; fi

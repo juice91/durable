@@ -84,6 +84,9 @@ def _at(log: str, needle: str, start: int = 0) -> int:
 def _secrets_env(tmp: Path) -> Path:
     path = tmp / "secrets.env"
     path.write_text("".join(f"{key}={SECRET}\n" for key in SECRET_KEYS))
+    # The default configmap signs in with the built-in admin account (deploy/k8s/secrets.example.env).
+    with path.open("a") as extra:
+        extra.write(f"EAP_LOCAL_AUTH_SIGNING_KEY={os.urandom(32).hex()}\n")
     path.chmod(0o600)
     return path
 
@@ -221,10 +224,6 @@ def test_up_sh_migrate_failure_prints_alembic_logs_and_stops(tmp_path: Path):
     assert "Migration Job failed; Alembic output follows." in proc.stderr
     assert "ALEMBIC_ERROR_SENTINEL migration failed at revision" in proc.stderr
     assert SECRET not in combined
-    log = _log(env)
-    assert "scale statefulset/worker --replicas=1" not in log
-    assert "scale deployment/api --replicas=1" not in log
-    assert "scale deployment/studio --replicas=1" not in log
     assert "Timed out" not in proc.stderr
     _assert_no_background_kubectl(bindir)
 
@@ -241,7 +240,7 @@ def test_up_sh_migrate_get_exits_after_three_consecutive_errors(tmp_path: Path):
     assert "did not reach Complete" not in combined
     log = _log(env)
     assert log.count("get job migrate") == 3
-    assert "scale statefulset/worker --replicas=1" not in log
+    assert "set image statefulset/worker worker=pydanticos-python:previous000" in log
     _assert_no_background_kubectl(bindir)
 
 
@@ -262,7 +261,7 @@ def test_up_sh_migrate_timeout_says_it_timed_out(tmp_path: Path):
     assert "10 minutes" not in combined
     log = _log(env)
     assert log.count("get job migrate") == 1
-    assert "scale statefulset/worker --replicas=1" not in log
+    assert "set image statefulset/worker worker=pydanticos-python:previous000" in log
     _assert_no_background_kubectl(bindir)
 
 
@@ -563,7 +562,7 @@ def test_colima_start_is_not_tracked_by_the_actions_runner(tmp_path: Path):
 
 @requires_tunnel
 def test_tunnel_sh_reconnects_until_stopped(tmp_path: Path):
-    # Cloudflare's SSH proxy drops long sessions; the default loop must reconnect, not exit.
+    # SSH proxies drop long sessions; the default loop must reconnect, not exit.
     env = _env(tmp_path, _install_stubs(tmp_path))
     with pytest.raises(subprocess.TimeoutExpired):
         _run("tunnel.sh", env, ["deploy-host"], timeout=8)
@@ -613,7 +612,7 @@ def test_skip_drain_keeps_the_api_up_until_the_migration(tmp_path: Path):
     proc = _run("up.sh", env, ["--secrets-env", str(_secrets_env(tmp_path))], timeout=30)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     log = _log(env)
-    assert "exec postgres-0" not in log
+    assert "public.runs" not in log  # no drain query
     assert "drain skipped" in proc.stdout.lower()
     worker0 = _at(log, "scale statefulset/worker --replicas=0")
     api0 = _at(log, "scale deployment/api --replicas=0")

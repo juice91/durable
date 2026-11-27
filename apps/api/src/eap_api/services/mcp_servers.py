@@ -28,6 +28,8 @@ from eap_api.mcp_servers.models import (
     McpServerModel,
     McpServerSecretModel,
 )
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.mcp_runtime import McpRuntimeService, get_server_or_404, runtime_of
 from eap_api.services.revision_conflict import stale_revision
 from eap_mcp_runtime import handle_for
@@ -221,10 +223,14 @@ def server_json(
     }
 
 
-class McpServerService:
+class McpServerService(AccessBound):
+    """Registered MCP servers (design 2.2: admin creates, edits and deletes; viewers read; `run` is use)."""
+
     def __init__(
-        self, db: Session, engine: Engine, policy: OutboundPolicy, runtime: McpRuntimeService, catalog: CatalogStore
+        self, db: Session, engine: Engine, policy: OutboundPolicy, runtime: McpRuntimeService, catalog: CatalogStore,
+        access: Access | None = None,
     ) -> None:
+        self._access = access  # None: no caller to check
         self._db = db
         self._engine = engine
         self._policy = policy
@@ -276,11 +282,16 @@ class McpServerService:
 
     # --- reads -------------------------------------------------------------------------------------
 
+    def _require(self, action: str, server_id: uuid.UUID | str) -> None:
+        acl.require(self._access, action, "mcp_server", str(server_id))
+
     def list(self, tenant_id: str) -> list[dict[str, Any]]:
         db = self._db
         servers = db.scalars(
             select(McpServerModel).where(McpServerModel.tenant_id == tenant_id).order_by(McpServerModel.name)
         ).all()
+        allowed = set(acl.keep(acl.visible(self._access, "mcp_server"), [s.id for s in servers]))
+        servers = [s for s in servers if s.id in allowed]
         names: dict[str, list[str]] = {}
         for server_id, header_name in db.execute(
             select(McpServerSecretModel.server_id, McpServerSecretModel.header_name)
@@ -294,11 +305,13 @@ class McpServerService:
         return [server_json(s, names.get(s.id, []), runtimes.get(s.id), envs.get(s.id, [])) for s in servers]
 
     def get(self, tenant_id: str, server_id: uuid.UUID) -> dict[str, Any]:
+        self._require("read", server_id)
         return self._json_of(tenant_id, get_server_or_404(self._db, tenant_id, server_id))
 
     # --- writes ------------------------------------------------------------------------------------
 
     def create(self, tenant_id: str, payload: Any) -> dict[str, Any]:
+        acl.require(self._access, "create", "mcp_server", None)
         body = parse(McpServerCreate, payload)
         headers = validate_headers(body.headers) if body.headers is not None else {}
         check_url_sync(self._policy, body.url)
@@ -313,6 +326,7 @@ class McpServerService:
         if ring is not None:
             db.add_all(seal(ring, tenant_id, server.id, headers))
         self._commit_or_409()
+        acl.register(self._access, "mcp_server", server.id)  # before the response: the creator owns it
         return server_json(server, sorted(headers))
 
     def _plan_env_change(self, tenant_id: str, server: McpServerModel, env: Any) -> _EnvChange:
@@ -356,6 +370,7 @@ class McpServerService:
         """Fields left out stay as they are. `headers` replaces the whole set ({} removes all). Changing the url
         or headers clears the last test result. A managed server takes `env`: its pod is restarted so the new
         values are projected. A stale `expected_revision` is a Conflict (412) carrying the current server."""
+        self._require("edit", server_id)
         db = self._db
         body = parse(McpServerUpdate, payload)
         server = get_server_or_404(db, tenant_id, server_id)
@@ -416,6 +431,7 @@ class McpServerService:
         Re-running a delete that failed or crashed midway finishes it: the server is disabled before its
         objects are removed (nothing starts it meanwhile), removing a missing object is fine, and the rows
         are removed last. BadGateway when the cluster could not be reached (nothing is lost; retry)."""
+        self._require("archive", server_id)
         db = self._db
         server = get_server_or_404(db, tenant_id, server_id)
         row = runtime_of(db, tenant_id, server.id)
@@ -426,6 +442,7 @@ class McpServerService:
             self._runtime.delete_pod(row, str(server_id))
         db.delete(server)  # mcp_server_secrets and mcp_runtimes rows go with it (ON DELETE CASCADE)
         db.commit()
+        acl.unregister(self._access, "mcp_server", str(server_id))
 
     # --- the catalog: install a registry entry -----------------------------------------------------
 
@@ -433,6 +450,7 @@ class McpServerService:
         """Install a mirrored registry entry. A package becomes a managed server (the pod is started at once);
         a remote registers as an external server with the remote's URL and optional `headers`."""
         db = self._db
+        acl.require(self._access, "create", "mcp_server", None)
         body = parse(FromCatalog, payload)
         entry = self._catalog.get(body.catalog_name)
         if entry is None:
@@ -464,6 +482,7 @@ class McpServerService:
             if ring is not None:
                 db.add_all(seal(ring, tenant_id, server_id, headers))
             self._commit_or_409()
+            acl.register(self._access, "mcp_server", server_id)
             return self._json_of(tenant_id, get_server_or_404(db, tenant_id, server_id))
 
         index = body.package_index or 0
@@ -498,6 +517,7 @@ class McpServerService:
         )
         db.add(row)
         self._commit_or_409()
+        acl.register(self._access, "mcp_server", server_id)
         server = get_server_or_404(db, tenant_id, server_id)
         self._runtime.start_runtime(server, row)
         return self._json_of(tenant_id, server)

@@ -7,7 +7,7 @@ import subprocess
 import pytest
 from eap_iam_openfga.dsl import ModelSyntaxError, canonical, parse_model, relations_of
 from eap_iam_openfga.model import model_json, model_path, model_relations, model_text
-from eap_iam_openfga.names import relation_for
+from eap_iam_openfga.names import relation_for, requirements
 
 
 def test_the_model_ships_next_to_its_tests():
@@ -28,8 +28,12 @@ def test_the_directly_related_types_match_the_grants_and_registrations_the_engin
     meta = {t["type"]: t["metadata"]["relations"] for t in model_json()["type_definitions"] if "metadata" in t}
     direct = lambda t, r: {(d["type"], d.get("relation")) for d in meta[t][r].get("directly_related_user_types", [])}  # noqa: E731
     assert ("tenant", None) in direct("agent", "tenant") and ("user", None) in direct("agent", "owner")
-    assert ("tenant", "editor") in direct("secret", "usable_by")
+    assert ("tenant", "editor") in direct("secret", "legacy_usable_by")
+    assert {("agent", None), ("workflow", None)} == direct("secret", "granted_to") == direct("mcp_server", "granted_to")
     assert {("agent", None), ("workflow", None)} == direct("run", "parent")
+    # Role grants (the Access tab): editor, runner, approver and viewer take a tenant role; an owner is a person.
+    assert {("tenant", r) for r in ("admin", "editor", "viewer")} <= direct("workflow", "runner")
+    assert not [d for d in direct("agent", "owner") if d[0] == "tenant"] and not [d for d in direct("secret", "owner") if d[0] == "tenant"]
 
 
 @pytest.mark.parametrize(
@@ -69,3 +73,22 @@ def test_the_transformer_agrees_with_the_openfga_cli():
 def test_the_model_tests_pass_under_the_openfga_cli():
     done = subprocess.run(["fga", "model", "test", "--tests", str(model_path().with_name("durable.fga.yaml"))], capture_output=True, text=True, timeout=120)
     assert done.returncode == 0, done.stdout + done.stderr
+
+
+def test_external_access_is_managed_by_admins_and_read_by_editors():
+    assert relation_for("manage_external_access", "tenant", False) == "can_manage_external_access"
+    assert relation_for("read_external_access", "tenant", False) == "can_read_external_access"
+    assert requirements("manage_external_access", "tenant", False).roles == ("admin",)
+    assert set(requirements("read_external_access", "tenant", False).roles) == {"admin", "editor"}
+
+
+def test_the_wave_2_actions_have_relations_and_an_unknown_one_is_still_denied():
+    """P2b wave 2: tenant-wide actions the services ask for, and `run` on an MCP server."""
+    for action, relation in (
+        ("write", "can_write"), ("run", "can_run"), ("manage_connections", "can_manage_connections"),
+        ("read_telemetry", "can_read_telemetry"), ("ingest.otlp", "can_otlp"), ("manage_settings", "can_manage_settings"),
+    ):
+        assert relation_for(action, "tenant", False) == relation, action
+    assert relation_for("run", "mcp_server", True) == "can_run"
+    assert relation_for("run", "secret", True) is None  # a secret is used through `grant_use`, not run
+    assert relation_for("frobnicate", "tenant", False) is None

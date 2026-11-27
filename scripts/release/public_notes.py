@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Sanitise the changelog for the public mirror, and BLOCK the release when anything internal is left.
 
-    public_notes.py sanitize CHANGELOG.md --replacements FILE --patterns FILE [--version X.Y.Z] [--write]
+    public_notes.py sanitize CHANGELOG.md --replacements FILE --patterns FILE [--unpublished FILE] [--version X.Y.Z] [--write]
 
 Steps, in order:
   1. drop any `### Internal` block (the internal pull requests live in CHANGELOG.internal.md, which the export
      leaves out; this is the second lock on that door);
   2. apply the export's replacement rules (`old==>new` lines, as `git filter-repo --replace-text` reads them);
-  3. scan the result with the export's residual-string patterns (one regular expression per line).
+  3. with `--unpublished` (one X.Y.Z per line), re-point the reference links at the bottom so none names a
+     tag the public repository does not have: that version's own link goes (its section stays), and a compare
+     link starting there starts at the next older published version, or becomes the release's tag link;
+  4. scan the result with the export's residual-string patterns (one regular expression per line).
 A pattern hit exits 1 and writes nothing: the public release does not go out. Only line numbers and pattern
 numbers are printed, never the matched text, so a log cannot repeat what the scan caught. With `--version`
 only that version's section is checked and printed, which is the body of the public GitHub Release.
@@ -21,7 +24,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,6 +32,7 @@ import changelog  # noqa: E402
 
 REMOVED = "***REMOVED***"
 INTERNAL_BLOCK = re.compile(r"(?ms)^### Internal\s*$.*?(?=^#{2,3} |\Z)")
+VERSION_LINK = re.compile(r"(?m)^\[(?P<label>[^\]\n]+)\]: (?P<repo>\S+?)/(?:compare/v(?P<older>[0-9.]+?)\.\.\.(?P<newer>\S+)|releases/tag/\S+)\n?")
 
 
 class Blocked(Exception):
@@ -61,11 +65,43 @@ def strip_internal(text: str) -> str:
     return INTERNAL_BLOCK.sub("", text)
 
 
-def sanitize(text: str, replacements: Sequence[tuple[re.Pattern[str], str]], patterns: Sequence[re.Pattern[str]]) -> str:
+def read_versions(path: Path) -> set[str]:
+    return {line.strip() for line in path.read_text().splitlines() if line.strip() and not line.startswith("#")}
+
+
+def relink(text: str, unpublished: Collection[str]) -> str:
+    """The text with no reference link that needs the tag of an unpublished version."""
+    versions = changelog.VERSION_HEADING.findall(text)  # newest first
+
+    def fix(link: re.Match[str]) -> str:
+        label, repo, older, newer = link.group("label", "repo", "older", "newer")
+        if label in unpublished:
+            return ""
+        if older not in unpublished:
+            return link.group(0)
+        earlier = versions[versions.index(older) + 1 :] if older in versions else []
+        base = next((version for version in earlier if version not in unpublished), None)
+        end = "\n" if link.group(0).endswith("\n") else ""
+        if base:
+            return f"[{label}]: {repo}/compare/v{base}...{newer}{end}"
+        # Nothing older is public: point at the newer tag itself (an [Unreleased] link then has no target).
+        return "" if newer == "HEAD" else f"[{label}]: {repo}/releases/tag/{newer}{end}"
+
+    return VERSION_LINK.sub(fix, text)
+
+
+def sanitize(
+    text: str,
+    replacements: Sequence[tuple[re.Pattern[str], str]],
+    patterns: Sequence[re.Pattern[str]],
+    unpublished: Collection[str] = (),
+) -> str:
     """The public text, or Blocked when a residual pattern still matches after the replacements."""
     text = strip_internal(text)
     for pattern, new in replacements:
         text = pattern.sub(new, text)
+    if unpublished:
+        text = relink(text, unpublished)
     hits = [(number, index) for number, line in enumerate(text.splitlines(), 1) for index, pattern in enumerate(patterns, 1) if pattern.search(line)]
     if hits:
         raise Blocked(hits)
@@ -79,6 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("file", type=Path)
     run.add_argument("--replacements", type=Path, required=True)
     run.add_argument("--patterns", type=Path, required=True)
+    run.add_argument("--unpublished", type=Path, help="versions that have no tag in the public repository")
     run.add_argument("--version", help="check and print only this version's section")
     run.add_argument("--write", action="store_true", help="rewrite the file with the sanitised text")
     args = parser.parse_args(argv)
@@ -86,7 +123,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.version:
         text = changelog.extract_section(text, args.version)
     try:
-        clean = sanitize(text, read_replacements(args.replacements), read_patterns(args.patterns))
+        unpublished = read_versions(args.unpublished) if args.unpublished else set()
+        clean = sanitize(text, read_replacements(args.replacements), read_patterns(args.patterns), unpublished)
     except Blocked as blocked:
         print(f"BLOCKED: {blocked}", file=sys.stderr)
         return 1

@@ -20,7 +20,7 @@ spec:
     metadata:
       labels: {app.kubernetes.io/name: api}
       # up.sh replaces the placeholder with a hash of the Secret values this pod reads, so a rotated value restarts it
-      # at the next deploy, under the drain (deploy/README.md, "Rotation"). Placeholder text is harmless without up.sh.
+      # at the next deploy, under the drain. Placeholder text is harmless without up.sh.
       annotations: {pydanticos.dev/secrets-checksum: "@@CHECKSUM_PLATFORM@@"}
     spec:
       serviceAccountName: pydanticos-mcp-api
@@ -76,10 +76,6 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: ANTHROPIC_API_KEY, optional: true}
-            # Cloudflare Workers AI (optional): the provider stays off while the key is absent from the Secret.
-            - name: CLOUDFLARE_API_TOKEN
-              valueFrom:
-                secretKeyRef: {name: pydanticos-secrets, key: CLOUDFLARE_API_TOKEN, optional: true}
             # ZITADEL sign-in and members (optional, from the IAM bootstrap): while the project id and the org map are
             # absent the zitadel plug-in is dormant; without the machine key the Members page is not offered.
             - name: EAP_ZITADEL_PROJECT_ID
@@ -91,6 +87,22 @@ spec:
             - name: EAP_ZITADEL_MACHINE_KEY
               valueFrom:
                 secretKeyRef: {name: pydanticos-secrets, key: EAP_ZITADEL_MACHINE_KEY, optional: true}
+            # The built-in admin account (docs/admin-account.md). Optional in the manifest, so that removing `localadmin` from
+            # EAP_IAM_IDENTITY needs no manifest change; while it is listed the API refuses to start without them.
+            - name: EAP_LOCAL_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_LOCAL_ADMIN_USERNAME, optional: true}
+            - name: EAP_LOCAL_ADMIN_INITIAL_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_LOCAL_ADMIN_INITIAL_PASSWORD, optional: true}
+            - name: EAP_LOCAL_AUTH_SIGNING_KEY
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: EAP_LOCAL_AUTH_SIGNING_KEY, optional: true}
+            # OpenFGA's preshared key (optional): the same Secret field OpenFGA itself reads, so the two cannot differ.
+            # Used only when EAP_IAM_POLICY is openfga.
+            - name: EAP_OPENFGA_PRESHARED_KEY
+              valueFrom:
+                secretKeyRef: {name: pydanticos-secrets, key: OPENFGA_PRESHARED_KEY, optional: true}
           resources:
             requests: {cpu: "250m", memory: 512Mi}
             limits: {cpu: "2", memory: 4Gi}

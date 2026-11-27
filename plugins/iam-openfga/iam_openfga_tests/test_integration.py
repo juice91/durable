@@ -1,82 +1,30 @@
 """The engine, the bootstrap and the reconcile against a REAL OpenFGA (the version pinned in deploy/k8s/iam/openfga.yaml).
 
-Skipped unless a server is reachable: set `EAP_TEST_OPENFGA_URL` (and `EAP_TEST_OPENFGA_KEY`) to use one, or
-`EAP_TEST_OPENFGA_DOCKER=1` to start the pinned image in a throw-away container (memory datastore; removed afterwards;
-`EAP_TEST_DOCKER_CONTEXT` names the docker context, `EAP_TEST_OPENFGA_IMAGE` overrides the image). A skipped test is not
-a pass; CI Heavy runs these on the self-hosted runner.
+Skipped unless a server is reachable (see `server.py`: `EAP_TEST_OPENFGA_URL` or `EAP_TEST_OPENFGA_DOCKER=1`). A
+skipped test is not a pass; CI Heavy runs these on the self-hosted runner.
 
 What the fake cannot show: that the model means what the matrix says when the roles arrive as contextual tuples, that
 the server accepts the JSON, `on_duplicate`/`on_missing`, ListObjects, BatchCheck and the page walk of Read."""
 
 import asyncio
-import os
-import secrets
-import shutil
-import socket
-import subprocess
-import time
+import io
 import uuid
 
-import httpx2
 import pytest
-from eap_iam import All, Grant, Only, PolicyUnavailable, Principal, ResourceRef
+from eap_iam import All, CatalogEntry, Grant, Member, Only, PolicyUnavailable, Principal, ResourceRef
+from eap_iam.protocols import GROUP_MEMBERSHIP
+from eap_iam.registry import register_local
 from eap_iam_openfga.bootstrap import run as bootstrap_run
 from eap_iam_openfga.client import OpenFgaClient, TupleKey
 from eap_iam_openfga.engine import OpenFgaPolicy
 from eap_iam_openfga.model import model_text
-from eap_iam_openfga.reconcile import build_plan, apply_plan
+from eap_iam_openfga.names import user_ref
+from eap_iam_openfga.reconcile import amain, apply_plan, build_plan
 from eap_iam_openfga.settings import OpenFgaSettings
 
-IMAGE = os.environ.get("EAP_TEST_OPENFGA_IMAGE", "openfga/openfga:v1.23.0")
+from .server import server  # noqa: F401 - the fixture
+
 T = "acme"
-
-
-def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    # The docker context travels in the child's environment (DOCKER_CONTEXT), never as an argument, so the command
-    # line is the fixed binary plus the arguments the tests build themselves.
-    env = dict(os.environ)
-    ctx = os.environ.get("EAP_TEST_DOCKER_CONTEXT")
-    if ctx:
-        env["DOCKER_CONTEXT"] = ctx
-    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=120, check=check, env=env)
-
-
-@pytest.fixture(scope="module")
-def server():
-    url = os.environ.get("EAP_TEST_OPENFGA_URL")
-    if url:
-        yield url.rstrip("/"), os.environ.get("EAP_TEST_OPENFGA_KEY") or None
-        return
-    if os.environ.get("EAP_TEST_OPENFGA_DOCKER") != "1":
-        pytest.skip("no OpenFGA: set EAP_TEST_OPENFGA_URL, or EAP_TEST_OPENFGA_DOCKER=1 to start the pinned image")
-    if shutil.which("docker") is None:
-        pytest.skip("docker is not installed")
-    key = secrets.token_urlsafe(24)
-    name = f"eap-openfga-test-{uuid.uuid4().hex[:8]}"
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    started = _docker(
-        "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{port}:8080",
-        "-e", "OPENFGA_DATASTORE_ENGINE=memory", "-e", "OPENFGA_AUTHN_METHOD=preshared",
-        "-e", f"OPENFGA_AUTHN_PRESHARED_KEYS={key}", "-e", "OPENFGA_PLAYGROUND_ENABLED=false", IMAGE, "run", check=False,
-    )
-    if started.returncode != 0:
-        pytest.skip("the OpenFGA container did not start (is the image available?)")
-    try:
-        url = f"http://127.0.0.1:{port}"
-        for _ in range(60):
-            try:
-                if httpx2.get(url + "/healthz", timeout=2).status_code == 200:
-                    break
-            except httpx2.HTTPError:
-                pass
-            time.sleep(0.5)
-        else:
-            pytest.skip("the OpenFGA container never became healthy")
-        yield url, key
-    finally:
-        _docker("rm", "-f", name, check=False)
 
 
 # One loop for the whole module: a client keeps pooled connections, and they belong to the loop that opened them.
@@ -154,16 +102,40 @@ def test_a_runner_grant_an_approver_grant_and_a_run_that_inherits_approve(fga):
     assert not check(viewer, "run", R("workflow", "r1"))
 
 
-def test_usable_by_lets_editors_attach_one_secret_only(fga):
+def test_only_admins_grant_use_and_the_old_usable_by_relation_is_read_by_nothing(fga):
     policy, client, _ = fga
     seed(policy, kinds=("secret",), ids=("crm", "other"))
     editor, admin = P("u-editor", "editor"), P("u-admin", "admin")
-    _run(client.write([TupleKey("tenant:acme#editor", "usable_by", "secret:acme/crm")]))
+    _run(client.write([TupleKey("tenant:acme#editor", "legacy_usable_by", "secret:acme/crm")]))
     check = lambda p, action, ref: _run(policy.check(p, action, ref)).allowed  # noqa: E731
-    assert check(editor, "grant_use", R("secret", "crm")) and not check(editor, "grant_use", R("secret", "other"))
+    assert not check(editor, "grant_use", R("secret", "crm")) and not check(editor, "grant_use", R("secret", "other"))
     assert check(editor, "read", R("secret", "other")) and not check(editor, "edit", R("secret", "crm"))
     assert check(admin, "grant_use", R("secret", "other"))
     assert not check(P("u-viewer", "viewer"), "grant_use", R("secret", "crm"))
+
+
+def test_agent_grants_use_the_model_end_to_end(fga):
+    """grant_use / used_by / grantees / revoke_use against the real server: a grant is per agent or workflow, a revoke
+    removes it, and deleting the agent or the resource takes its tuples along."""
+    from eap_iam import UseGrant
+
+    policy, _, _ = fga
+    seed(policy, kinds=("secret", "mcp_server", "agent", "workflow"), ids=("a1", "a2"))
+    a1, w1, s, m = R("agent", "a1"), R("workflow", "w1"), R("secret", "a1"), R("mcp_server", "a1")
+    _run(policy.register_resource(w1))
+    for grant in (UseGrant(a1, s), UseGrant(a1, m), UseGrant(w1, s)):
+        _run(policy.grant_use(grant))
+        _run(policy.grant_use(grant))  # idempotent
+    assert _run(policy.used_by(a1, "secret")) == ["a1"] and _run(policy.used_by(a1, "mcp_server")) == ["a1"]
+    assert _run(policy.used_by(R("agent", "a2"), "secret")) == []
+    assert [g.id for g in _run(policy.grantees(s))] == ["a1", "w1"]
+    assert not _run(policy.check(P("u-editor", "editor"), "grant_use", s)).allowed
+    _run(policy.revoke_use(UseGrant(a1, s)))
+    assert _run(policy.used_by(a1, "secret")) == [] and _run(policy.used_by(w1, "secret")) == ["a1"]
+    _run(policy.unregister_resource(a1))  # the agent goes: its grant on the server goes too
+    assert _run(policy.grantees(m)) == []
+    _run(policy.unregister_resource(s))  # the secret goes: nobody is granted it
+    assert _run(policy.used_by(w1, "secret")) == []
 
 
 def test_an_owner_acts_on_their_own_resource_without_a_role(fga):
@@ -233,13 +205,28 @@ def test_the_list_of_grants_is_read_back(fga):
     assert sorted((g.relation, g.subject) for g in got) == [("owner", "u-owner"), ("runner", "u2")]
 
 
+def test_a_role_grant_reaches_the_role_through_contextual_tuples_and_is_listed_and_revoked(fga):
+    policy, _, _ = fga
+    seed(policy, kinds=("workflow",), ids=("role1", "role2"))
+    one, two = R("workflow", "role1"), R("workflow", "role2")
+    viewer, editor = P("u-viewer", "viewer"), P("u-editor", "editor")
+    check = lambda p, action, ref: _run(policy.check(p, action, ref)).allowed  # noqa: E731
+    grant = Grant("viewer", "runner", one, subject_type="role")
+    _run(policy.grant(grant))
+    assert check(viewer, "run", one) and check(editor, "run", one) and not check(viewer, "run", two)
+    assert not check(P("u-nobody"), "run", one)
+    assert [(g.subject_type, g.subject, g.relation) for g in _run(policy.list_grants(one))] == [("role", "viewer", "runner")]
+    _run(policy.revoke(grant))
+    assert not check(viewer, "run", one)
+
+
 def test_reconcile_repairs_a_missing_link_and_a_second_run_is_a_no_op(fga):
     policy, client, _ = fga
 
     class Catalog:
         def entries(self, tenant_id=None):
             from eap_iam import CatalogEntry
-            return [CatalogEntry("agent", f"a{i}", T) for i in range(130)] + [CatalogEntry("secret", "tok", T, "boss@example.com")]
+            return [CatalogEntry("agent", f"a{i}", T) for i in range(130)] + [CatalogEntry("secret", "tok", T, "zitadel:boss")]
 
     plan = _run(build_plan(client, Catalog(), owners=["u-owner"], creators=True))
     assert len(plan.to_add) == 131 + 131 + 1
@@ -247,7 +234,7 @@ def test_reconcile_repairs_a_missing_link_and_a_second_run_is_a_no_op(fga):
     again = _run(build_plan(client, Catalog(), owners=["u-owner"], creators=True))
     assert not again.to_add
     assert _run(policy.check(P("u-owner"), "manage_access", R("agent", "a129"))).allowed
-    assert _run(policy.check(P("boss@example.com"), "archive", R("secret", "tok"))).allowed
+    assert _run(policy.check(P("zitadel:boss"), "archive", R("secret", "tok"))).allowed
 
 
 def test_the_engine_down_fails_closed_and_a_wrong_key_does_too(server, fga):
@@ -261,3 +248,178 @@ def test_the_engine_down_fails_closed_and_a_wrong_key_does_too(server, fga):
         with pytest.raises(PolicyUnavailable) as err:
             _run(wrong.check(P("u", "admin"), "read", R("agent", "x")))
         assert "HTTP 401" in err.value.detail and key not in err.value.detail
+
+
+# --------------------------------------------------------------------------------------------- platform ids (encoding)
+
+PERSON = "zitadel:400738350308982982"
+PLATFORM_SUBJECTS = [
+    PERSON, "boss@example.com", "pos_Ab12cd34", "apikey:pos_Ab12cd34", "run:0f8e6a52-1c1e-4a3e-9d55-1b0f0e2a9a10",
+    "cfaccess:ann@example.com", "studio:operator", "a%3Ab", "100%:/x",
+]
+
+
+@pytest.mark.parametrize("subject", PLATFORM_SUBJECTS)
+def test_a_platform_subject_is_written_checked_listed_and_deleted(fga, subject):
+    policy, client, _ = fga
+    mine, granted = R("agent", "mine"), R("workflow", "granted")
+    person = P(subject)
+    _run(policy.register_resource(mine, creator=subject))
+    _run(policy.register_resource(granted))
+    _run(policy.grant(Grant(subject, "runner", granted)))
+    assert _run(policy.check(person, "manage_access", mine)).allowed
+    assert _run(policy.check(person, "run", granted)).allowed and not _run(policy.check(person, "edit", granted)).allowed
+    assert _run(policy.check_many(person, "read", [mine, R("agent", "no")]))["mine"].allowed
+    assert _run(policy.filter_ids(person, "read", "agent")) == Only(("mine",))
+    assert _run(policy.filter_ids(person, "run", "workflow", ["granted", "no"])) == Only(("granted",))
+    assert [(g.subject, g.relation) for g in _run(policy.list_grants(mine))] == [(subject, "owner")]
+    assert [(g.subject, g.relation) for g in _run(policy.list_grants(granted))] == [(subject, "runner")]
+    # A role travels as a contextual tuple that names the same encoded user.
+    assert _run(policy.check(P(subject, "editor"), "edit", granted)).allowed
+    assert isinstance(_run(policy.filter_ids(P(subject, "admin"), "read", "agent")), All)
+    _run(policy.revoke(Grant(subject, "runner", granted)))
+    assert not _run(policy.check(person, "run", granted)).allowed
+    _run(policy.unregister_resource(mine))
+    _run(policy.unregister_resource(granted))
+    assert _run(client.read()) == []
+
+
+def test_an_architect_run_is_decided_for_its_person_with_their_roles(fga):
+    policy, _, _ = fga
+    _run(policy.register_resource(R("agent", "a"), creator=PERSON))
+    _run(policy.register_resource(R("agent", "b")))
+
+    def run_for(*roles, person=PERSON):
+        return Principal(tenant_id=T, kind="run", subject="run:0f8e6a52", provider="run-token", on_behalf_of=person, roles=frozenset(roles))
+
+    assert _run(policy.check(run_for("editor"), "publish", R("agent", "b"))).allowed
+    assert not _run(policy.check(run_for("viewer"), "publish", R("agent", "b"))).allowed
+    assert _run(policy.check(run_for(), "archive", R("agent", "a"))).allowed
+    assert _run(policy.filter_ids(run_for(), "read", "agent")) == Only(("a",))
+    assert sorted(_run(policy.filter_ids(run_for("viewer"), "read", "agent")).ids) == ["a", "b"]
+    assert _run(policy.check(run_for(person=None), "read", R("agent", "a"))).reason == "deny:no_subject"
+
+
+def test_an_api_key_abstains_and_its_subject_can_still_own_a_resource(fga):
+    policy, client, _ = fga
+    key = Principal(tenant_id=T, kind="api_key", subject="apikey:pos_Ab12cd34", provider="api-key", on_behalf_of=PERSON)
+    _run(policy.register_resource(R("agent", "k"), creator=key.subject))
+    client.stats.calls.clear()
+    assert _run(policy.check(key, "read", R("agent", "k"))).reason == "abstain:constraints" and not client.stats.count()
+    assert [g.subject for g in _run(policy.list_grants(R("agent", "k")))] == [key.subject]
+
+
+def test_a_group_member_and_a_role_grant_work_with_a_zitadel_subject(fga):
+    policy, client, _ = fga
+    seed(policy, kinds=("workflow",), ids=("g", "r"))
+    _run(client.write([TupleKey(user_ref(PERSON), "member", "group:ops"), TupleKey("group:ops#member", "runner", "workflow:acme/g")]))
+    assert _run(policy.check(P(PERSON), "run", R("workflow", "g"))).allowed
+    assert _run(policy.filter_ids(P(PERSON), "run", "workflow")) == Only(("g",))
+    assert _run(policy.list_grants(R("workflow", "g"))) == []  # a group is not a platform grant
+    _run(policy.grant(Grant("viewer", "runner", R("workflow", "r"), subject_type="role")))
+    assert _run(policy.check(P(PERSON, "viewer"), "run", R("workflow", "r"))).allowed
+    assert [(g.subject_type, g.subject) for g in _run(policy.list_grants(R("workflow", "r")))] == [("role", "viewer")]
+
+
+def test_resource_ids_with_colons_come_back_as_platform_ids(fga):
+    from eap_iam import UseGrant
+
+    policy, client, _ = fga
+    agent, secret, run = R("agent", "ns:a%1"), R("secret", "vault:crm/token"), R("run", "run:1")
+    _run(policy.register_resource(agent, creator=PERSON))
+    _run(policy.register_resource(secret, creator=PERSON))
+    _run(policy.register_resource(run, parent=agent))
+    _run(policy.grant_use(UseGrant(agent, secret)))
+    assert _run(policy.used_by(agent, "secret")) == [secret.id]
+    assert [(g.kind, g.id) for g in _run(policy.grantees(secret))] == [("agent", agent.id)]
+    assert _run(policy.filter_ids(P(PERSON), "read", "secret")) == Only((secret.id,))
+    assert _run(policy.check(P(PERSON), "read", run)).allowed
+    out = _run(policy.check_many(P(PERSON), "read", [secret, R("secret", "other:x")]))
+    assert out[secret.id].allowed and not out["other:x"].allowed
+    _run(policy.unregister_resource(agent))
+    _run(policy.unregister_resource(secret))
+    assert _run(client.read()) == []
+
+
+def test_the_server_accepts_every_character_and_length_the_guard_lets_through(fga):
+    policy, _, _ = fga
+    printable = "".join(chr(i) for i in range(33, 127) if chr(i) not in "#*") + "é中😀\u200b"
+    for ch in printable:
+        subject = f"s{ch}{ch}t"
+        resource = R("secret", f"n{ch}{ch}m")
+        _run(policy.register_resource(resource, creator=subject))
+        assert _run(policy.check(P(subject), "read", resource)).allowed, repr(ch)
+        assert _run(policy.filter_ids(P(subject), "read", "secret")) == Only((resource.id,)), repr(ch)
+        assert [g.subject for g in _run(policy.list_grants(resource))] == [subject]
+        _run(policy.unregister_resource(resource))
+    longest_user, longest_id = "u" * 507, "é" * 245  # `user:` + 507 bytes; `agent:acme/` + 245 characters
+    agent = R("agent", longest_id)
+    _run(policy.register_resource(agent, creator=longest_user))
+    assert _run(policy.check(P(longest_user), "read", agent)).allowed
+    assert _run(policy.filter_ids(P(longest_user), "read", "agent")) == Only((longest_id,))
+    _run(policy.unregister_resource(agent))
+
+
+def test_the_server_refuses_a_raw_zitadel_subject(fga):
+    """Why the encoding exists: the id as the platform knows it is a malformed user for OpenFGA."""
+    policy, client, _ = fga
+    seed(policy, kinds=("agent",), ids=("x",))
+    with pytest.raises(PolicyUnavailable) as err:
+        _run(client.check(TupleKey(f"user:{PERSON}", "owner", "agent:acme/x")))
+    assert "HTTP 400" in err.value.detail
+
+
+def test_backfill_apply_with_an_owner_email_makes_the_zitadel_account_owner(fga):
+    policy, client, _ = fga
+
+    class Members:
+        name = "zitadel"
+
+        async def list_members(self, tenant_id):
+            return [Member(id="400738350308982982", email="Boss@example.com", roles=("admin",))]
+
+    class Catalog:
+        def entries(self, tenant_id=None):
+            return [
+                CatalogEntry("agent", "a1", T, PERSON), CatalogEntry("secret", "ns:tok", T, "studio:operator"),
+                CatalogEntry("workflow", "w1", T, "zitadel:7"),
+            ]
+
+    register_local(GROUP_MEMBERSHIP, "openfga-test-members", lambda ctx: Members())
+    s = client.settings
+    env = {
+        "EAP_OPENFGA_URL": s.url, "EAP_OPENFGA_STORE_ID": s.store_id, "EAP_OPENFGA_MODEL_ID": s.model_id,
+        "EAP_OPENFGA_PRESHARED_KEY": s.preshared_key or "", "EAP_IAM_MEMBERSHIP": "openfga-test-members",
+    }
+    argv = ["--tenant", T, "--owner-email", "boss@example.com", "--apply"]
+    first, again = io.StringIO(), io.StringIO()
+    assert _run(amain(argv, backfill=True, env=env, out=first, catalog=Catalog())) == 0
+    assert "rows skipped" not in first.getvalue() and "legacy creator (no owner tuple): 1" in first.getvalue()
+    assert _run(amain([*argv, "--prune"], backfill=True, env=env, out=again, catalog=Catalog())) == 0
+    assert "(to add): 0" in again.getvalue() and "no longer in the catalog: 0" in again.getvalue()
+    owners = sorted(g.subject for g in _run(policy.list_grants(R("secret", "ns:tok"))))
+    assert owners == [PERSON]  # without cfaccess the address itself is never a principal (F1)
+    assert sorted(_run(policy.filter_ids(P(PERSON), "manage_access", "agent")).ids) == ["a1"]
+    assert _run(policy.filter_ids(P(PERSON), "read", "secret")) == Only(("ns:tok",))
+    assert _run(policy.check(P("zitadel:7"), "archive", R("workflow", "w1"))).allowed
+
+
+def test_the_email_subject_tool_deletes_exactly_those_tuples_on_a_real_server(fga):
+    from eap_iam_openfga.email_subjects import amain as purge
+
+    _, client, _ = fga
+    s = client.settings
+    _run(client.write([
+        TupleKey("user:boss@example.com", "owner", "agent:acme/mail"),
+        TupleKey("user:zitadel%3A7", "owner", "agent:acme/mail"),
+        TupleKey("tenant:acme", "tenant", "agent:acme/mail"),
+    ]))
+    env = {
+        "EAP_OPENFGA_URL": s.url, "EAP_OPENFGA_STORE_ID": s.store_id, "EAP_OPENFGA_MODEL_ID": s.model_id,
+        "EAP_OPENFGA_PRESHARED_KEY": s.preshared_key or "",
+    }
+    first, again = io.StringIO(), io.StringIO()
+    assert _run(purge(["--apply"], env=env, out=first)) == 0 and "deleted: 1" in first.getvalue()
+    assert _run(purge(["--apply"], env=env, out=again)) == 0 and "deleted: 0" in again.getvalue()
+    left = {t.user for t in _run(client.read()) if t.object == "agent:acme/mail"}
+    assert left == {"user:zitadel%3A7", "tenant:acme"}

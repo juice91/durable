@@ -4,6 +4,7 @@ import {
   ApprovalsIcon,
   DatasetsIcon,
   ExperimentsIcon,
+  ExternalAccessIcon,
   KnowledgeIcon,
   LogsIcon,
   McpIcon,
@@ -14,6 +15,7 @@ import {
   ThreadsIcon,
   ToolsIcon,
   TracesIcon,
+  WebhooksIcon,
   WorkflowsIcon,
   type IconComponent,
 } from "./icons";
@@ -89,10 +91,12 @@ export const navItems: readonly NavItem[] = [
   { id: "processors", label: "Processors", href: routes.processors(), icon: ProcessorsIcon, group: "primitives", gKey: "p", keywords: ["guardrails"] },
   // RM.16
   { id: "knowledge", label: "Knowledge", href: routes.knowledge(), icon: KnowledgeIcon, group: "primitives", gKey: "k", keywords: ["knowledge bases", "rag", "documents", "retrieval"] },
+  { id: "webhooks", label: "Webhooks", href: routes.webhooks(), icon: WebhooksIcon, group: "primitives", gKey: "b", keywords: ["inbound", "trigger", "hook", "hmac", "github", "signature"] },
+  { id: "external-access", label: "External access", href: routes.externalAccess(), icon: ExternalAccessIcon, group: "primitives", gKey: "y", keywords: ["external agents", "export", "mcp", "a2a", "client", "api key", "run key"] },
   // Evaluation (W1.5): evals across every agent of the tenant
   { id: "datasets", label: "Test suites", href: routes.datasets(), icon: DatasetsIcon, group: "evaluation", gKey: "d", keywords: ["datasets", "eval suites", "cases", "evals"] },
   { id: "scorers", label: "Scorers", href: routes.scorers(), icon: ScorersIcon, group: "evaluation", gKey: "s", keywords: ["evaluators", "judges", "scores", "metrics"] },
-  { id: "experiments", label: "Experiments", href: routes.experiments(), icon: ExperimentsIcon, group: "evaluation", gKey: "e", keywords: ["eval runs", "runs", "results", "compare"] },
+  { id: "experiments", label: "Test runs", href: routes.experiments(), icon: ExperimentsIcon, group: "evaluation", gKey: "e", keywords: ["eval runs", "runs", "results", "compare", "experiments", "test runs"] },
   // Observability
   // SL.7 folded the dashboard into Metrics' Overview header; its palette words point here.
   { id: "metrics", label: "Metrics", href: routes.metrics(), icon: MetricsIcon, group: "observability", gKey: "n", keywords: ["overview", "dashboard", "home"] },

@@ -2,7 +2,7 @@
 
 The Architect is the built-in agent that turns a plain-language request into an agent or a workflow draft, and, when
 the person approves, puts it live. This page covers what it can operate. For the tools it writes definitions with, see
-the Architect design in `docs/superpowers/specs/2026-11-17-architect-design.md`.
+the Architect design in an internal design note.
 
 ## What the Architect can operate
 
@@ -46,6 +46,12 @@ The control tools run in the API process, the Architect's tools in the worker. T
 while that run is a live run of the built-in Architect. The audit record of every call names the run
 (`architect-run:<run id>`), and its scope is the tenant of the run; no API key is stored anywhere. See
 [Limits and audit](mcp-control.md#limits-and-audit).
+
+## Viewers get read tools only
+
+A tenant `viewer` may chat with the Architect, in conversations they started, and the Architect can then only look things
+up: it has no tool that saves, publishes, runs, schedules or configures anything, and it says that an editor has to make
+the change. Editors and admins are unaffected. Details: [Viewers and the Architect](iam.md#viewers-and-the-architect).
 
 ## The system context and provenance
 

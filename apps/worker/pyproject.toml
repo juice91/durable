@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-worker"
-version = "0.3.0"
+version = "0.5.0"
 description = "Worker runtime for the Enterprise Agent Platform"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -17,6 +17,9 @@ dependencies = [
     "eap-db",
     "eap-observability",
     "eap-secrets",
+    # Agent-bound grants: the run's start-time set is read from the selected policy engine (interfaces only; the plug-in
+    # distribution is installed beside the worker when grants are enforced).
+    "eap-iam",
     # Managed MCP servers: the runtime contract the worker starts and stops them through.
     "eap-mcp-runtime",
     # Input and output processors (P0.17): the deterministic chains run in the worker's steps.
@@ -70,6 +73,7 @@ eap-blob-store = { workspace = true }
 eap-db = { workspace = true }
 eap-observability = { workspace = true }
 eap-secrets = { workspace = true }
+eap-iam = { workspace = true }
 eap-mcp-runtime = { workspace = true }
 eap-processors = { workspace = true }
 eap-knowledge = { workspace = true }

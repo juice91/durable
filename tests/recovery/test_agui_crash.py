@@ -5,7 +5,7 @@ Everything is real, as in the rest of this directory (README.md): the API runs i
 (`api_server.py`, uvicorn, real HTTP) and the workers are `python -m eap_worker` processes killed by
 their own crash hook (`EAP_CRASH_AT`, `os._exit(137)`). An AG-UI stream (`POST /api/v1/ag-ui/...`)
 is read in a background thread while the worker dies, so each test sees what a connected client
-sees. Plan: docs/plans/2026-11-13-milestone-ag-ui.md, "### AGUI.15" and the Resume protocol (D7).
+sees. Plan: an internal design note, "### AGUI.15" and the Resume protocol (D7).
 
 | AGUI.15 item | test |
 |---|---|

@@ -20,6 +20,8 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel, AgentVersionModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict
 from eap_api.services.refusals import refusal
 from eap_run_store import ConversationNotFound, ResourceBusy, RunStore, WorkingMemoryVersionConflict, validate_resource_id
@@ -154,25 +156,32 @@ def _audit_forget(
     )
 
 
-class MemoryService:
-    """Working memory notes, observations and the forget of a resource (tenant-scoped)."""
+class MemoryService(AccessBound):
+    """Working memory notes, observations and the forget of a resource (tenant-scoped).
 
-    def __init__(self, memory: MemoryStore, run_store: RunStore, engine: Any) -> None:
+    Memory belongs to an agent: reading it is `read` on the agent, changing a conversation's notes or observations is
+    `run` (as for renaming a thread), changing the agent's resource notes or forgetting a resource of the agent is
+    `edit`. Forgetting a resource across every agent is a tenant settings action (admin)."""
+
+    def __init__(self, memory: MemoryStore, run_store: RunStore, engine: Any, access: Access | None = None) -> None:
+        self._access = access  # None: no caller to check
         self.memory = memory
         self.run_store = run_store
         self.engine = engine
 
     # ------------------------------------------------------------------ lookups
 
-    def _conversation_or_404(self, tenant_id: str, conversation_id: str) -> dict[str, Any]:
+    def _conversation_or_404(self, tenant_id: str, conversation_id: str, action: str = "read") -> dict[str, Any]:
         conv_id = canonical_uuid_or_404(conversation_id, CONVERSATION_NOT_FOUND)
         conv = self.run_store.get_conversation(tenant_id, conv_id)
         if conv is None:
             raise refusal(404, CONVERSATION_NOT_FOUND)
+        acl.require(self._access, action, "agent", str(conv["agent_id"]))
         return conv
 
-    def _agent_id_or_404(self, tenant_id: str, agent_id: str) -> str:
+    def _agent_id_or_404(self, tenant_id: str, agent_id: str, action: str = "read") -> str:
         aid = canonical_uuid_or_404(agent_id, AGENT_NOT_FOUND)
+        acl.require(self._access, action, "agent", aid)
         with Session(self.engine) as db:
             agent = db.query(AgentModel).filter(AgentModel.id == aid, AgentModel.tenant_id == tenant_id).first()
             if agent is None:
@@ -277,11 +286,11 @@ class MemoryService:
     def put_conversation_note(
         self, tenant_id: str, conversation_id: str, content: Any, if_match: str | None
     ) -> dict[str, Any]:
-        conv = self._conversation_or_404(tenant_id, conversation_id)
+        conv = self._conversation_or_404(tenant_id, conversation_id, "run")
         return self._put_note(tenant_id, conv["agent_id"], "conversation", conv["id"], content, if_match)
 
     def delete_conversation_note(self, tenant_id: str, conversation_id: str, if_match: str | None) -> None:
-        conv = self._conversation_or_404(tenant_id, conversation_id)
+        conv = self._conversation_or_404(tenant_id, conversation_id, "run")
         self._delete_note(tenant_id, conv["agent_id"], "conversation", conv["id"], if_match)
 
     # ------------------------------------------------------------------ resource-scoped notes
@@ -300,12 +309,12 @@ class MemoryService:
     def put_resource_note(
         self, tenant_id: str, agent_id: str, resource_id: str, content: Any, if_match: str | None
     ) -> dict[str, Any]:
-        aid = self._agent_id_or_404(tenant_id, agent_id)
+        aid = self._agent_id_or_404(tenant_id, agent_id, "edit")
         rid = self._resource_or_404(resource_id)
         return self._put_note(tenant_id, aid, "resource", rid, content, if_match)
 
     def delete_resource_note(self, tenant_id: str, agent_id: str, resource_id: str, if_match: str | None) -> None:
-        aid = self._agent_id_or_404(tenant_id, agent_id)
+        aid = self._agent_id_or_404(tenant_id, agent_id, "edit")
         rid = self._resource_or_404(resource_id)
         self._delete_note(tenant_id, aid, "resource", rid, if_match)
 
@@ -321,11 +330,11 @@ class MemoryService:
         return {"items": [_obs_json(o) for o in rows], "covered_to_turn": covered}
 
     def delete_observations(self, tenant_id: str, conversation_id: str) -> int:
-        conv = self._conversation_or_404(tenant_id, conversation_id)
+        conv = self._conversation_or_404(tenant_id, conversation_id, "run")
         return self.memory.delete_observations(tenant_id, conv["id"], agent_id=conv["agent_id"])
 
     def delete_observation(self, tenant_id: str, conversation_id: str, observation_id: str) -> None:
-        conv = self._conversation_or_404(tenant_id, conversation_id)
+        conv = self._conversation_or_404(tenant_id, conversation_id, "run")
         oid = canonical_uuid_or_404(observation_id, OBSERVATION_NOT_FOUND)
         # The store matches the row by tenant, conversation and id: a row of another conversation (or
         # tenant) deletes nothing and answers 404. The conversation was loaded in the tenant above, and
@@ -347,21 +356,21 @@ class MemoryService:
     def forget_agent_resource(
         self, tenant_id: str, user_id: str | None, agent_id: str, resource_id: str, include_conversations: bool
     ) -> dict[str, Any]:
-        aid = self._agent_id_or_404(tenant_id, agent_id)
+        aid = self._agent_id_or_404(tenant_id, agent_id, "edit")
         rid = self._resource_or_404(resource_id)
         return self._forget(tenant_id, user_id, rid, aid, include_conversations)
 
     def forget_resource(
         self, tenant_id: str, user_id: str | None, resource_id: str, include_conversations: bool
     ) -> dict[str, Any]:
+        acl.require(self._access, "manage_settings", "tenant", None)  # across every agent of the tenant: admin
         rid = self._resource_or_404(resource_id)
         return self._forget(tenant_id, user_id, rid, None, include_conversations)
 
     def _forget(
         self, tenant_id: str, user_id: str | None, resource_id: str, agent_id: str | None, include_conversations: bool
     ) -> dict[str, Any]:
-        # TODO(RBAC): any principal of the tenant may forget any resource today (dev auth has no roles).
-        # When RBAC lands, allow only resource_id == the principal's user id, or an admin.
+        # Authorised by the callers above (agent `edit`, or the tenant's `manage_settings` for every agent).
         try:
             result = self.memory.forget_resource(
                 tenant_id, resource_id, agent_id=agent_id, include_conversations=include_conversations

@@ -1,4 +1,5 @@
 // Typed client for runs API with SSE streaming support
+import { refusedMessage } from "./access";
 import { parseSSE } from "./sse";
 
 import { BASE_URL } from "./base-url";
@@ -26,6 +27,7 @@ async function apiErrorFromResponse(response: Response): Promise<ApiError> {
     } else if (Array.isArray(data.detail)) {
       message = data.detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ");
     }
+    message = (await refusedMessage(response.status, data)) ?? message;
   } catch {
     // Keep the status fallback for a non-JSON response.
   }
@@ -138,6 +140,8 @@ export interface RunEvent {
     | "memory_observe_trimmed" | "post_turn_done"
     // System-aware Architect: provenance and hashes of the context built at run start; never its text.
     | "system_context_loaded"
+    // Agent-bound grants: a refused use of an MCP server or a secret (message, reason, resource; names only).
+    | "permission_denied"
     // Agent capabilities (AC.4, AC.6): a rejected structured-output candidate, and tool approvals.
     | "output_retry"
     | "tool_approval_waiting" | "tool_approved" | "tool_denied" | "tool_approval_timed_out"

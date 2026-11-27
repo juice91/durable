@@ -3,7 +3,7 @@
 import { webcrypto } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startTestProvider, type TestProvider } from "@/test/oidcProvider";
-import { resolveAuthConfig } from "./config";
+import { resolveSignIn } from "./config";
 import { installAuthFetch, oidc, resetAuthForTests, setGiveUpHandler } from "./controller";
 import { getTokens, setTokens } from "./session";
 import { authorizationValue } from "../credentials";
@@ -124,39 +124,80 @@ describe("a 401 renews once, then goes to the login", () => {
 
 describe("resolving the runtime settings", () => {
   const env = { EAP_STUDIO_AUTH: "zitadel", EAP_STUDIO_ZITADEL_CLIENT_ID: "cid", EAP_STUDIO_ZITADEL_PROJECT_ID: "pid" };
-
-  it("is access by default and identical to today: no auth settings reach the browser", () => {
-    for (const e of [{}, { ...env, EAP_STUDIO_AUTH: "access" }] as Record<string, string>[]) {
-      const s = runtimeSettings("studio.example.test", { EAP_STUDIO_LOOPBACK_API_URL: "http://127.0.0.1:18000", ...e });
-      expect(s.oidc).toBe(false);
-      expect(s.config).toEqual({ loopbackApiUrl: "http://127.0.0.1:18000" });
-    }
-  });
+  const bearer = ["Bearer", "dev:studio:operator"].join(" ");
 
   it("publishes the OIDC settings under zitadel, with the default issuer", () => {
     const s = runtimeSettings("durable.example-org.ai", env);
-    expect(s.oidc).toBe(true);
+    expect(s.signIn).toBe("oidc");
     expect(s.config.auth).toEqual({ mode: "zitadel", issuer: "https://auth.example-org.ai", clientId: "cid", projectId: "pid" });
     expect(JSON.stringify(s.config)).not.toMatch(/secret/i);
   });
 
-  it("the loopback page keeps the dev bearer and starts no login", () => {
-    const bearer = ["Bearer", "dev:studio:operator"].join(" ");
-    const s = runtimeSettings("127.0.0.1:13000", { ...env, EAP_STUDIO_LOOPBACK_DEV_BEARER: bearer });
-    expect(s.oidc).toBe(false);
-    expect(s.config.devBearer).toBe(bearer);
-    expect(s.config.auth).toBeUndefined();
-    // ...but through the public host the bearer is never published and the login runs.
-    const pub = runtimeSettings("durable.example-org.ai", { ...env, EAP_STUDIO_LOOPBACK_DEV_BEARER: bearer });
-    expect(pub.config.devBearer).toBeUndefined();
-    expect(pub.oidc).toBe(true);
+  it("publishes only the mode for the built-in admin account", () => {
+    const s = runtimeSettings("studio.example.test", { EAP_STUDIO_AUTH: " Local " });
+    expect(s.signIn).toBe("local");
+    expect(s.config.auth).toEqual({ mode: "local" });
+    expect(s.config.localSetup).toBe(true);
   });
 
-  it("a half-set switch stays on access instead of locking everyone out", () => {
-    const missing: string[][] = [];
-    expect(resolveAuthConfig({ EAP_STUDIO_AUTH: "zitadel", EAP_STUDIO_ZITADEL_CLIENT_ID: "cid" }, false, (m) => missing.push(m))).toBeUndefined();
-    expect(missing).toEqual([["EAP_STUDIO_ZITADEL_PROJECT_ID"]]);
+  it("local keeps /setup reachable on the loopback page, and an explicit mode beats a development token", () => {
+    const loopback = runtimeSettings("127.0.0.1:13000", { EAP_STUDIO_AUTH: "local", EAP_STUDIO_LOOPBACK_DEV_BEARER: bearer });
+    expect(loopback.signIn).toBe("none-needed");
+    expect(loopback.config).toMatchObject({ localSetup: true, devBearer: bearer });
+    expect(loopback.config.auth).toBeUndefined();
+    expect(runtimeSettings("localhost:3000", { EAP_STUDIO_AUTH: "local", NODE_ENV: "development", NEXT_PUBLIC_EAP_DEV_TOKEN: bearer }).signIn).toBe("local");
+    expect(runtimeSettings("studio.example.test", { EAP_STUDIO_AUTH: "zitadel" }).config.localSetup).toBeUndefined();
   });
+
+  it.each(["zitadel", "local", "access", undefined, "nonsense"])(
+    "the loopback page keeps the dev bearer and starts no sign-in (EAP_STUDIO_AUTH=%s)",
+    (mode) => {
+      const s = runtimeSettings("127.0.0.1:13000", { ...env, EAP_STUDIO_AUTH: mode, EAP_STUDIO_LOOPBACK_DEV_BEARER: bearer });
+      expect(s.signIn).toBe("none-needed");
+      expect(s.config.devBearer).toBe(bearer);
+      expect(s.config.auth).toBeUndefined();
+    },
+  );
+
+  it("through the public host the bearer is never published and the sign-in runs", () => {
+    for (const [mode, signIn] of [["zitadel", "oidc"], ["local", "local"]] as const) {
+      const s = runtimeSettings("durable.example-org.ai", { ...env, EAP_STUDIO_AUTH: mode, EAP_STUDIO_LOOPBACK_DEV_BEARER: bearer });
+      expect(s.config.devBearer).toBeUndefined();
+      expect(s.signIn).toBe(signIn);
+    }
+  });
+
+  it("access, set explicitly, sends nothing of its own (Cloudflare Access in front)", () => {
+    const s = runtimeSettings("studio.example.test", { EAP_STUDIO_AUTH: "access", EAP_STUDIO_LOOPBACK_API_URL: "http://127.0.0.1:18000" });
+    expect(s.signIn).toBe("none-needed");
+    expect(s.config).toEqual({ loopbackApiUrl: "http://127.0.0.1:18000" });
+  });
+
+  it.each([undefined, "", "locl"])("EAP_STUDIO_AUTH=%s is no sign-in method: nothing falls back to access", (mode) => {
+    expect(runtimeSettings("studio.example.test", { EAP_STUDIO_AUTH: mode }).signIn).toBe("unavailable");
+  });
+
+  it("a half-set zitadel switch says so instead of falling back to access", () => {
+    const problems: string[] = [];
+    const resolved = resolveSignIn({ EAP_STUDIO_AUTH: "zitadel", EAP_STUDIO_ZITADEL_CLIENT_ID: "cid" }, { loopbackBearer: false }, (p) => problems.push(p));
+    expect(resolved).toEqual({ signIn: "unavailable" });
+    expect(problems.join()).toContain("EAP_STUDIO_ZITADEL_PROJECT_ID");
+  });
+
+  it("local development with a dev token needs no sign-in; a production build ignores that variable", () => {
+    const e = { NEXT_PUBLIC_EAP_DEV_TOKEN: bearer };
+    expect(runtimeSettings("localhost:3000", { ...e, NODE_ENV: "development" }).signIn).toBe("none-needed");
+    expect(runtimeSettings("localhost:3000", { ...e, NODE_ENV: "production" }).signIn).toBe("unavailable");
+  });
+
+  it.each(["localhost:3000", "127.0.0.1:3000"])(
+    "the dev stack's loopback bearer is enough on %s, with no mode and no development token (dev-up.sh)",
+    (host) => {
+      const s = runtimeSettings(host, { NODE_ENV: "development", EAP_STUDIO_LOOPBACK_DEV_BEARER: bearer });
+      expect(s.signIn).toBe("none-needed");
+      expect(s.config.devBearer).toBe(bearer);
+    },
+  );
 
   it("the inline script cannot be closed by a value", () => {
     expect(runtimeConfigScript({ loopbackApiUrl: "</script><b>" })).not.toContain("</script>");

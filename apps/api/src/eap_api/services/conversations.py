@@ -16,8 +16,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.ports import RunLauncher
 from eap_api.services.agent_archive import refuse_if_archived
+from eap_api.services.converse import require_converse, require_own_conversation
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, Unavailable
 from eap_api.services.run_filters import BAD_CURSOR, plain_refusals
 from eap_api.services.run_options import RunOptions, resolve_run_options, same_options
@@ -93,16 +96,22 @@ def conversation_json(conv: dict[str, Any]) -> dict[str, Any]:
 
 
 @plain_refusals
-class ConversationService:
+class ConversationService(AccessBound):
     """Conversations and their turns. `memory` is needed only by `delete`."""
 
     def __init__(
-        self, db: Session, run_store: RunStore, launcher: RunLauncher, memory: MemoryStore | None = None
+        self, db: Session, run_store: RunStore, launcher: RunLauncher, memory: MemoryStore | None = None,
+        access: Access | None = None,
     ) -> None:
         self.db = db
         self.run_store = run_store
         self.launcher = launcher
         self.memory = memory
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _agent(self, action: str, agent_id: str | uuid.UUID) -> None:
+        """A conversation is as visible as its agent; a turn is a run of it."""
+        acl.require(self._access, action, "agent", str(agent_id))
 
     # -- reads and thread edits ------------------------------------------------------------------
 
@@ -125,6 +134,7 @@ class ConversationService:
         """`(conversation as the API shows it, created)`: created is False when the tenant already has this
         client-supplied conversation_id (with the same resource_id; 409 for a different one).
         `resource_id` defaults to the caller's user id and is immutable."""
+        require_converse(self._access, self.db, tenant_id, agent_id)
         tenant_agent = (
             self.db.query(AgentModel)
             .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)
@@ -166,8 +176,11 @@ class ConversationService:
                 cursor = ConversationCursor.decode(before)
             except InvalidRunCursor:
                 raise InvalidInput(BAD_CURSOR) from None
+        if agent_id is not None:
+            self._agent("read", agent_id)
         conversations = self.run_store.list_conversations(
-            tenant_id, agent_id, limit=limit, before=cursor, title_contains=q
+            tenant_id, agent_id, limit=limit, before=cursor, title_contains=q,
+            visible_agent_ids=acl.sql_ids(acl.visible(self._access, "agent")),
         )
         next_before = ConversationCursor.after(conversations[-1]).encode() if len(conversations) == limit else None
         return {"items": [conversation_json(c) for c in conversations], "next_before": next_before}
@@ -175,11 +188,14 @@ class ConversationService:
     def get(self, tenant_id: str, conversation_id: uuid.UUID) -> dict[str, Any]:
         """The conversation with its runs in turn order."""
         conv = self.require_conversation(tenant_id, conversation_id)
+        self._agent("read", conv["agent_id"])
         runs = self.run_store.list_turns(tenant_id, conversation_id)
         chat = self.run_store.chat_usage(tenant_id, [r["id"] for r in runs])
         return {**conversation_json(conv), "runs": [run_json(r, chat.get(str(r["id"]))) for r in runs]}
 
     def rename(self, tenant_id: str, conversation_id: uuid.UUID, title: str) -> dict[str, Any]:
+        if self._access is not None:
+            self._agent("run", self.require_conversation(tenant_id, conversation_id)["agent_id"])
         try:
             conv = self.run_store.rename_conversation(tenant_id, conversation_id, title)
         except ConversationNotFound:
@@ -192,6 +208,7 @@ class ConversationService:
         another tenant's, malformed or deleted conversation; AGENT_ARCHIVED for an archived agent."""
         conv_id = canonical_uuid_or_404(conversation_id, CONVERSATION_NOT_FOUND)
         conv = self.require_conversation(tenant_id, uuid.UUID(conv_id))
+        self._agent("run", conv["agent_id"])
         refuse_if_archived(lock_agent(self.db, tenant_id, conv["agent_id"]))
         try:
             cloned = self.run_store.clone_conversation(tenant_id, conv_id, clone_title(conv["title"]))
@@ -206,6 +223,8 @@ class ConversationService:
         if self.memory is None:
             raise Unavailable("memory store is not configured")
         conv_id = canonical_uuid_or_404(conversation_id, CONVERSATION_NOT_FOUND)
+        if self._access is not None:
+            self._agent("run", self.require_conversation(tenant_id, uuid.UUID(conv_id))["agent_id"])
         try:
             deleted = self.memory.delete_conversation(tenant_id, conv_id)
         except TurnInProgress as busy:
@@ -305,6 +324,9 @@ class ConversationService:
         run_id, input and run options). Conflict while the previous turn is not terminal or when run_id
         is used by a different request."""
         conv = self.require_conversation(tenant_id, conversation_id)
+        if require_converse(self._access, self.db, tenant_id, conv["agent_id"]):
+            assert self._access is not None
+            require_own_conversation(self._access, self.run_store, tenant_id, conv["id"])
         agent = lock_agent(self.db, tenant_id, conv["agent_id"])
 
         # A retry of a recorded turn is compared with the row and relaunched as recorded; only a new

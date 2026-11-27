@@ -24,6 +24,12 @@ export interface IamCapabilities {
 }
 
 let cached: Promise<IamCapabilities> | null = null;
+let answered: IamCapabilities | null = null;
+
+/** The last capabilities answer, without asking (null before the first one). */
+export function peekCapabilities(): IamCapabilities | null {
+  return answered;
+}
 
 /** The capabilities answer, fetched once and shared; `refresh` forgets it (after a 401 or 403). */
 export function loadCapabilities(refresh = false): Promise<IamCapabilities> {
@@ -34,7 +40,8 @@ export function loadCapabilities(refresh = false): Promise<IamCapabilities> {
       const body = (await response.json()) as IamCapabilities | null;
       if (!body || typeof body !== "object" || !body.me || typeof body.me.subject !== "string") throw new ApiError(0, "Unexpected capabilities answer");
       rememberSubject(body.me.subject, body.me.email);
-      return { ...body, me: { ...body.me, roles: body.me.roles ?? [] }, actions: body.actions ?? [], policy: body.policy ?? { name: "", transitional: false, features: [] } };
+      answered = { ...body, me: { ...body.me, roles: body.me.roles ?? [] }, actions: body.actions ?? [], policy: body.policy ?? { name: "", transitional: false, features: [] } };
+      return answered;
     })();
     cached.catch(() => {
       cached = null; // a failure is not remembered: the next ask tries again
@@ -45,6 +52,7 @@ export function loadCapabilities(refresh = false): Promise<IamCapabilities> {
 
 export function resetCapabilitiesForTests(): void {
   cached = null;
+  answered = null;
 }
 
 /** The name to show for the signed-in principal: `me.email`, else the `subject` (an e-mail from Access, or "operator" on loopback). */
@@ -56,6 +64,7 @@ export function displayName(me: IamMe): string {
 export function providerLabel(provider: string): string {
   if (provider === "cf-access") return "Access";
   if (provider === "zitadel") return "ZITADEL";
+  if (provider === "localadmin") return "Built-in admin";
   if (provider === "loopback-dev") return "Loopback dev";
   if (provider === "api-key" || provider === "apikey") return "API key";
   return provider || "Unknown";
@@ -70,7 +79,7 @@ export function hasAccessTab(caps: IamCapabilities | null): boolean {
   return Boolean(caps?.policy.features.includes("grants"));
 }
 
-/** The Audit page is core: shown whenever the caller may read it (no capability list yet: shown, the API refuses). */
+/** The Audit page is core: shown whenever the caller may read it (capabilities unreadable: shown, the API refuses). */
 export function canReadAudit(caps: IamCapabilities | null): boolean {
   return caps === null || caps.actions.includes("tenant.read_audit");
 }
@@ -86,7 +95,7 @@ export function canSignOut(me: IamMe | null): boolean {
   return me?.provider === "cf-access";
 }
 
-/** A person who signed in through ZITADEL signs out through Studio's own OIDC session (lib/auth). */
-export function canSignOutZitadel(me: IamMe | null): boolean {
-  return me?.provider === "zitadel";
+/** A person Studio itself signed in (ZITADEL, or the built-in admin) signs out through Studio's session (lib/auth). */
+export function canSignOutStudio(me: IamMe | null): boolean {
+  return me?.provider === "zitadel" || me?.provider === "localadmin";
 }

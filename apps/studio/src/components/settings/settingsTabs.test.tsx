@@ -36,8 +36,9 @@ afterEach(() => {
 const page = () => render(<FrameHarness><SettingsPage /></FrameHarness>);
 
 describe("Settings tabs", () => {
-  it("lists the eleven tabs in order under one h1, Appearance selected by default", () => {
+  it("lists the eleven tabs in order under one h1, Appearance selected by default", async () => {
     page();
+    await screen.findByRole("tab", { name: "Audit" }); // there once the capabilities answer (or cannot be read)
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((t) => t.textContent)).toEqual(["Profile", "Appearance", "Chat", "Shortcuts", "Providers", "Secrets", "Connections", "API keys", "Audit", "Browser data", "About"]);
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);

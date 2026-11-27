@@ -1,3 +1,4 @@
+import { permissionDeniedMessage } from "@/lib/agentGrants";
 import { subjectLabel } from "@/lib/subjects";
 import React from "react";
 import { CopyableText } from "@/components/ui/CopyableText";
@@ -317,6 +318,29 @@ function ToolDecisionLine({ event }: { event: RunEvent }) {
   );
 }
 
+// ------------------------------------------------------------- agent-bound grants
+
+const DENIAL_REASONS: Record<string, string> = {
+  not_granted: "not granted",
+  not_declared: "not declared",
+  grant_revoked: "grant revoked",
+  authz_unavailable: "authorization unavailable",
+};
+
+/** `permission_denied`: the run asked for an MCP server or a secret its agent (or workflow) was not authorised to use. The
+ * message is the readable refusal the model got ("agent X is not authorized to use MCP server Y"). */
+function PermissionDeniedLine({ data }: { data: Record<string, unknown> }) {
+  const message = permissionDeniedMessage(data);
+  const reason = typeof data.reason === "string" ? (DENIAL_REASONS[data.reason] ?? data.reason) : null;
+  return (
+    <div className="text-sm" data-testid="event-permission-denied">
+      <span className="font-semibold text-warning-text">Blocked</span>
+      <span className="mt-1 block break-words text-sm text-foreground">{message ?? "A use of an MCP server or a secret was not authorized."}</span>
+      {reason ? <span className="mt-1 block text-xs text-muted-foreground">Reason: {reason}. An admin can grant it on the agent or workflow page (Access).</span> : null}
+    </div>
+  );
+}
+
 // ------------------------------------------------------------- agents as tools
 
 const AGENT_TOOL_STATUS_TITLES: Record<string, string> = {
@@ -570,6 +594,8 @@ function EventItem({ event }: EventItemProps) {
       case "tool_denied":
       case "tool_approval_timed_out":
         return <ToolDecisionLine event={event} />;
+      case "permission_denied":
+        return <PermissionDeniedLine data={event.data} />;
       case "agent_tool_started":
       case "agent_tool_completed":
         return <AgentToolLine event={event} />;

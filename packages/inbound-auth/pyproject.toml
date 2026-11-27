@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-inbound"
+version = "0.5.0"
+description = "Inbound webhook signature presets (GitHub, Standard Webhooks, custom HMAC): pure verification, no I/O"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "pydantic>=2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_inbound"]

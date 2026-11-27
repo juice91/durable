@@ -28,7 +28,7 @@ calls. Choose `CHAOS_PART_NUMBERS` accordingly.
 ## Usage
 
 ```sh
-export EAP_API=http://localhost:18000      # the tunnel from deploy/scripts/tunnel.sh
+export EAP_API=http://localhost:18000      # a port forward to the API
 export EAP_TOKEN=dev:studio:operator       # example for a dev stack
 scripts/chaos_demo.sh --dry-run            # prints the plan and the commands, executes nothing
 scripts/chaos_demo.sh

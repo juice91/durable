@@ -3,8 +3,8 @@
 A tenant connects an external product catalogue, binds it to a knowledge base and keeps both in step. The
 first provider is the Acme Semiconductor Product Information API. What the sync leaves behind is an ordinary
 knowledge base (datasheets) plus a structured product store; agents use it through `retrieve` and never see a
-provider. Design: `docs/superpowers/specs/2026-11-18-kb-source-sync-design.md`. Acceptance:
-`docs/superpowers/plans/2026-11-18-kb-source-sync-acceptance.md`. The workflow itself:
+provider. Design: an internal design note. Acceptance:
+an internal design note. The workflow itself:
 `docs/workflows/kb-source-sync.md`.
 
 ## Concepts

@@ -30,7 +30,7 @@ import { modelsFixture, processorCatalogFixture } from "@/components/agents/spec
 import { ConfigPanel } from "@/components/agentPage/ConfigPanel";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentEditor } from "../AgentEditor";
-import { optionsOf } from "@/test/select";
+import { findSelectOption, optionsOf } from "@/test/select";
 
 const TOOLS: ToolDefinition[] = [
   { id: "clock.now", title: "Clock", description: "", side_effect: false, external_idempotent: true, input_schema: {}, allowed: true },
@@ -209,6 +209,7 @@ describe("Identity step: limits and fallback models", () => {
     fireEvent.click(screen.getByRole("button", { name: /Limits and fallback models/ }));
     await act(async () => undefined);
     fireEvent.click(screen.getByRole("button", { name: "Add fallback model" }));
+    await findSelectOption("test:other");
     const first = screen.getByLabelText("Fallback 1") as HTMLSelectElement;
     const values = () => optionsOf(first).map((o) => o.value).filter(Boolean);
     expect(values()).toEqual(["litellm:*", "test:moderation", "test:other"]);
@@ -372,7 +373,7 @@ describe("review fixes (AC.13)", () => {
   it("a fallback row that duplicates the primary keeps its model listed, not as 'not in the allowlist'", async () => {
     const spec = { ...PLAIN, fallback_models: [{ provider: "test", name: "echo" }] } as unknown as AgentSpec;
     await setup(spec, "identity");
-    await act(async () => undefined);
+    await findSelectOption("test:other");
     const select = screen.getByLabelText("Fallback 1") as HTMLSelectElement;
     expect(optionsOf(select).map((o) => o.textContent)).not.toContain("test:echo (not in the allowlist)");
     expect(select.value).toBe("test:echo");

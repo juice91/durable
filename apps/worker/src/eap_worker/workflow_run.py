@@ -212,6 +212,7 @@ from eap_observability import (
     set_run_outcome,
 )
 from eap_run_store import CANCEL_EVENT_KEY, END_EVENT_KEY, ParentRunStopped, RunNotFound, insert_usage_in_session
+from eap_run_store.external_access import ExternalAccessStore
 from eap_schemas.architect import RETURN_TOOL_ID
 from eap_schemas.limits import RunBudgetExceeded
 from eap_schemas.workflow_scope import (
@@ -265,6 +266,7 @@ from eap_worker.config import (
 )
 from eap_worker.crash import crash_point
 from eap_worker.eval_run import run_judge
+from eap_worker.grants import ensure_grant_set
 from eap_worker.evaluators import (
     JUDGE_FAILED,
     MAX_REASON_CHARS,
@@ -428,6 +430,25 @@ _AGENT_LATEST = text(
 )
 
 
+def _webhook_source(engine: Any, tenant_id: str, run_id: str, trigger_id: str | None) -> dict[str, Any] | None:
+    """`run_started.source` of a run a verified webhook delivery started: the trigger and the delivery (never a
+    payload, a signature or a secret). None for every other run."""
+    if not trigger_id:
+        return None
+    with engine.connect() as conn:
+        trigger = conn.execute(
+            text("SELECT name FROM webhook_triggers WHERE tenant_id = :t AND id = :i"), {"t": tenant_id, "i": trigger_id}
+        ).first()
+        delivery = conn.execute(
+            text("SELECT id FROM webhook_deliveries WHERE tenant_id = :t AND run_id = :r ORDER BY received_at LIMIT 1"),
+            {"t": tenant_id, "r": run_id},
+        ).first()
+    return {
+        "kind": "webhook", "trigger_id": str(trigger_id), "trigger_name": trigger[0] if trigger else None,
+        "delivery_id": str(delivery[0]) if delivery else None,
+    }
+
+
 @DBOS.step(name="eap.start_workflow_run")
 async def start_workflow_run_step(
     run_id: str, tenant_id: str, workflow_version_id: str, input_json: str
@@ -451,6 +472,10 @@ async def start_workflow_run_step(
         if started:
             rt.run_store.heartbeat(tenant_id, uuid.UUID(run_id))
         run = rt.run_store.get_run(tenant_id, uuid.UUID(run_id)) or {}
+        source = _webhook_source(rt.engine, tenant_id, run_id, run.get("trigger_id"))
+        if source is None:
+            # A run an external client started names the client, key and export (the claim precedes the run row).
+            source = ExternalAccessStore(rt.engine).run_source(tenant_id, run_id)
         return {
             "started": bool(started),
             "pause_after_each_step": bool(run.get("pause_after_each_step")),
@@ -459,9 +484,15 @@ async def start_workflow_run_step(
             "workflow_version": row.version if row is not None else run.get("workflow_version"),
             "spec": dict(row.spec) if row is not None else None,
             "limits": {**read_limits(), "started_at": time.time()},
+            **({"source": source} if source is not None else {}),  # absent for any other run (and in old checkpoints)
         }
 
-    return await asyncio.to_thread(work)
+    link = await asyncio.to_thread(work)
+    if link["started"] and link["workflow_id"] is not None:
+        # Agent-bound grants: what the workflow's own steps (http, tool) may use, stored once on the run.
+        spec = link["spec"] or {}
+        await ensure_grant_set(rt, tenant_id, run_id, "workflow", str(link["workflow_id"]), spec.get("name"))
+    return link
 
 
 @DBOS.step(name="eap.workflow_step_begin")
@@ -1734,6 +1765,7 @@ async def _workflow_body(
             "workflow_id": link.get("workflow_id"),
             "workflow_version": link.get("workflow_version"),
             "input": input_value,
+            **({"source": link["source"]} if link.get("source") else {}),
         },
     )
     heartbeat = asyncio.create_task(_heartbeat(run_id, tenant_id))

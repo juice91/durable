@@ -31,6 +31,7 @@ import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { AgentEditor } from "../AgentEditor";
 import type { EditorLayout } from "./editorFit";
 import { optionsOf } from "@/test/select";
+import { modelListLoaded } from "@/test/modelList";
 
 const KB1 = "11111111-1111-4111-8111-111111111111";
 const KB2 = "22222222-2222-4222-8222-222222222222";
@@ -247,8 +248,8 @@ describe("Memory step", () => {
   it("turns every feature on and off; each toggle adds or removes only its own key", async () => {
     const { saved } = setup(PLAIN, { start: "memory" });
     fireEvent.click(screen.getByRole("checkbox", { name: "Use memory" }));
-    await waitFor(() => expect(fetchModels).toHaveBeenCalled());
-    await act(async () => undefined);
+    // Turning observations on takes the observer model from the list, so the list must be there first.
+    await modelListLoaded(fetchModels);
     fireEvent.change(screen.getByLabelText(/^Last turns/), { target: { value: "10" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Keep a working memory note" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Compress older turns into observations" }));

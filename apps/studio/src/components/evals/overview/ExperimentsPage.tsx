@@ -44,16 +44,16 @@ const columns: DataListColumn<OverviewRun>[] = [
   { id: "cost", header: "Cost", align: "end", className: "hidden lg:table-cell tabular-nums", cell: (r) => formatCost(r.aggregates?.cost_usd) ?? "—" },
 ];
 
-/** Experiments: the eval runs of every agent and workflow, newest first. A row opens an agent run in its Tests tab, a workflow run's suite in the workflow's. */
+/** Test runs (/experiments): the eval runs of every agent and workflow, newest first. A row opens an agent run in its Tests tab, a workflow run's suite in the workflow's. */
 export function ExperimentsPage() {
-  const list = usePagedList((before, signal) => listAllEvalRuns({ before, signal }), "Failed to load experiments");
+  const list = usePagedList((before, signal) => listAllEvalRuns({ before, signal }), "Failed to load test runs");
   return (
     <>
       <PageHeader crumbs={[navCrumb("experiments", { current: true })]} />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
         <p className="text-body text-muted-foreground">Eval runs across all agents and workflows, newest first. Open a run for its per-case results.</p>
         <DataList<OverviewRun>
-          label="Experiments"
+          label="Test runs"
           testId="experiments-list"
           rows={list.rows}
           columns={columns}
@@ -72,11 +72,11 @@ export function ExperimentsPage() {
           error={list.error}
           onRetry={list.reload}
           empty={{
-            title: "No experiments yet",
+            title: "No test runs yet",
             description: "Run a test suite from an agent's or a workflow's Tests tab. Its results appear here.",
           }}
         />
-        <LoadMore list={list} label="experiments" />
+        <LoadMore list={list} label="test runs" />
       </div>
     </>
   );

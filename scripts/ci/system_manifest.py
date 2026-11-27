@@ -10,7 +10,7 @@ is missing; a hand-written string repeats a generated number or id; a tool regis
 control tool has no registry entry; the hand-written sections changed without a higher `manifest_version` than
 the base commit's; or the rendered Platform layer is over its token budget.
 
-The design is docs/superpowers/specs/2026-11-22-architect-system-context-design.md, section 3.
+The design is an internal design note, section 3.
 """
 
 from __future__ import annotations

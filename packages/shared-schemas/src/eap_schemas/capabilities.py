@@ -316,6 +316,15 @@ def _trigger_and_feature_entries() -> list[CapabilityEntry]:
             requires_approval=True, side_effect=True, scope="workflow", docs_ref="docs/architect.md",
         ),
         CapabilityEntry(
+            id="trigger.webhook", kind="trigger", title="Inbound webhook",
+            description=(
+                "An outside system starts a published workflow with an HMAC-signed POST (GitHub, Standard Webhooks or a custom "
+                "preset); a person enables each trigger. It starts a run; it cannot wake a waiting step yet."
+            ),
+            requires_approval=True, side_effect=True, scope="workflow", docs_ref="docs/webhooks.md",
+            limits={"max_body_bytes": 1048576, "max_rate_per_minute": 600, "max_concurrent_runs": 50},
+        ),
+        CapabilityEntry(
             id="trigger.api_run", kind="trigger", title="Start a run on request",
             description="A person, an API or MCP client or an AG-UI client starts a run of a published agent or workflow.",
             scope="workflow", docs_ref="docs/mcp-control.md",

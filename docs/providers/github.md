@@ -4,7 +4,7 @@ The adapter lives in `packages/kb-sources/src/eap_kb_sources/providers/github/`;
 source rows (source kind `repository_docs`, connection kind `api_token`), never a tool or route. It turns the documentation files
 of a repository (for the TI SDK corpus: `processor-sdk-doc`, `mcupsdk-core`, `c2000ware-core-sdk`, `mcu_plus_sdk_am263x`,
 `simplelink-zephyr`) into knowledge-base documents, synchronised by the same published "KB Source Synchronization" workflow as any
-source. Design: `docs/superpowers/specs/2026-11-18-kb-source-github-design.md`. The generic steps are in `docs/kb-sources.md`.
+source. Design: an internal design note. The generic steps are in `docs/kb-sources.md`.
 
 ## Secrets
 
@@ -130,4 +130,4 @@ The adapter stamps `kind: code` and `language: <python|typescript|tsx|javascript
 rule may set another `kind` (for example `test`). `kb.search` filters on `kind`, `language`, `component` and `path` like any metadata, and
 on `path_prefix` (a string or a list: any chunk whose `path` starts with one of them). A worked configuration for a whole repository is
 `examples/kb-sources/durable-platform-docs.json`; sizing and a phased first sync are in
-`docs/superpowers/specs/2026-11-22-architect-system-context-design.md` (6.7).
+an internal design note (6.7).

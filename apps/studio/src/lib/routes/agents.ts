@@ -77,8 +77,8 @@ function versionParam(version: RouteVersion): string | undefined {
 }
 
 /** Paths of the agent page's tabs, in header order. `memory` is listed only for an agent with memory
- * (RM.18); `tests` (AC.16) always. */
-export type AgentTab = "chat" | "traces" | "editor" | "memory" | "tests";
+ * (RM.18); `tests` (AC.16) always; `access` only when the policy engine keeps grants (IAM P2c). */
+export type AgentTab = "chat" | "traces" | "editor" | "memory" | "tests" | "access";
 
 export const agentRoutes = {
   /** `/agents[?view=archived]`: the agents list (the archived agents with `archived`). */
@@ -105,6 +105,8 @@ export const agentRoutes = {
   /** `/agents/:id/tests?suite=&run=&compare=` (keys in that order): the agent's test suites (AC.16). */
   agentTests: (id: string, opts: AgentTestsRouteOptions = {}): string =>
     withQuery(`/agents/${seg(id)}/tests`, { suite: opts.suite, run: opts.run, compare: opts.compare }),
+  /** `/agents/:id/access`: who holds which relation on the agent, and what it may use. */
+  agentAccess: (id: string): string => `/agents/${seg(id)}/access`,
   /** The same tab of an agent (the header's agent switcher keeps the tab). */
   agentTab: (id: string, tab: AgentTab): string =>
     tab === "chat"
@@ -115,7 +117,9 @@ export const agentRoutes = {
           ? agentRoutes.agentMemory(id)
           : tab === "tests"
             ? agentRoutes.agentTests(id)
-            : agentRoutes.agentEditor(id),
+            : tab === "access"
+              ? agentRoutes.agentAccess(id)
+              : agentRoutes.agentEditor(id),
   /** `/playground?agent=&conversation=&version=&model=&context=` (keys in that order). A legacy URL since
    * SL.6: it redirects to `agentChat` (see `legacy.ts`). Kept for links that SL.10 retires. */
   playground: (opts: PlaygroundRouteOptions = {}): string =>
@@ -136,7 +140,7 @@ export const agentRoutes = {
 
 /** Which agent tab `pathname` shows (`/agents/a/chat/c` → "chat"), or null off the agent page. */
 export function agentTabOf(pathname: string | null | undefined): AgentTab | null {
-  const match = /^\/agents\/[^/]+\/(chat|traces|editor|memory|tests)(?:\/|$)/.exec(pathname ?? "");
+  const match = /^\/agents\/[^/]+\/(chat|traces|editor|memory|tests|access)(?:\/|$)/.exec(pathname ?? "");
   return match ? (match[1] as AgentTab) : null;
 }
 

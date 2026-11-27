@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-iam"
-version = "0.3.0"
+version = "0.5.0"
 description = "Identity and access interfaces: IdentityProvider, PolicyEngine, MembershipSource, the provider chain and plug-in discovery"
 readme = "README.md"
 requires-python = ">=3.13"

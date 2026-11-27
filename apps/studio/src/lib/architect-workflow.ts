@@ -7,6 +7,7 @@
 // Errors are flat `{detail, code, ...}`: 409 version_mismatch {latest_version}; 422 agent_not_allowed,
 // tool_not_allowed, unknown_placeholder, placeholder_not_whole_value, parallel_needs_following_step,
 // workflow_invalid, reserved_id; draft: 422 draft_invalid {raw, problems}, 502 draft_failed, 504 draft_timeout.
+import { refusedMessage } from "./access";
 import { apiHeaders, BASE_URL } from "./api";
 import type { PublishWarning } from "@/components/agents/agentCapabilities";
 import type { WorkflowSpec, WorkflowStep } from "./workflows";
@@ -276,7 +277,8 @@ async function call(path: string, body: unknown): Promise<unknown> {
   }
   if (!response.ok) {
     const detail = data.detail;
-    const message = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ") : `HTTP ${response.status}`;
+    const said = typeof detail === "string" ? detail : Array.isArray(detail) ? detail.map((e: { msg?: unknown }) => String(e.msg ?? "")).join(", ") : `HTTP ${response.status}`;
+    const message = (await refusedMessage(response.status, data)) ?? said;
     throw new ArchitectApiError(response.status, message, typeof data.code === "string" ? data.code : null, data);
   }
   return data;

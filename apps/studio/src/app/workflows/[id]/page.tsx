@@ -1,5 +1,6 @@
 "use client";
 
+import { usePermissions } from "@/lib/permissions";
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { subjectLabel } from "@/lib/subjects";
@@ -13,10 +14,12 @@ import { WorkflowCanvas, WorkflowStepList } from "@/components/workflows/Workflo
 import { WorkflowRunPanel } from "@/components/workflows/WorkflowRunPanel";
 import { WorkflowRunHistory } from "@/components/workflows/WorkflowRunHistory";
 import { formatDateTime } from "@/components/approvals/ApprovalCard";
-import { Button } from "@/components/ui/Button";
+import { cn } from "@/lib/cn";
 import { PanelCard, useWorkflowLayout, WorkflowFloatingPanel } from "@/components/workflows/WorkflowFloatingPanel";
 import { WorkflowArchivedBanner, WorkflowArchiveMenu } from "@/components/workflows/WorkflowArchiveMenu";
-import { WorkflowExplainPanel } from "@/components/workflows/WorkflowExplainPanel";
+import { WorkflowDraftBar } from "@/components/workflows/WorkflowDraftBar";
+import { latestVersionOf } from "@/lib/workflowDraft";
+import { StepExplanation } from "@/components/workflows/StepExplanation";
 import { useWorkflowExplanation } from "@/lib/workflowExplanations";
 import { WorkflowHeader } from "@/components/workflows/WorkflowHeader";
 import { useCollapsedLoops } from "@/components/workflows/useCollapsedLoops";
@@ -24,6 +27,9 @@ import { TraceSheetHost } from "@/components/traces/TraceSheetHost";
 import { routes } from "@/lib/routes";
 import { parseWorkflowTab, WORKFLOW_TAB_PARAM, WORKFLOW_TRACE_TAB_PARAM } from "@/lib/routes/workflows";
 import { Select } from "@/components/ui/Select";
+import { AccessSection } from "@/components/access/AccessSection";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { ResourceAccessPanel } from "@/components/access/ResourceAccessPanel";
 
 /** How many runs the Graph tab's Recent runs card lists. */
 const RECENT_RUNS = 5;
@@ -42,6 +48,11 @@ function findStepById(spec: { steps: WorkflowStep[] } | null, id: string | null)
  * `/workflows/:id` (SL.14): tabs Graph (default) and Runs (`?tab=runs`); Traces is its own path.
  * Graph is a full-bleed canvas with the floating panel: Run, Recent runs and the step list.
  */
+/** What "why can't I?" asks about on a workflow page. */
+const WORKFLOW_ACTIONS = ["run", "edit", "publish"] as const;
+/** One question for everything on a workflow's page. */
+const WORKFLOW_PERMISSIONS = ["run", "publish", "archive"] as const;
+
 function WorkflowDetail() {
   const params = useParams();
   const router = useRouter();
@@ -54,10 +65,13 @@ function WorkflowDetail() {
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const control = useWorkflowLayout();
-  const [explainOpen, setExplainOpen] = useState(false);
   // The graph's collapsed loops are URL state (`?collapsed=`), kept across a version switch and
   // carried to the run view.
   const { collapsed, setCollapsed } = useCollapsedLoops();
+
+  // Bumped to reload the workflow and its versions (after a publish, a 409 or a 412).
+  const [reloads, setReloads] = useState(0);
+  const reload = useCallback(() => setReloads((n) => n + 1), []);
 
   useEffect(() => {
     if (!id) return;
@@ -77,10 +91,11 @@ function WorkflowDetail() {
     return () => {
       cancelled = true;
     };
-  }, [id]);
+  }, [id, reloads]);
 
   const [tools, setTools] = useState<ToolDefinition[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const permissions = usePermissions("workflow", workflow?.id, WORKFLOW_PERMISSIONS);
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const clearStep = useCallback(() => setSelectedStepId(null), []);
   // Tool declarations and agent names say what a step does; each is best effort (a step still shows its ids without them).
@@ -115,7 +130,8 @@ function WorkflowDetail() {
   const stepNext = selectedStep && selectedStep.type !== "branch" && graphSpec
     ? buildWorkflowGraph(graphSpec).edges.filter((e) => e.source === selectedStep.id).map((e) => e.target)
     : [];
-  const toggleStep = (stepId: string) => setSelectedStepId((prev) => (prev === stepId ? null : stepId));
+  // Selecting the open step again keeps it open; the panel's close button and Esc close it.
+  const selectStep = (stepId: string) => setSelectedStepId(stepId);
 
   const versionSelect = workflow ? (
     <div className="flex items-center gap-2">
@@ -142,15 +158,12 @@ function WorkflowDetail() {
         <WorkflowHeader workflowId={id} name={workflow?.name ?? null} tab={tab} actions={
           <>
             {versionSelect}
-            {workflow && tab === "graph" ? (
-              <Button size="sm" data-testid="workflow-explain-button" aria-pressed={explainOpen} onClick={() => setExplainOpen((open) => !open)}>
-                AI 說明
-              </Button>
-            ) : null}
-            {workflow ? <WorkflowArchiveMenu workflow={workflow} onChanged={setWorkflow} /> : null}
+            {workflow && permissions.can("archive") ? <WorkflowArchiveMenu workflow={workflow} onChanged={setWorkflow} /> : null}
           </>
         } />
-        {workflow?.archived ? <WorkflowArchivedBanner workflow={workflow} onChanged={setWorkflow} /> : null}
+        {workflow ? <WorkflowDraftBar workflow={workflow} live={latestVersionOf(workflow, versions)} onChanged={reload} canPublish={permissions.can("publish")} /> : null}
+        {workflow?.archived ? <WorkflowArchivedBanner workflow={workflow} onChanged={setWorkflow} mayUnarchive={permissions.can("archive")} /> : null}
+        {workflow ? <PermissionNotice kind="workflow" id={workflow.id} actions={WORKFLOW_ACTIONS} className="flex min-w-0 flex-col gap-2 px-4 pt-2 empty:hidden" /> : null}
         {notFound || error || !workflow ? (
           <div className="p-4">
             {notFound ? <p role="alert" data-testid="workflow-not-found" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">Workflow not found.</p> : null}
@@ -170,13 +183,15 @@ function WorkflowDetail() {
                   <p role="status" className="rounded-md border border-border bg-muted/40 p-2 text-label text-foreground">No published version: showing the draft. Publish it (POST /api/v1/workflows/{"{id}"}/versions) to run it.</p>
                 )}
               </div>
-              <WorkflowRunPanel
-                workflowId={workflow.id}
-                workflowName={workflow.name}
-                version={current?.version ?? null}
-                spec={spec}
-                onStarted={(runId) => router.push(routes.workflowRun(workflow.id, runId, { collapsed }))}
-              />
+              {permissions.can("run") ? (
+                <WorkflowRunPanel
+                  workflowId={workflow.id}
+                  workflowName={workflow.name}
+                  version={current?.version ?? null}
+                  spec={spec}
+                  onStarted={(runId) => router.push(routes.workflowRun(workflow.id, runId, { collapsed }))}
+                />
+              ) : null}
               <WorkflowRunHistory
                 workflowId={workflow.id}
                 limit={RECENT_RUNS}
@@ -188,32 +203,73 @@ function WorkflowDetail() {
                   </Link>
                 }
               />
-              {graphSpec && selectedStep ? (
-                <PanelCard title="Step details" titleId="workflow-step-details-heading" testId="workflow-step-details">
+              {graphSpec ? (
+                <PanelCard title="Steps" titleId="workflow-steps-heading">
+                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={selectStep} agentNames={agentNames} />
+                </PanelCard>
+              ) : null}
+              <AccessSection
+                kind="workflow"
+                id={workflow.id}
+                heading={false}
+                wrapper={(content) => (
+                  <PanelCard title="Access" titleId="workflow-access-heading">
+                    {content}
+                  </PanelCard>
+                )}
+              />
+            </WorkflowFloatingPanel>
+            {graphSpec && selectedStep ? (
+              <aside
+                aria-labelledby="workflow-step-details-heading"
+                data-testid="workflow-step-details"
+                data-placement={control.layout.panel === "sheet" ? "bottom" : "right"}
+                className={cn(
+                  "absolute z-20 flex min-w-0 flex-col rounded-lg border border-border bg-surface-raised shadow-overlay",
+                  control.layout.panel === "sheet"
+                    ? "inset-x-3 bottom-3 max-h-[60%]"
+                    : "bottom-4 right-4 top-4 w-[calc(100%-2rem)] md:w-[24rem]",
+                )}
+              >
+                <div className="min-h-0 flex-1 overflow-y-auto p-4">
+                  <h2 id="workflow-step-details-heading" className="mb-3 text-label font-semibold text-foreground">Step details</h2>
                   <StepDefinitionPanel
                     step={selectedStep}
                     tool={stepTool}
                     agent={stepAgent}
                     next={stepNext}
-                    explanation={explanation.notes?.get(selectedStep.id) ?? null}
+                    explanation={<StepExplanation control={explanation} stepId={selectedStep.id} published={current !== null} />}
                     onClose={clearStep}
                   />
-                </PanelCard>
-              ) : null}
-              {graphSpec ? (
-                <PanelCard title="Steps" titleId="workflow-steps-heading">
-                  <WorkflowStepList key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} notes={explanation.notes} />
-                </PanelCard>
-              ) : null}
-            </WorkflowFloatingPanel>
-            {explainOpen ? <WorkflowExplainPanel control={explanation} published={current !== null} onClose={() => setExplainOpen(false)} /> : null}
+                </div>
+              </aside>
+            ) : null}
             {graphSpec ? (
-              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={toggleStep} agentNames={agentNames} />
+              <WorkflowCanvas key={`${id}:${selectedVersion ?? "draft"}`} spec={graphSpec} className="absolute inset-0" collapsedLoops={collapsed} onCollapsedLoopsChange={setCollapsed} selectedStepId={selectedStepId} onSelectStep={selectStep} agentNames={agentNames} />
             ) : (
               <div className="absolute inset-0 flex items-center justify-center bg-background">
                 <p className="text-label text-muted-foreground">No definition to show.</p>
               </div>
             )}
+          </div>
+        ) : null}
+
+        {workflow && tab === "access" ? (
+          <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-6 px-4 py-6">
+            <ResourceAccessPanel kind="workflow" id={workflow.id} />
+            <AccessSection
+              kind="workflow"
+              id={workflow.id}
+              heading={false}
+              wrapper={(content) => (
+                <div className="min-w-0">
+                  <h2 id={`access-${workflow.id}-title`} className="mb-1.5 text-label font-semibold text-foreground">
+                    What this workflow may use
+                  </h2>
+                  {content}
+                </div>
+              )}
+            />
           </div>
         ) : null}
 

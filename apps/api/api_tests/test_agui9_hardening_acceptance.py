@@ -60,8 +60,19 @@ def _routes(app):
 OTLP = ("POST", "/api/v1/otlp/v1/traces")
 
 
+HOOKS_PREFIX = "/api/v1/hooks/"
+# The built-in admin's setup and sign-in come before there is any credential and read none (swept by
+# test_agui9_hardening.test_the_local_sign_in_routes_take_no_key and test_local_auth_api).
+LOCAL_AUTH_PATH = "/api/v1/auth/local"
+
+
 def _outside(app):
-    return [(m, p) for m, p in _routes(app) if p != "/healthz" and not is_agui_path(p)]
+    # The inbound webhook route is public by design (its HMAC signature is its only gate, see test_webhooks_p1): it
+    # is swept separately below, where no credential of any kind may make it answer anything but its uniform refusals.
+    return [
+        (m, p) for m, p in _routes(app)
+        if p != "/healthz" and not is_agui_path(p) and not p.startswith((HOOKS_PREFIX, LOCAL_AUTH_PATH))
+    ]
 
 
 def _statuses(c, headers):
@@ -96,6 +107,16 @@ def test_sweep_outside_ag_ui_no_key_is_ever_accepted(c, world, monkeypatch, mode
         assert bad == {}, (mode, name, bad)
     none = {k: s for k, s in _statuses(c, {}).items() if s != 401}
     assert none == {}, (mode, none)
+
+
+@pytest.mark.parametrize("mode", ["dev", "api_key"])
+def test_the_public_hook_route_accepts_no_key_and_no_bearer(c, world, monkeypatch, mode):
+    monkeypatch.setenv("EAP_AUTH_MODE", mode)
+    hook = f"{HOOKS_PREFIX}{uuid.uuid4()}"
+    assert [m for m, p in _routes(c.app) if p.startswith(HOOKS_PREFIX)] == ["POST"]  # exactly one route, POST only
+    for headers in ({}, _bearer(world["valid"]), _bearer(world["revoked"]), _bearer(world["foreign"]), _dev(world["tenant"])):
+        r = c.post(hook, content=b"{}", headers=headers)
+        assert (r.status_code, r.json()) == (404, {"detail": "not found"}), headers  # never 2xx, never a 401 that names a credential
 
 
 def test_sweep_dev_bearer_is_accepted_outside_ag_ui_only_in_dev_mode(c, world, monkeypatch):

@@ -1,5 +1,6 @@
 "use client";
 
+import { useAgentPage } from "@/components/agentPage/AgentPageContext";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgUiInterrupts, useAgUiSubmitInterruptResponses, type AgUiInterrupt, type AgUiResumeEntry } from "@assistant-ui/react-ag-ui";
 import { ApprovalCard } from "@/components/approvals/ApprovalCard";
@@ -57,6 +58,7 @@ function targetOf(interrupt: AgUiInterrupt) {
 
 export function AgUiApprovals({ lookups, onCount, onRefreshRun }: { lookups: AgUiApprovalLookups; onCount?: (count: number) => void; onRefreshRun?: (runId: string) => Promise<void> }) {
   const interrupts = useAgUiInterrupts();
+  const agentId = useAgentPage()?.agentId;
   const submitResponses = useAgUiSubmitInterruptResponses();
   const ids = interrupts.map((interrupt) => interrupt.id).join("|");
   const [decided, setDecided] = useState<ReadonlyMap<string, AgUiResumeEntry>>(() => new Map());
@@ -164,6 +166,7 @@ export function AgUiApprovals({ lookups, onCount, onRefreshRun }: { lookups: AgU
         return (
           <div key={interrupt.id} className="my-2" data-testid="tool-approval-waiting" data-tool-call-id={target.toolCallId} data-interrupt-id={interrupt.id}>
             <ApprovalCard
+              subject={agentId ? { kind: "agent", id: agentId } : null}
               approval={{
                 kind: "tool",
                 runId: target.runId,

@@ -25,7 +25,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 from eap_run_store.cursor import MAX_CURSOR_LENGTH
-from eap_run_store.store import Base, RunModel, run_filter_conditions
+from eap_run_store.store import Base, RunModel, run_filter_conditions, visible_runs_condition
 
 
 class SpanModel(Base):
@@ -350,7 +350,8 @@ class SpanStore:
         """Newest first by (start, span_id). `filters`: `from` / `to` (span start, `[from, to)`),
         `source` ("platform" | "external"; absent = both), `span_kind`, `q` (case-insensitive substring of the span name), `agent_id`, `workflow_id`,
         `model` and `provider` (as `GET /runs`: the run used that model), and `status`, `kind`,
-        `tool_id`, `tags`, `metadata` of the span's run. The second item is an opaque cursor when
+        `tool_id`, `tags`, `metadata` of the span's run, and `visible_agent_ids` / `visible_workflow_ids` (per-resource
+        access: only spans of runs of those agents and workflows, and external spans). The second item is an opaque cursor when
         a full page came back, else None. `limit` is clamped to 1..200 and `q` to its first 200
         characters (the store holds the bounds, not only the route).
 
@@ -380,6 +381,16 @@ class SpanStore:
                 tenant_id, **{k: f[k] for k in _RUN_FILTERS if f.get(k)}, parent_run_id=None
             )
             stmt = stmt.where(exists().where(cast(RunModel.id, PG_UUID(as_uuid=False)) == SpanModel.run_id, *conds))
+        visible = visible_runs_condition(f.get("visible_agent_ids"), f.get("visible_workflow_ids"))
+        if visible is not None:
+            # Per-resource access (IAM P2b): platform spans of a run the caller may read; external (OTLP) spans belong to
+            # the tenant, not to a run.
+            stmt = stmt.where(or_(
+                SpanModel.source == "external",
+                exists().where(
+                    cast(RunModel.id, PG_UUID(as_uuid=False)) == SpanModel.run_id, RunModel.tenant_id == tenant_id, visible
+                ),
+            ))
         if before is not None:
             stmt = stmt.where(tuple_(SpanModel.start, SpanModel.span_id) < tuple_(before.start, before.span_id))
         stmt = stmt.order_by(SpanModel.start.desc(), SpanModel.span_id.desc()).limit(limit)

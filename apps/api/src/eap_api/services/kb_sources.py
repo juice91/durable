@@ -16,6 +16,8 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from eap_api.ports import RunLauncher
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict, InvalidInput, NotFound, ServiceError, Unavailable
 from eap_observability.context import current_trace_context
 from eap_kb_sources.check import load_providers
@@ -140,7 +142,7 @@ _KB_NOT_FOUND = ("knowledge base not found", "knowledge_base_not_found")
 _SOURCE_NOT_FOUND = ("source not found", "source_not_found")
 
 
-class KbSourceService:
+class KbSourceService(AccessBound):
     """Sources of a knowledge base and their syncs (tenant-scoped)."""
 
     def __init__(
@@ -152,7 +154,9 @@ class KbSourceService:
         run_store: RunStore,
         engine: Any,
         launcher: RunLauncher,
+        access: Access | None = None,
     ) -> None:
+        self._access = access  # None: no caller to check
         self.kb_store = kb_store
         self.sources = sources
         self.connections = connections
@@ -164,17 +168,21 @@ class KbSourceService:
     # ------------------------------------------------------------------ catalogue
 
     def workflow_template(self) -> dict[str, Any]:
+        acl.require(self._access, "read", "tenant", None)
         spec = load_workflow_template()
         if spec is None:
             raise Unavailable("the sync workflow template is not available", code="workflow_template_unavailable")
         return spec
 
     def adapters(self) -> list[dict[str, Any]]:
+        acl.require(self._access, "read", "tenant", None)
         return [adapter_view(info) for info in list_adapters()]
 
     # ------------------------------------------------------------------ lookups
 
-    def _require_kb(self, tenant_id: str, kb_id: str) -> None:
+    def _require_kb(self, tenant_id: str, kb_id: str, action: str = "read") -> None:
+        # A source and its syncs are checked through their knowledge base (read to see, edit to change).
+        acl.require(self._access, action, "knowledge_base", str(kb_id))
         if self.kb_store.get_knowledge_base(tenant_id, kb_id) is None:
             raise NotFound(_KB_NOT_FOUND[0], code=_KB_NOT_FOUND[1])
 
@@ -185,7 +193,8 @@ class KbSourceService:
         source = self.sources.get(tenant_id, sid)
         return source if source is not None and source.knowledge_base_id == kid else None
 
-    def _require_source(self, tenant_id: str, kb_id: str, source_id: str) -> Source:
+    def _require_source(self, tenant_id: str, kb_id: str, source_id: str, action: str = "read") -> Source:
+        acl.require(self._access, action, "knowledge_base", str(kb_id))
         source = self._source_in_kb(tenant_id, kb_id, source_id)
         if source is None:
             raise NotFound(_SOURCE_NOT_FOUND[0], code=_SOURCE_NOT_FOUND[1])
@@ -195,7 +204,7 @@ class KbSourceService:
 
     def create_source(self, tenant_id: str, kb_id: str, body: SourceCreate) -> tuple[dict[str, Any], int]:
         """The new source's view and revision."""
-        self._require_kb(tenant_id, kb_id)
+        self._require_kb(tenant_id, kb_id, "edit")
         cid = parse_uuid(body.connection_id)
         if cid is None or self.connections.get(tenant_id, cid) is None:
             raise NotFound("connection not found", code="connection_not_found")
@@ -227,7 +236,7 @@ class KbSourceService:
         current source (the API answers 412 with its ETag)."""
         from eap_run_store.revisions import RevisionMismatch
 
-        source = self._require_source(tenant_id, kb_id, source_id)
+        source = self._require_source(tenant_id, kb_id, source_id, "edit")
         if body.config is not None:
             _validate_config(source.kind, source.provider, body.config)
 
@@ -259,7 +268,7 @@ class KbSourceService:
     def start_sync(
         self, tenant_id: str, kb_id: str, source_id: str, body: SyncCreate, created_by: str | None
     ) -> dict[str, Any]:
-        source = self._require_source(tenant_id, kb_id, source_id)
+        source = self._require_source(tenant_id, kb_id, source_id, "edit")
         trace_id, traceparent = current_trace_context()
         try:
             return launch_sync(
@@ -280,6 +289,7 @@ class KbSourceService:
         return {"items": [sync_view(s) for s in rows]}
 
     def get_sync(self, tenant_id: str, kb_id: str, source_id: str, run_id: str) -> dict[str, Any]:
+        acl.require(self._access, "read", "knowledge_base", str(kb_id))
         source = self._source_in_kb(tenant_id, kb_id, source_id)
         rid = parse_uuid(run_id)
         missing = NotFound("sync not found", code="sync_not_found")

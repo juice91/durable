@@ -21,6 +21,8 @@ from typing import Any, Protocol
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import NotFound
 from eap_api.workflows.models import WorkflowModel
 from eap_observability.redaction import redact
@@ -151,10 +153,13 @@ def _regex_ok(item: Suggestion | None) -> Suggestion | None:
     return item
 
 
-class ScorerSuggestionService:
-    def __init__(self, db: Session, run_store: Any) -> None:
+class ScorerSuggestionService(AccessBound):
+    """Rule suggestions for an agent or workflow: an authoring aid that spends tokens, so `edit` on the target."""
+
+    def __init__(self, db: Session, run_store: Any, access: Access | None = None) -> None:
         self.db = db
         self.run_store = run_store
+        self._access = access  # None: no caller to check
 
     def _target(self, tenant_id: str, kind: str, target_id: uuid.UUID) -> tuple[str, dict[str, Any]]:
         """`(name, draft spec)` of the tenant's agent or workflow, NotFound otherwise."""
@@ -162,6 +167,7 @@ class ScorerSuggestionService:
         row = self.db.query(model).filter(model.id == str(target_id), model.tenant_id == tenant_id).first()
         if row is None:
             raise NotFound(AGENT_NOT_FOUND if kind == "agent" else WORKFLOW_NOT_FOUND)
+        acl.require(self._access, "edit", kind, str(target_id))
         return row.name, row.draft_spec or {}
 
     def _suggester(self, tenant_id: str, user_id: str, ports: SuggesterPorts) -> tuple[str, ModelRef]:

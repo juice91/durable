@@ -1,7 +1,11 @@
 # eap-iam-cfaccess
 
+**Legacy, single-tenant only.** Not in the deployed identity chain. Access has no tenant concept, so every Access user
+becomes a user of one tenant; the plug-in refuses to start when `EAP_ZITADEL_ORG_TENANT_MAP` names another tenant (or
+cannot be read) or when `EAP_TENANT_REGISTRY=enforce`. Removing it: `docs/iam.md`, "The Cloudflare Access JWT".
+
 Identity plug-in (entry point `eap.iam.identity` / `cfaccess`): the Cloudflare Access JWT, design section 1.3 of
-`docs/superpowers/specs/2026-11-22-iam-design.md`.
+an internal design note.
 
 Cloudflare Access puts a signed JWT in `Cf-Access-Jwt-Assertion` on every request it lets through. On every request the
 provider checks, in order: the header is present and at most 8 KiB; the JOSE header says `RS256` and carries a `kid`;

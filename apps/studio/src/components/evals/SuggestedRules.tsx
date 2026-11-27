@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Check, Sparkles, X } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -32,6 +33,7 @@ type CardState = { added: string | null; dismissed: boolean };
  * anything is created, so the host can reload its own lists.
  */
 export function SuggestedRules({ target, onChanged, heading = "Suggested rules" }: { target: EvalTargetRef; onChanged?: () => void; heading?: string }) {
+  const mayEdit = useCan(target.kind, target.id || undefined, "edit");
   const [result, setResult] = useState<ScorerSuggestions | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,10 +80,12 @@ export function SuggestedRules({ target, onChanged, heading = "Suggested rules" 
           <h2 className={sectionTitleClass}>{heading}</h2>
           <p className={hintClass}>Rules proposed from the {target.kind === "workflow" ? "workflow's steps" : "agent's instructions"} and its recent runs. Nothing is added until you click.</p>
         </div>
-        <Button variant="secondary" size="sm" onClick={() => void suggest()} disabled={loading} data-testid="suggest-rules">
-          <Sparkles strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-          {loading ? "Reading the definition…" : result ? "Suggest again" : "Suggest rules"}
-        </Button>
+        {mayEdit ? (
+          <Button variant="secondary" size="sm" onClick={() => void suggest()} disabled={loading} data-testid="suggest-rules">
+            <Sparkles strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+            {loading ? "Reading the definition…" : result ? "Suggest again" : "Suggest rules"}
+          </Button>
+        ) : null}
       </div>
       {error ? <p role="alert" className={alertClass} data-testid="suggest-rules-error">{error}</p> : null}
       {result && visible.length === 0 && !error ? (

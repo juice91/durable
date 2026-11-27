@@ -1,5 +1,6 @@
 "use client";
 
+import { usePermissions } from "@/lib/permissions";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -78,6 +79,8 @@ function expectedPreview(value: unknown): string {
   return preview(typeof value === "string" ? value : JSON.stringify(value), 60);
 }
 
+const SUITE_ACTIONS = ["edit", "run"] as const;
+
 /** One suite: its evaluators, cases (a row opens the case Sheet), run history with compare, and the
  * Run, Import and Export actions. */
 export function SuiteView({ target: givenTarget, agent = null, versions, suiteId, dataset = false, backHref, hasMemory, runs, runsError, reloadRuns }: SuiteViewProps) {
@@ -122,7 +125,10 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
   }, [suiteId, reloadKey]);
 
   const archived = suite?.archived === true;
-  const canAddCase = suite !== null && !archived && suite.cases.length < MAX_SUITE_CASES;
+  // `edit` and `run` on the agent or workflow the suite tests.
+  const permissions = usePermissions(target.kind, target.id || undefined, SUITE_ACTIONS);
+  const mayEdit = permissions.can("edit");
+  const canAddCase = mayEdit && suite !== null && !archived && suite.cases.length < MAX_SUITE_CASES;
   useCreateAction(canAddCase ? () => edit.open("new") : null);
 
   const suiteRuns = (runs ?? []).filter((r) => r.suite_id === suiteId);
@@ -231,24 +237,30 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
           {suite?.description ? <p className="break-words text-label text-muted-foreground">{suite.description}</p> : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="primary" onClick={() => setRunning(true)} disabled={!suite || archived || suite.cases.length === 0} data-testid="eval-suite-run">
-            {icon(Play)}
-            Run
-          </Button>
-          {dataset ? (
+          {permissions.can("run") ? (
+            <Button variant="primary" onClick={() => setRunning(true)} disabled={!suite || archived || suite.cases.length === 0} data-testid="eval-suite-run">
+              {icon(Play)}
+              Run
+            </Button>
+          ) : null}
+          {dataset && mayEdit ? (
             <Button onClick={() => edit.open("new")} disabled={!canAddCase} data-testid="eval-suite-new-item">
               {icon(Plus)}
               New item
             </Button>
           ) : null}
-          <Button onClick={() => pickFile(".csv,text/csv")} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A CSV file with the columns name, input, expected_output and metadata, at most 1 MiB" data-testid="eval-suite-import-csv">
-            {icon(FileText)}
-            Import CSV
-          </Button>
-          <Button onClick={() => pickFile(".yaml,.yml,.json,application/json,application/yaml,text/yaml")} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A pydantic_evals YAML or JSON file, at most 1 MiB" data-testid="eval-suite-import">
-            {icon(Upload)}
-            {importing ? "Importing…" : "Import JSON"}
-          </Button>
+          {mayEdit ? (
+            <Button onClick={() => pickFile(".csv,text/csv")} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A CSV file with the columns name, input, expected_output and metadata, at most 1 MiB" data-testid="eval-suite-import-csv">
+              {icon(FileText)}
+              Import CSV
+            </Button>
+          ) : null}
+          {mayEdit ? (
+            <Button onClick={() => pickFile(".yaml,.yml,.json,application/json,application/yaml,text/yaml")} disabled={!suite || archived || importing} aria-describedby="eval-import-hint" title="A pydantic_evals YAML or JSON file, at most 1 MiB" data-testid="eval-suite-import">
+              {icon(Upload)}
+              {importing ? "Importing…" : "Import JSON"}
+            </Button>
+          ) : null}
           {dataset ? (
             <Button onClick={() => setSchemaOpen(true)} disabled={!suite} data-testid="eval-suite-schema">Schema</Button>
           ) : null}
@@ -265,16 +277,18 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
               <DropdownMenuItem onSelect={() => void onExport("json")} data-testid="eval-suite-export-json">JSON (pydantic_evals)</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <IconButton label="More suite actions" icon={icon(MoreHorizontal)} disabled={!suite} data-testid="eval-suite-more" />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => edit.open("suite")} data-testid="eval-suite-edit">Edit suite</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void setArchived(!archived)} data-testid="eval-suite-archive">{archived ? "Restore suite" : "Archive suite"}</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setConfirm("delete")} destructive data-testid="eval-suite-delete">Delete suite</DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {mayEdit ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <IconButton label="More suite actions" icon={icon(MoreHorizontal)} disabled={!suite} data-testid="eval-suite-more" />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => edit.open("suite")} data-testid="eval-suite-edit">Edit suite</DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => void setArchived(!archived)} data-testid="eval-suite-archive">{archived ? "Restore suite" : "Archive suite"}</DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setConfirm("delete")} destructive data-testid="eval-suite-delete">Delete suite</DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
         </div>
       </div>
 
@@ -289,10 +303,12 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
       <section className="min-w-0 space-y-2" aria-labelledby="eval-evaluators-title">
         <div className="flex min-w-0 items-center gap-2">
           <h3 id="eval-evaluators-title" className={`${sectionTitleClass} min-w-0 flex-1`}>Evaluators</h3>
-          <Button size="sm" variant="ghost" onClick={() => edit.open("suite")} disabled={!suite || archived} data-testid="eval-evaluators-edit">
-            {icon(Pencil)}
-            Edit
-          </Button>
+          {mayEdit ? (
+            <Button size="sm" variant="ghost" onClick={() => edit.open("suite")} disabled={!suite || archived} data-testid="eval-evaluators-edit">
+              {icon(Pencil)}
+              Edit
+            </Button>
+          ) : null}
         </div>
         {suite && suite.evaluators.length === 0 ? (
           <p className={hintClass} data-testid="eval-evaluators-empty">No suite evaluators: cases pass unless their own evaluators fail. Add one with Edit.</p>
@@ -311,7 +327,7 @@ export function SuiteView({ target: givenTarget, agent = null, versions, suiteId
       <section className="min-w-0 space-y-2" aria-labelledby="eval-cases-title">
         <div className="flex min-w-0 items-center gap-2">
           <h3 id="eval-cases-title" className={`${sectionTitleClass} min-w-0 flex-1`}>Cases</h3>
-          {dataset ? null : (
+          {dataset || !mayEdit ? null : (
             <Button size="sm" onClick={() => edit.open("new")} disabled={!canAddCase} data-testid="eval-case-add">
               {icon(Plus)}
               Add case

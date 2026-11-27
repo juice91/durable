@@ -1,5 +1,9 @@
 "use client";
 
+import { refusedMessage } from "@/lib/access";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useMayChat } from "./useMayChat";
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AppendMessage } from "@assistant-ui/react";
 import Link from "next/link";
@@ -270,6 +274,23 @@ function useChatAgent(agentId: string): { agent: Agent | undefined; versions: Ag
   return { agent, versions, agentError };
 }
 
+/** The body of a refused send, as the AG-UI client kept it. */
+function payloadOf(failure: unknown): unknown {
+  return (failure as { payload?: unknown } | null)?.payload;
+}
+
+/** Shown instead of the composer to someone who may read the conversations but not send. */
+function ReadOnlyChat({ agentId }: { agentId: string }) {
+  return (
+    <div data-testid="chat-read-only" className="flex min-w-0 flex-col gap-2 rounded-lg border border-border bg-surface p-3">
+      <p className="text-label text-muted-foreground">You can read these conversations, but not send messages to this agent.</p>
+      <PermissionNotice kind="agent" id={agentId} actions={RUN_ACTION} />
+    </div>
+  );
+}
+
+const RUN_ACTION = ["run"] as const;
+
 export interface ChatTabProps {
   /** The agent, fixed by the route (`/agents/:id/chat`). */
   agentId: string;
@@ -294,6 +315,10 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
   const reportChatHref = page && page.agentId === agentId ? page.setChatHref : undefined;
   const pathname = usePathname();
   const { agent: selectedAgent, versions, agentError } = useChatAgent(agentId);
+  const chat = useMayChat(selectedAgent);
+  // Known to be refused: no composer. While not known, it is there and disabled.
+  const chatRefused = Boolean(selectedAgent) && !chat.loading && !chat.can("run");
+  const mayAttach = useCan("tenant", null, "write");
   const [ready, setReady] = useState(false);
   // An old link to a conversation of another agent: shown as a notice with a link to that chat.
   const [otherAgentConversation, setOtherAgentConversation] = useState<{ agentId: string; conversationId: string } | null>(null);
@@ -1005,7 +1030,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
           setUnsentInput(input);
           if (errors.context) setContextOpen(true);
         } else if (reason instanceof TurnStartError) {
-          setError(`Failed to send the message: ${reason.message}`);
+          // A refusal's message is already a sentence of its own (turnApi).
+          setError(`Failed to send the message${reason.status === 403 ? "." : ":"} ${reason.message}`);
+        } else if (reason instanceof Error && (reason as Error & { status?: unknown }).status === 403) {
+          // Refused before the turn (starting the conversation): the same words as a refused turn.
+          setError(`Failed to send the message. ${reason.message}`);
         } else {
           setError("Failed to send the message.");
         }
@@ -1219,6 +1248,11 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
           if (errors.context) setContextOpen(true);
         } else {
           setError(`Failed to send the message: ${refusalText(refusal)}`);
+          // A refusal of the policy engine says who, what and whom to ask instead of "not allowed".
+          const shown = sessionKeyRef.current;
+          void refusedMessage(refusal.status, payloadOf(failure)).then((why) => {
+            if (why && sessionKeyRef.current === shown) setError(`Failed to send the message. ${why}`);
+          });
         }
         return;
       }
@@ -1229,6 +1263,9 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
         // The resume was refused before its stream (422, or a 409 for a reused runId): say so and
         // re-read the runs now and shortly after, so the cards and tool statuses show what is recorded.
         setError(`The decision could not be sent: ${refusalText(refusal)}`);
+        void refusedMessage(refusal.status, payloadOf(failure)).then((why) => {
+          if (why) setError(`The decision could not be sent. ${why}`);
+        });
         for (const runId of new Set(targets.map((target) => target.runId))) {
           void refreshTurn(runId, true);
           setTimeout(() => void refreshTurn(runId, true), 700);
@@ -1410,7 +1447,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
     if (selectedAgentId) savePlaygroundContext(selectedAgentId, value);
   };
 
-  const composerDisabled = runActive || !selectedAgent || Boolean(modelChoiceError) || modelSettingsBad || (agui && (aguiInterrupts > 0 || nativeFollow !== null));
+  const composerDisabled = runActive || !selectedAgent || chat.loading || !chat.can("run") || Boolean(modelChoiceError) || modelSettingsBad || (agui && (aguiInterrupts > 0 || nativeFollow !== null));
   const thread = useMemo(() => (agui ? { messages: [] } : conversationToThread(turns)), [agui, turns]);
 
   // Each turn's badge and notices, by native run id (the pane puts each under its turn's last message).
@@ -1559,6 +1596,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
       onNew={resetConversation}
       onDeleted={handleConversationDeleted}
       memorySpec={memorySpec}
+      mayChange={chat.can("run")}
       memoryInspector={
         selectedAgent && memoryConfig
           ? {
@@ -1677,6 +1715,7 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
             </p>
             {nativeWaiting.map((approval) => (
               <ApprovalCard
+                subject={{ kind: "agent", id: agentId }}
                 key={approval.toolCallId}
                 approval={{ kind: "tool", runId: nativeFollow, toolCallId: approval.toolCallId, toolName: approval.toolName, args: approval.args, deadline: approval.deadline, summary: approval.summary ?? null }}
                 onRefresh={() => refreshTurn(nativeFollow, true)}
@@ -1744,14 +1783,18 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
                 attachmentCapabilities={attachmentCapabilities}
                 onAttachmentNotice={setAttachmentNotice}
                 composer={
-                  <Composer
-                    attachments
-                    attachmentCapabilities={attachmentCapabilities}
-                    attachmentNotice={attachmentNotice}
-                    chips={chips}
-                    outputChecked={hasOutputProcessors(spec)}
-                    notices={hasNotices ? notices : null}
-                  />
+                  chatRefused ? (
+                    <ReadOnlyChat agentId={agentId} />
+                  ) : (
+                    <Composer
+                      attachments={mayAttach}
+                      attachmentCapabilities={attachmentCapabilities}
+                      attachmentNotice={attachmentNotice}
+                      chips={chips}
+                      outputChecked={hasOutputProcessors(spec)}
+                      notices={hasNotices ? notices : null}
+                    />
+                  )
                 }
               />
             ) : null
@@ -1769,11 +1812,15 @@ export function ChatTab({ agentId, conversationId: routeConversationId = null, s
               onDraftRestored={clearRestoreDraft}
               onRefreshRun={refreshRun}
               composer={
-                <Composer
-                  chips={chips}
-                  outputChecked={hasOutputProcessors(spec)}
-                  notices={hasNotices ? notices : null}
-                />
+                chatRefused ? (
+                  <ReadOnlyChat agentId={agentId} />
+                ) : (
+                  <Composer
+                    chips={chips}
+                    outputChecked={hasOutputProcessors(spec)}
+                    notices={hasNotices ? notices : null}
+                  />
+                )
               }
             />
           )}

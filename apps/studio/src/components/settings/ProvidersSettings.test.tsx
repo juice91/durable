@@ -59,6 +59,18 @@ describe("Settings → Providers", () => {
     expect(within(openai).getByTestId("provider-status")).toHaveTextContent("Not configured");
   });
 
+  it("says how to add a provider while none is configured, and only then", async () => {
+    render(<ProvidersSettings />);
+    await screen.findAllByTestId("provider-row");
+    expect(screen.queryByTestId("providers-none-configured")).toBeNull();
+    cleanup();
+    providers = providers.map((p) => ({ ...p, configured: false, status: "not_configured" as const, model_count: 0 }));
+    render(<ProvidersSettings />);
+    const hint = await screen.findByTestId("providers-none-configured");
+    expect(hint).toHaveTextContent(/No model provider is configured/);
+    expect(hint).toHaveTextContent(/\.env.*docker compose up -d/);
+  });
+
   it("says plainly that it is read-only and that keys come from the server", async () => {
     render(<ProvidersSettings />);
     expect(await screen.findByTestId("providers-readonly-note")).toHaveTextContent(/Read-only.*server's environment/i);

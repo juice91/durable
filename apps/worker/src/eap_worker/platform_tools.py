@@ -203,7 +203,7 @@ def platform_toolset_for_run(
     tools: list[PlatformTool] = []
     if spec.knowledge_bases:
         tools.append(RetrieveTool(spec.knowledge_bases, knowledge))
-    wm_tool = working_memory_tool(deps, memory)
+    wm_tool = None if getattr(deps, "read_only", False) else working_memory_tool(deps, memory)
     if wm_tool is not None:
         tools.append(wm_tool)
     return PlatformToolset(tools) if tools else None

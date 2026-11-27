@@ -126,7 +126,7 @@ def test_conversations_revision_keeps_existing_runs_as_standalone():
 
 
 def test_single_head_is_the_iam_actor_audit_migration():
-    assert head_revisions() == {"0039_api_key_owner"}
+    assert head_revisions() == {"0043_external_access"}
 
 
 def test_revisions_after_api_keys_form_one_chain():

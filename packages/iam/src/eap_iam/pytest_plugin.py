@@ -16,7 +16,7 @@ def pytest_configure(config) -> None:  # noqa: ANN001
     if os.environ.get("EAP_IAM_TEST_FAKES") == "1":
         from eap_iam.testing import register_fakes
 
-        os.environ["EAP_IAM_IGNORE_PLUGINS"] = "apikey,cfaccess,devloopback,openaccess"
+        os.environ["EAP_IAM_IGNORE_PLUGINS"] = "apikey,cfaccess,devloopback,localadmin,openaccess,webhook"
         os.environ["EAP_IAM_IDENTITY"] = "fake"
         os.environ["EAP_IAM_POLICY"] = "fake"
         register_fakes()

@@ -55,7 +55,7 @@ import { ConfigPanel } from "@/components/agentPage/ConfigPanel";
 import { EditorTab } from "@/components/agentPage/EditorTab";
 import { expectNoAxeViolations, AXE_TIMEOUT_MS } from "@/test/a11y";
 import { EDITOR_STEPS, stepForError } from "./registry";
-import { findSelectOption, getSelectOption, optionsOf } from "@/test/select";
+import { getSelectOption, optionsOf } from "@/test/select";
 
 const KB1 = "11111111-1111-4111-8111-111111111111";
 const KB2 = "22222222-2222-4222-8222-222222222222";
@@ -119,7 +119,8 @@ const click = (id: string) => fireEvent.click(byId(id));
 /** The shared ModelPicker: choose the provider in its select, then the model in its searchable combobox. */
 async function pickModel(modelId: string, provider: string, name: string, { hidden = false } = {}) {
   const providerId = modelId.replace(/-model$/, "-provider");
-  await findSelectOption(new RegExp(`^${provider}\\b`));
+  // Until the model list arrives the provider is a free-text input (another Select's options say nothing about it).
+  await waitFor(() => expect(byId(providerId)).toHaveAttribute("data-select-trigger"));
   set(providerId, provider);
   await waitFor(() => expect(byId(modelId)).toBeEnabled());
   fireEvent.click(byId(modelId));

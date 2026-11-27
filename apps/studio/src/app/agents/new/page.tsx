@@ -1,4 +1,6 @@
 "use client";
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { usePermissions } from "@/lib/permissions";
 import { readableError } from "@/components/agents/readableError";
 import { Suspense, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -58,13 +60,23 @@ function NewAgentForm() {
   );
 }
 
+/** What "why can't I?" asks about here. */
+const CREATE_ACTIONS = ["create"] as const;
+
 export default function NewAgentPage() {
+  const permissions = usePermissions("agent", null, CREATE_ACTIONS);
   return (
     <>
       <PageHeader crumbs={[navCrumb("agents"), { label: "New Agent" }]} />
-      <Suspense fallback={null}>
-        <NewAgentForm />
-      </Suspense>
+      {permissions.loading ? null : permissions.can("create") ? (
+        <Suspense fallback={null}>
+          <NewAgentForm />
+        </Suspense>
+      ) : (
+        <div className="px-4 py-6">
+          <PermissionNotice kind="agent" id={null} actions={CREATE_ACTIONS} />
+        </div>
+      )}
     </>
   );
 }

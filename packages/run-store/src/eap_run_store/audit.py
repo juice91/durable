@@ -26,7 +26,8 @@ AUDIT_OUTCOME_CHECK = "outcome IN ('success', 'denied', 'failed')"
 DEFAULT_RETENTION_DAYS = 400
 MAX_LIMIT = 200
 DETAIL_FIELDS = frozenset({
-    "method", "route", "status", "name", "from", "to", "version", "decision", "scope", "role", "step_id", "tool", "count", "actor_email", "via_api_key",
+    "method", "route", "status", "name", "from", "to", "version", "decision", "scope", "role", "step_id", "tool", "count", "actor_email", "via_api_key", "reason",
+    "client", "protocol", "export", "agent",
 })
 MAX_DETAIL_VALUE = 200
 _CREDENTIAL = re.compile(r"(pos_[A-Za-z0-9_-]{8,}|Bearer\s+\S+|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9]{16,})")

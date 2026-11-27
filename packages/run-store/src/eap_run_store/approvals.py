@@ -17,6 +17,7 @@ import binascii
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from sqlalchemy import (
@@ -33,6 +34,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    true,
     tuple_,
     update,
 )
@@ -424,13 +426,18 @@ class ApprovalStore:
         agent_id: str | None = None,
         cursor: ApprovalCursor | str | None = None,
         limit: int = 50,
+        visible_agent_ids: Sequence[str] | None = None,
+        visible_workflow_ids: Sequence[str] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         """One page of the tenant's inbox and the next page's cursor (None on the last page).
 
         `pending`: open rows of runs that are not terminal (a run that ended while waiting no longer
         waits), newest request first. `decided`: rows with a decision, newest decision first.
         `kind` and `agent_id` filter. `cursor` is the previous page's token (or an ApprovalCursor);
-        a malformed token raises InvalidRunCursor. `limit` is clamped to 1..200."""
+        a malformed token raises InvalidRunCursor. `limit` is clamped to 1..200.
+
+        `visible_agent_ids` / `visible_workflow_ids` (per-resource access): only items of a listed workflow, or of a
+        listed agent when the item has no workflow; None leaves that side unrestricted."""
         if not tenant_id:
             raise ValueError("tenant_id is required")
         if status not in ("pending", "decided"):
@@ -457,6 +464,10 @@ class ApprovalStore:
             query = query.where(pa.kind == kind)
         if agent_id is not None:
             query = query.where(pa.agent_id == str(agent_id))
+        if visible_agent_ids is not None or visible_workflow_ids is not None:
+            agent_ok = true() if visible_agent_ids is None else pa.agent_id.in_(list(visible_agent_ids))
+            workflow_ok = true() if visible_workflow_ids is None else pa.workflow_id.in_(list(visible_workflow_ids))
+            query = query.where(or_(and_(pa.workflow_id.is_not(None), workflow_ok), and_(pa.workflow_id.is_(None), agent_ok)))
         if cursor is not None:
             query = query.where(
                 tuple_(order_at, pa.run_id, pa.kind, pa.approval_key)
@@ -472,6 +483,24 @@ class ApprovalStore:
             rows = rows[:limit]
             next_cursor = ApprovalCursor.after(rows[-1], status).encode()
         return rows, next_cursor
+
+    def run_target(self, tenant_id: str, run_id: str) -> tuple[str | None, str | None] | None:
+        """`(agent_id, workflow_id)` an approval of this run belongs to: the workflow run's workflow, or for an agent
+        run its agent (and its parent's workflow when it is a workflow's step). None: unknown run or another tenant's."""
+        with self.Session() as session:
+            run = session.execute(
+                select(RunModel.parent_run_id, RunModel.agent_id, RunModel.workflow_id).where(
+                    RunModel.tenant_id == tenant_id, RunModel.id == str(run_id)
+                )
+            ).one_or_none()
+            if run is None:
+                return None
+            workflow_id = run.workflow_id
+            if workflow_id is None and run.parent_run_id is not None:
+                workflow_id = session.execute(
+                    select(RunModel.workflow_id).where(RunModel.tenant_id == tenant_id, RunModel.id == run.parent_run_id)
+                ).scalar_one_or_none()
+            return run.agent_id, workflow_id
 
     def get(self, tenant_id: str, run_id: str, kind: ApprovalKind, approval_key: str) -> dict[str, Any] | None:
         """One projection row, or None (unknown, or another tenant's)."""

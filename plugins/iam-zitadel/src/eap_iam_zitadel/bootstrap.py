@@ -4,19 +4,26 @@ Creates (or finds) in the machine user's organisation:
   - the project `durable` with the roles admin, editor and viewer (role assertion on, role check on: a user who holds no
     grant cannot sign in to the project's applications, so removing a member really removes the access);
   - the Studio application: public OIDC client, authorization code + PKCE, with the redirect and post-logout URIs;
-  - a confidential OIDC application for Cloudflare Access to use as its identity provider;
   - the admin role for the bootstrap admin user.
 Then prints the org id -> tenant mapping and the values to add to the deploy secrets.
 
+Only with `--cloudflare-access TEAM` it also creates (or repairs) a confidential OIDC application for Cloudflare Access
+to use as its identity provider, and prints the Cloudflare setup. Without the option it neither reads nor writes such an
+application: one that exists is kept (it is never deleted here).
+
 A second run changes nothing: every step first reads what exists and writes only a difference. The client ids and the
 Access client secret go to STDOUT only, as instructions for the operator; nothing is logged, and the secret is shown
-once, when ZITADEL issues it (`--rotate-access-secret` issues a new one)."""
+once, when ZITADEL issues it (`--rotate-access-secret` issues a new one).
+
+`--platform-users` and `--instance-policy` do something else (and only that): the split machine users and the instance
+login policy of the tenant provisioning design; see `platform_setup`."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import os
+import re
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,6 +31,7 @@ from typing import Any, TextIO
 
 import httpx2
 
+from eap_iam_zitadel import platform_setup
 from eap_iam_zitadel.management import ManagementClient, ZitadelApiError
 from eap_iam_zitadel.settings import parse_machine_key
 
@@ -116,12 +124,12 @@ def _same(existing: Mapping[str, Any], desired: Mapping[str, Any], keys: tuple[s
 
 
 class Bootstrap:
-    def __init__(self, client: ManagementClient, *, tenant: str, public_url: str, loopback_url: str, access_team: str,
+    def __init__(self, client: ManagementClient, *, tenant: str, public_url: str, loopback_url: str, access_team: str | None,
                  admin_user: str, rotate_access_secret: bool = False, dry_run: bool = False) -> None:
         self.client = client
         self.tenant = tenant
         self.studio = studio_config(public_url, loopback_url)
-        self.access = access_config(access_team)
+        self.access = access_config(access_team) if access_team else None  # None: not asked for
         self.admin_user = admin_user
         self.rotate = rotate_access_secret
         self.dry_run = dry_run
@@ -134,7 +142,8 @@ class Bootstrap:
         res.project_id = await self._project()
         await self._roles()
         res.studio_client_id = await self._app(STUDIO_APP, self.studio, STUDIO_CONFIG_KEYS, public=True)
-        res.access_client_id = await self._app(ACCESS_APP, self.access, ACCESS_CONFIG_KEYS, public=False)
+        if self.access:
+            res.access_client_id = await self._app(ACCESS_APP, self.access, ACCESS_CONFIG_KEYS, public=False)
         res.admin_user_id = await self._admin_grant()
         return res
 
@@ -294,9 +303,8 @@ def render_dry_run(res: Result, *, issuer: str, calls: list[tuple[str, str, int]
     return "\n".join(lines) + "\n"
 
 
-def render(res: Result, *, issuer: str, tenant: str, access_team: str) -> str:
-    """The operator's instructions. This is the ONLY place the client ids and the Access secret are written."""
-    secret = res.access_client_secret
+def render(res: Result, *, issuer: str, tenant: str, access_team: str | None = None) -> str:
+    """The operator's instructions. With `_access_setup`, the ONLY place the client ids and the Access secret are written."""
     lines = [
         "ZITADEL bootstrap complete." if res.changes else "ZITADEL bootstrap: nothing to change (already set up).",
         *(f"  - {change}" for change in res.changes),
@@ -309,24 +317,36 @@ def render(res: Result, *, issuer: str, tenant: str, access_team: str) -> str:
         f"  EAP_ZITADEL_ORG_TENANT_MAP       {res.org_id}={tenant}",
         f"  EAP_ZITADEL_STUDIO_CLIENT_ID     {res.studio_client_id}",
         "  EAP_ZITADEL_MACHINE_KEY          the machine user's key JSON (the same key this command used)",
+    ]
+    if access_team:
+        lines += _access_setup(res, issuer=issuer, team=access_team)
+    lines += ["", f"Bootstrap admin user id: {res.admin_user_id} (holds the admin role)"]
+    return "\n".join(lines) + "\n"
+
+
+def _access_setup(res: Result, *, issuer: str, team: str) -> list[str]:
+    lines = [
         "",
-        "Cloudflare Access identity provider (Zero Trust, generic OIDC; see deploy/README.md, 'ZITADEL bootstrap and sign-in', step 3):",
+        "Cloudflare Access identity provider (Zero Trust, generic OIDC):",
         f"  Issuer / endpoints               {issuer}  (auth URL {issuer}/oauth/v2/authorize, token URL {issuer}/oauth/v2/token,"
         f" certs URL {issuer}/oauth/v2/keys)",
         f"  Client ID                        {res.access_client_id}",
-        f"  Redirect URL (in ZITADEL)        https://{access_team}.cloudflareaccess.com/cdn-cgi/access/callback",
+        f"  Redirect URL (in ZITADEL)        {access_config(team)['redirectUris'][0]}",
     ]
-    if secret:
-        lines += [
-            f"  Client secret                    {secret}",
+    if res.access_client_secret:
+        return lines + [
+            f"  Client secret                    {res.access_client_secret}",
             "  The client secret is shown only now. Store it as EAP_ZITADEL_ACCESS_CLIENT_SECRET in your secret store at once.",
         ]
-    else:
-        lines += [
-            "  Client secret                    (not shown: already issued; run again with --rotate-access-secret for a new one)"
-        ]
-    lines += ["", f"Bootstrap admin user id: {res.admin_user_id} (holds the admin role)"]
-    return "\n".join(lines) + "\n"
+    return lines + ["  Client secret                    (not shown: already issued; run again with --rotate-access-secret for a new one)"]
+
+
+def _team(value: str) -> str:
+    """The Zero Trust team name, from `<team>` or `<team>.cloudflareaccess.com`."""
+    team = value.strip().lower().removesuffix(".cloudflareaccess.com")
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", team):
+        raise argparse.ArgumentTypeError("expected the team name or <team>.cloudflareaccess.com")
+    return team
 
 
 def _args(argv: list[str] | None, env: Mapping[str, str]) -> argparse.Namespace:
@@ -338,13 +358,52 @@ def _args(argv: list[str] | None, env: Mapping[str, str]) -> argparse.Namespace:
     p.add_argument("--tenant", default="studio", help="the platform tenant this organisation maps to")
     p.add_argument("--public-url", default=DEFAULT_PUBLIC_URL, help="Studio's public URL")
     p.add_argument("--loopback-url", default=DEFAULT_LOOPBACK_URL, help="Studio over the SSH tunnel")
-    p.add_argument("--access-team", default=(env.get("EAP_CF_ACCESS_TEAM_DOMAIN") or "example-org.cloudflareaccess.com").removesuffix(".cloudflareaccess.com"),
-                   help="the Cloudflare Zero Trust team name")
+    p.add_argument("--cloudflare-access", metavar="TEAM_DOMAIN", type=_team,
+                   help="also create or repair the application Cloudflare Access signs in through, for this Zero Trust team "
+                        "(<team> or <team>.cloudflareaccess.com), and print the Cloudflare setup")
     p.add_argument("--admin-user", default=env.get("ZITADEL_ADMIN_USERNAME") or "admin", help="the bootstrap admin's login name or e-mail")
     p.add_argument("--dry-run", action="store_true",
                    help="read only: call the API to see what exists, print what a real run would create, write nothing")
-    p.add_argument("--rotate-access-secret", action="store_true", help="issue a new client secret for the Access application")
-    return p.parse_args(argv)
+    p.add_argument("--rotate-access-secret", action="store_true", help="with --cloudflare-access: issue a new client secret for that application")
+    p.add_argument("--platform-users", action="store_true",
+                   help="create platform-provisioner and platform-members with their memberships; print each new key once")
+    p.add_argument("--instance-policy", action="store_true",
+                   help="no self-registration, no public organisation registration, a second factor required")
+    p.add_argument("--no-force-mfa", action="store_true",
+                   help="with --instance-policy: do not require a second factor (turns the requirement off: the rollback)")
+    p.add_argument("--rotate-key", action="append", default=[], choices=sorted(platform_setup.PLATFORM_USERS),
+                   help="with --platform-users: issue a new key for this user even though one exists (repeatable)")
+    p.add_argument("--key-expires", default=None,
+                   help="with --platform-users: expiry of a new key, RFC 3339 (default: ZITADEL's, no practical expiry)")
+    args = p.parse_args(argv)
+    if args.rotate_access_secret and not args.cloudflare_access:
+        p.error("--rotate-access-secret needs --cloudflare-access")
+    if args.cloudflare_access and (args.platform_users or args.instance_policy):
+        p.error("--cloudflare-access cannot be combined with --platform-users or --instance-policy")
+    if args.rotate_key and not args.platform_users:
+        p.error("--rotate-key needs --platform-users")
+    if args.no_force_mfa and not args.instance_policy:
+        p.error("--no-force-mfa needs --instance-policy")
+    return args
+
+
+async def _platform(args: argparse.Namespace, client: ManagementClient, issuer: str, out: TextIO) -> None:
+    def emit(text: str) -> None:
+        out.write(text + "\n")
+        out.flush()
+
+    setup = platform_setup.PlatformSetup(
+        client, dry_run=args.dry_run, emit=emit, force_mfa=not args.no_force_mfa,
+        rotate=tuple(args.rotate_key), key_expires=args.key_expires,
+    )
+    try:
+        if args.instance_policy:
+            await setup.instance_policy()
+        if args.platform_users:
+            await setup.platform_users()
+    except platform_setup.SetupError as exc:
+        raise BootstrapError(str(exc)) from None
+    out.write(platform_setup.render(setup, issuer=issuer, calls=client.trace))
 
 
 async def amain(
@@ -379,9 +438,13 @@ async def amain(
     client = ManagementClient(api_url=args.api_url or issuer, issuer=issuer, host=host, key=key, http=http)
     boot = Bootstrap(
         client, tenant=args.tenant, public_url=args.public_url, loopback_url=args.loopback_url,
-        access_team=args.access_team, admin_user=args.admin_user, rotate_access_secret=args.rotate_access_secret, dry_run=args.dry_run,
+        access_team=args.cloudflare_access, admin_user=args.admin_user, rotate_access_secret=args.rotate_access_secret, dry_run=args.dry_run,
     )
+    platform = args.platform_users or args.instance_policy
     try:
+        if platform:
+            await _platform(args, client, issuer, out)
+            return 0
         result = await boot.run()
     except (BootstrapError, ZitadelApiError) as exc:
         print(f"bootstrap failed: {exc}", file=sys.stderr)
@@ -394,7 +457,7 @@ async def amain(
     if args.dry_run:
         out.write(render_dry_run(result, issuer=issuer, calls=client.trace))
         return 0
-    out.write(render(result, issuer=issuer, tenant=args.tenant, access_team=args.access_team))
+    out.write(render(result, issuer=issuer, tenant=args.tenant, access_team=args.cloudflare_access))
     return 0
 
 

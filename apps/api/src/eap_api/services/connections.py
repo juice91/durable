@@ -8,9 +8,12 @@ import uuid
 from typing import Annotated, Any, Callable
 from urllib.parse import urlsplit
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.engine import Engine
 
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.services.errors import Conflict, InvalidInput, NotFound
 from eap_api.services.revision_conflict import stale_revision
 from eap_kb_sources.check import check_connection
@@ -114,13 +117,21 @@ def _name_conflict() -> Conflict:
     return Conflict("a connection with this name exists", code="connection_name_conflict")
 
 
-class ConnectionService:
-    def __init__(self, engine: Engine, secret_store: Callable[[Engine], SecretStore]) -> None:
+class ConnectionService(AccessBound):
+    """Source connections (they name the secrets a knowledge-base source reads with): tenant configuration. Anyone who
+    can read the tenant lists them (names and references, never a value); changing, deleting or checking one is the
+    tenant's `manage_connections` (admin, as for secrets)."""
+
+    def __init__(
+        self, engine: Engine, secret_store: Callable[[Engine], SecretStore], access: Access | None = None
+    ) -> None:
+        self._access = access  # None: no caller to check
         self._engine = engine
         self._store = ConnectionStore(engine)
         self._secret_store = secret_store  # raises Unavailable while the platform key is unset
 
     def create(self, tenant_id: str, payload: Any) -> dict[str, Any]:
+        acl.require(self._access, "manage_connections", "tenant", None)
         body = parse_body(payload, ConnectionCreate)
         if body.kind not in CONNECTION_KINDS:
             raise _invalid("invalid_request", "unknown connection kind")
@@ -139,9 +150,11 @@ class ConnectionService:
         return view(made)
 
     def list(self, tenant_id: str) -> dict[str, Any]:
+        acl.require(self._access, "read", "tenant", None)
         return {"items": [view(c) for c in self._store.list(tenant_id)]}
 
     def get(self, tenant_id: str, connection_id: str) -> dict[str, Any]:
+        acl.require(self._access, "read", "tenant", None)
         cid = parse_uuid(connection_id)
         found = self._store.get(tenant_id, cid) if cid else None
         if found is None:
@@ -150,6 +163,7 @@ class ConnectionService:
 
     def update(self, tenant_id: str, connection_id: str, payload: Any, expected_revision: int | None) -> dict[str, Any]:
         """Change a connection. A stale `expected_revision` is a Conflict (412) carrying the current one."""
+        acl.require(self._access, "manage_connections", "tenant", None)
         body = parse_body(payload, ConnectionPatch)
         cid = parse_uuid(connection_id)
         if cid is None:
@@ -180,6 +194,7 @@ class ConnectionService:
         return view(changed)
 
     def delete(self, tenant_id: str, connection_id: str) -> None:
+        acl.require(self._access, "manage_connections", "tenant", None)
         cid = parse_uuid(connection_id)
         if cid is None:
             raise _not_found()
@@ -192,6 +207,7 @@ class ConnectionService:
 
     async def check(self, tenant_id: str, connection_id: str) -> dict[str, Any]:
         """Check a connection against its provider: `{ok, checked_at, error_code}`."""
+        await anyio.to_thread.run_sync(acl.require, self._access, "manage_connections", "tenant", None)
         cid = parse_uuid(connection_id)
         if cid is None:
             raise _not_found()

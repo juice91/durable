@@ -20,6 +20,8 @@ _ERRORS: dict[str, type[Exception]] = {
     "conflict": Conflict,
     "invalid": InvalidInput,
     "unavailable": Unavailable,
+    # The source may grant roles in this organisation but not create users there (ZITADEL's operator organisation).
+    "no_user_creation": Conflict,
 }
 
 
@@ -52,7 +54,13 @@ class MembersService:
             members = await source.list_members(principal.tenant_id)
         except MembershipError as exc:
             raise self._refuse(exc) from None
-        return {"items": [_view(m) for m in members], "mutable": bool(source.mutable)}
+        # Optional on a source: one that does not say may create the user an invitation names.
+        asks = getattr(source, "can_create_users", None)
+        try:
+            can_create = bool(await asks(principal.tenant_id)) if asks is not None and source.mutable else bool(source.mutable)
+        except MembershipError as exc:
+            raise self._refuse(exc) from None
+        return {"items": [_view(m) for m in members], "mutable": bool(source.mutable), "can_create_users": can_create}
 
     async def invite(self, principal: Principal, email: str, role: str) -> dict[str, Any]:
         source = await self._guard(principal)

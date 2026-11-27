@@ -43,7 +43,7 @@ def refused(p, headers, status=401):
 
 
 def test_a_valid_token_carries_sub_email_org_tenant_and_roles():
-    principal = authenticate(provider(), bearer(mint(roles={"admin": {ORG: "x"}, "viewer": {ORG: "x"}, "bogus": {}})))
+    principal = authenticate(provider(), bearer(mint(roles={"admin": {ORG: "x"}, "viewer": {ORG: "x"}, "bogus": {ORG: "x"}})))
     assert (principal.kind, principal.subject, principal.tenant_id, principal.provider) == ("user", "zitadel:user-1", TENANT, "zitadel")  # the stable sub, never the e-mail
     assert principal.extra["email"] == "user@example.com"
     assert principal.roles == frozenset({"admin", "viewer"})  # a role the platform does not define grants nothing
@@ -232,3 +232,69 @@ def test_the_subject_survives_an_email_change():
     b = authenticate(provider(), bearer(mint(email="new@example.com")))
     assert a.subject == b.subject == "zitadel:user-1"
     assert (a.extra["email"], b.extra["email"]) == ("old@example.com", "new@example.com")
+
+
+# ---- F2: only roles granted in the principal's own organisation count (tenant provisioning design, 0.1) --------------
+# The real claim is {role: {granting organisation id: its primary domain}}: ZITADEL v4.20.5,
+# internal/api/oidc/client.go `projectRoles.Add(roleKey, grant.ResourceOwner, grant.OrgPrimaryDomain)`.
+
+
+def test_a_role_granted_by_another_organisation_is_ignored():
+    roles = {"admin": {"org-other": "other.test"}, "viewer": {ORG: "x"}}
+    assert authenticate(provider(), bearer(mint(roles=roles))).roles == frozenset({"viewer"})
+
+
+def test_a_role_granted_by_both_organisations_counts():
+    roles = {"admin": {"org-other": "other.test", ORG: "x"}}
+    assert authenticate(provider(), bearer(mint(roles=roles))).roles == frozenset({"admin"})
+
+
+def test_the_project_specific_claim_is_filtered_by_organisation_too():
+    token = mint(roles={}, **{f"urn:zitadel:iam:org:project:{PROJECT}:roles": {"admin": {"org-other": "x"}}})
+    assert authenticate(provider(), bearer(token)).roles == frozenset()
+
+
+def test_the_organisation_decides_not_the_tenant_the_claim_names():
+    env = {"EAP_ZITADEL_ORG_TENANT_MAP": f"{ORG}={TENANT},org-b=other"}
+    token = mint(org="org-b", roles={"admin": {ORG: "x"}})  # a user of org B holding a grant made in org A
+    principal = authenticate(provider(env=env), bearer(token))
+    assert (principal.tenant_id, principal.roles) == ("other", frozenset())
+
+
+@pytest.mark.parametrize("value", [{}, [], "org-1", None, True, ["org-1"]], ids=repr)
+def test_a_role_without_the_organisation_map_grants_nothing(value):
+    assert authenticate(provider(), bearer(mint(roles={"admin": value}))).roles == frozenset()
+
+
+def test_a_foreign_grant_is_logged_at_warning_once_per_subject(caplog):
+    caplog.set_level(logging.DEBUG)
+    p = provider()
+    foreign = {"admin": {"org-other": "other.test"}}
+    for _ in range(3):
+        authenticate(p, bearer(mint(roles=foreign)))
+    authenticate(p, bearer(mint(roles=foreign, sub="user-2")))
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2 and "zitadel:user-1" in warnings[0] and "zitadel:user-2" in warnings[1]
+    assert "admin" in warnings[0] and "other.test" not in caplog.text and "Bearer" not in caplog.text
+
+
+def test_own_organisation_grants_log_no_warning(caplog):
+    authenticate(provider(), bearer(mint()))
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_role_the_platform_does_not_define_is_not_worth_a_warning(caplog):
+    authenticate(provider(), bearer(mint(roles={"bogus": {"org-other": "x"}})))
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_the_fake_builds_the_role_claim_in_the_real_shape_and_only_the_own_grant_counts():
+    from .fakes import FakeZitadel
+
+    fake = FakeZitadel()
+    fake.add_member("u-1", "ada@example.test", "viewer")
+    fake.add_org("org-b", "Acme")
+    fake.grant_in("org-b", "u-1", "admin")  # another organisation grants this user admin
+    claim = fake.role_claim("u-1")
+    assert claim == {"viewer": {ORG: "durable.auth.example.test"}, "admin": {"org-b": "acme.auth.example.test"}}
+    assert authenticate(provider(), bearer(mint(sub="u-1", roles=claim))).roles == frozenset({"viewer"})

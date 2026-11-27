@@ -15,11 +15,15 @@ _ACTOR: ContextVar[RunActor | None] = ContextVar("eap_run_actor", default=None)
 
 @dataclass(frozen=True)
 class RunActor:
-    """Who a run acts as: `principal` is `<kind>:<subject>`; `on_behalf_of` the human or service it acts for."""
+    """Who a run acts as: `principal` is `<kind>:<subject>`; `on_behalf_of` the human or service it acts for.
+
+    `roles` are the tenant roles of a person who started the run (possibly none: `()`), stored so the worker can ask the
+    policy engine what that person may do. None: not a person (an API key, a schedule, a run), so nothing is stored."""
 
     kind: str
     subject: str
     on_behalf_of: str | None = None
+    roles: tuple[str, ...] | None = None
 
     @property
     def principal(self) -> str:

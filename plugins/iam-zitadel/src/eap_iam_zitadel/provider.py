@@ -5,7 +5,8 @@ never falls through to a weaker provider. A bearer that is not JWT-shaped (`pos_
 
 Verified on every request, in this order: header, `alg` (RS256 only), `kid`, signature through the cached JWKS (bounded
 refresh on an unknown `kid`), `iss` exactly, `aud` containing the platform project id, `exp` / `nbf` with 30 s leeway.
-Then the organisation maps to a tenant (an unmapped org is 403) and the roles come from the project-roles claim."""
+Then the organisation maps to a tenant (an unmapped org is 403) and the roles come from the project-roles claim, only
+those the principal's own organisation granted."""
 
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ EMAIL_PATTERN = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
 MAX_EMAIL = 254
 USERINFO_CACHE_SECONDS = 300.0
 USERINFO_CACHE_MAX = 1024
+FOREIGN_GRANT_WARNED_MAX = 1024  # subjects remembered so each is warned about once; cleared when full
 USERINFO_TIMEOUT_SECONDS = 5.0
 
 Userinfo = Callable[[str], Awaitable[dict[str, Any]]]
@@ -72,13 +74,28 @@ def looks_like_jwt(token: str) -> bool:
     return isinstance(header, dict) and "alg" in header
 
 
-def _role_keys(claims: dict[str, Any], project_id: str) -> frozenset[str]:
-    keys: set[str] = set()
+def _role_keys(claims: dict[str, Any], project_id: str, org_id: str) -> tuple[frozenset[str], frozenset[str]]:
+    """(the roles that count, the roles ignored because only another organisation granted them).
+
+    The claim is `{role: {granting organisation id: its primary domain}}` (ZITADEL v4.20.5,
+    `internal/api/oidc/client.go`: `projectRoles.Add(roleKey, grant.ResourceOwner, grant.OrgPrimaryDomain)`). A role
+    counts only when the principal's own organisation is one of the granting ones: a grant made in another
+    organisation's context would otherwise carry its role into this principal's tenant. Any other shape grants
+    nothing."""
+    own: set[str] = set()
+    seen: set[str] = set()
     for name in (ROLES_CLAIM, PROJECT_ROLES_CLAIM.format(project_id=project_id)):
         value = claims.get(name)
-        if isinstance(value, dict):
-            keys.update(str(k) for k in value)
-    return frozenset(k for k in keys if k in MEMBER_ROLES)  # a role this platform does not define grants nothing
+        if not isinstance(value, dict):
+            continue
+        for key, orgs in value.items():
+            role = str(key)
+            if role not in MEMBER_ROLES:  # a role this platform does not define grants nothing
+                continue
+            seen.add(role)
+            if isinstance(orgs, dict) and org_id in orgs:
+                own.add(role)
+    return frozenset(own), frozenset(seen - own)
 
 
 def _clean_email(value: Any) -> str | None:
@@ -105,6 +122,7 @@ class ZitadelProvider:
         self._clock = clock
         self._userinfo_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._http: httpx2.AsyncClient | None = None
+        self._foreign_warned: set[str] = set()
 
     @property
     def dormant(self) -> bool:
@@ -165,7 +183,9 @@ class ZitadelProvider:
             info = await self._lookup_userinfo(token)
             email = _clean_email(info.get("email"))
             display = display or (info.get("name") if isinstance(info.get("name"), str) else None)
-        roles = _role_keys(claims, settings.project_id)
+        roles, foreign = _role_keys(claims, settings.project_id, org)
+        if foreign:
+            self._warn_foreign_grant(f"{SUBJECT_PREFIX}{sub}", foreign)
         extra = {"sub": sub, "org_id": org, "email": email, "display_name": display, "kid": kid}
         if email is None:
             # A machine user (client-credentials or JWT-profile grant) has no e-mail: a service, not a person.
@@ -173,6 +193,17 @@ class ZitadelProvider:
             return Principal(tenant_id=tenant, kind="service", subject=f"{SUBJECT_PREFIX}{sub}", provider=PROVIDER, roles=roles, extra=extra)
         log.debug("ZITADEL token accepted (kid %s)", _kid_for_log(kid))
         return Principal(tenant_id=tenant, kind="user", subject=f"{SUBJECT_PREFIX}{sub}", provider=PROVIDER, roles=roles, extra=extra)
+
+    def _warn_foreign_grant(self, subject: str, roles: frozenset[str]) -> None:
+        if subject in self._foreign_warned:
+            return
+        if len(self._foreign_warned) >= FOREIGN_GRANT_WARNED_MAX:
+            self._foreign_warned.clear()
+        self._foreign_warned.add(subject)
+        log.warning(
+            "ZITADEL roles ignored for %r: %s granted only by an organisation other than the user's own",
+            subject[:96], ", ".join(sorted(roles)),
+        )
 
     async def _lookup_userinfo(self, token: str) -> dict[str, Any]:
         assert self._userinfo is not None

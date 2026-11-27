@@ -125,6 +125,9 @@ SILENT_EVENT_TYPES = frozenset(
      "agent_tool_started", "agent_tool_completed",
      # The Architect's context provenance (hashes only); Studio reads it from /runs/{id}/events.
      "system_context_loaded",
+     # Agent-bound grants: a refused use of a server or secret; the model got the readable tool error, Studio's run view
+     # reads the event from /runs/{id}/events.
+     "permission_denied",
      # `message_feedback` run events are legacy and no longer written: feedback is per user, so the
      # replay sends the viewer's own rows (FeedbackItems), never the shared run event.
      "message_feedback"}

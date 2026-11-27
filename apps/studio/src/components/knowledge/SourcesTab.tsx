@@ -1,5 +1,7 @@
 "use client";
 
+import { useKnowledgePermissions } from "./useKnowledgePermissions";
+import { useCan } from "@/lib/permissions";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/Badge";
@@ -334,6 +336,8 @@ function SyncList({ kbId, sourceId, workflowId, refreshKey }: { kbId: string; so
  * run of the published "KB Source Synchronization" workflow and links to it.
  */
 export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
+  const mayEdit = useKnowledgePermissions(kbId).can("edit");
+  const mayCreateWorkflow = useCan("workflow", null, "create");
   const [sources, setSources] = useState<Source[] | null>(null);
   const [adapters, setAdapters] = useState<AdapterInfo[]>([]);
   useEffect(() => {
@@ -419,12 +423,12 @@ export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
     <div data-testid="knowledge-sources" className="flex min-w-0 flex-col gap-4">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
         <p className="min-w-0 text-label text-muted-foreground">Sources sync a provider&apos;s catalogue into {kbName}. Documents they find are ingested like uploads.</p>
-        <Button variant="primary" size="sm" onClick={() => setAdding(true)}>Add source</Button>
+        {mayEdit ? <Button variant="primary" size="sm" onClick={() => setAdding(true)}>Add source</Button> : null}
       </div>
       {workflowKnown && !runReady ? (
         <div data-testid="sync-workflow-missing" className="flex min-w-0 flex-wrap items-center gap-3 rounded-md border border-border bg-muted p-3">
           <p className="min-w-0 flex-1 text-label text-foreground">Syncs run through the KB Source Synchronization workflow, which is not published for this tenant yet.</p>
-          <Button variant="secondary" size="sm" disabled={publishing} onClick={() => void publish()}>{publishing ? "Publishing…" : "Publish the sync workflow"}</Button>
+          {mayCreateWorkflow ? <Button variant="secondary" size="sm" disabled={publishing} onClick={() => void publish()}>{publishing ? "Publishing…" : "Publish the sync workflow"}</Button> : null}
           {publishError ? <p role="alert" className="w-full text-label text-destructive-text">{publishError}</p> : null}
         </div>
       ) : null}
@@ -457,9 +461,9 @@ export function SourcesTab({ kbId, kbName }: { kbId: string; kbName: string }) {
                     <Badge variant={source.enabled ? "success" : "neutral"}>{source.enabled ? "Enabled" : "Disabled"}</Badge>
                   </span>
                   <span className="flex flex-wrap gap-1.5">
-                    <Button variant="primary" size="sm" aria-label={`Run sync for ${source.name}`} disabled={!runReady || !source.enabled} onClick={() => setRunning(source)}>Run sync</Button>
+                    {mayEdit ? <Button variant="primary" size="sm" aria-label={`Run sync for ${source.name}`} disabled={!runReady || !source.enabled} onClick={() => setRunning(source)}>Run sync</Button> : null}
                     <Button variant="secondary" size="sm" aria-label={`Show syncs for ${source.name}`} aria-expanded={open} onClick={() => toggleSyncs(source.id)}>Syncs</Button>
-                    <Button variant="secondary" size="sm" aria-label={`${source.enabled ? "Disable" : "Enable"} ${source.name}`} onClick={() => void toggle(source)}>{source.enabled ? "Disable" : "Enable"}</Button>
+                    {mayEdit ? <Button variant="secondary" size="sm" aria-label={`${source.enabled ? "Disable" : "Enable"} ${source.name}`} onClick={() => void toggle(source)}>{source.enabled ? "Disable" : "Enable"}</Button> : null}
                   </span>
                 </div>
                 <p className="text-caption text-muted-foreground">

@@ -6,9 +6,11 @@ What is computed, from the resource catalog (`eap_run_store`, never ad-hoc SQL h
     link makes a resource invisible (fail closed), which is what the hourly reconcile repairs;
   * with `owners`, an **owner** tuple for each owner subject on every resource (the backfill of tenant `studio`: the
     owner's account holds `owner` on everything), plus the creator recorded on the row when it is a real principal
-    (an e-mail or `zitadel:<sub>`); a legacy creator (`operator`, `dev:<user>`, ...) never becomes a principal.
+    (`zitadel:<sub>`); a legacy creator (`operator`, `dev:<user>`, ...) never becomes a principal. An e-mail address is
+    a principal only while the legacy `cfaccess` provider is in `EAP_IAM_IDENTITY`: no other provider names a person by
+    e-mail, so no right may be keyed on one (`python -m eap_iam_openfga.email_subjects` removes the old ones).
 
-What is never touched: grants (`runner`, `approver`, `editor`, `usable_by`) and any owner tuple an admin revoked on
+What is never touched: grants (`runner`, `approver`, `editor`, `legacy_usable_by`, `granted_to`) and any owner tuple an admin revoked on
 purpose are not rewritten by the link reconcile; owners are only ever *added*, and only by an explicit backfill. Tenant
 roles are not stored at all: they arrive as contextual tuples on every request, so a stored role could outlive its
 removal. Runs are registered when they start and are not part of the catalog.
@@ -29,17 +31,30 @@ from dataclasses import dataclass, field
 from typing import TextIO
 
 import httpx2
-from eap_iam import CatalogEntry, MembershipSource, PluginContext, PolicyUnavailable, ResourceCatalog
+from eap_iam import CatalogEntry, GrantError, MembershipSource, PluginContext, PolicyUnavailable, ResourceCatalog, ResourceRef
 from eap_iam.protocols import GROUP_MEMBERSHIP
-from eap_iam.registry import installed
+from eap_iam.registry import installed, parse_names
 
 from eap_iam_openfga.client import OpenFgaClient, TupleKey
-from eap_iam_openfga.names import REGISTERED_KINDS, is_principal_subject, split_object, tenant_ref, user_ref, valid_id, valid_tenant
+from eap_iam_openfga.names import (
+    REGISTERED_KINDS,
+    is_email_subject,
+    is_principal_subject,
+    object_ref,
+    split_object,
+    tenant_ref,
+    user_ref,
+)
 from eap_iam_openfga.settings import load_settings
 
 log = logging.getLogger("eap.iam.openfga.reconcile")
 
 SUMMARY_ORDER = ("link", "owner")
+
+
+def email_subjects_allowed(env: Mapping[str, str]) -> bool:
+    """Whether this deployment still names people by e-mail: only the legacy, single-tenant `cfaccess` provider does."""
+    return "cfaccess" in parse_names(env.get("EAP_IAM_IDENTITY"))
 
 
 def _label(t: TupleKey) -> str:
@@ -56,6 +71,7 @@ class Plan:
     to_add: list[TupleKey] = field(default_factory=list)
     orphans: list[TupleKey] = field(default_factory=list)  # tuples of objects the catalog no longer lists
     skipped_creators: int = 0  # rows whose recorded creator is a legacy value
+    skipped_email_creators: int = 0  # rows whose creator is an e-mail address while `cfaccess` is not configured
     skipped_entries: int = 0  # rows with an id OpenFGA cannot hold
 
     def summary(self) -> dict[str, dict[str, int]]:
@@ -66,36 +82,58 @@ class Plan:
         }
 
 
-def desired_tuples(entries: Iterable[CatalogEntry], owners: Sequence[str] = (), *, creators: bool = False) -> tuple[set[TupleKey], int, int]:
-    """(tuples, rows with a legacy creator, rows skipped). Owner tuples only when `owners` or `creators` asks for them."""
+def _object(entry: CatalogEntry) -> str | None:
+    """The row's OpenFGA object, or None for a row the engine cannot hold."""
+    if entry.kind not in REGISTERED_KINDS:
+        return None
+    try:
+        return object_ref(ResourceRef(entry.kind, entry.id, entry.tenant_id))
+    except GrantError:
+        return None
+
+
+def desired_tuples(
+    entries: Iterable[CatalogEntry], owners: Sequence[str] = (), *, creators: bool = False, email_subjects: bool = False,
+) -> tuple[set[TupleKey], int, int]:
+    """(tuples, rows with a legacy creator, rows skipped). Owner tuples only when `owners` or `creators` asks for them;
+    an e-mail creator becomes an owner only with `email_subjects` (`email_creators` counts the others)."""
     out: set[TupleKey] = set()
     legacy = skipped = 0
     for e in entries:
-        if e.kind not in REGISTERED_KINDS or not valid_tenant(e.tenant_id) or not valid_id(e.id):
+        obj = _object(e)
+        if obj is None:
             skipped += 1
             continue
-        obj = f"{e.kind}:{e.tenant_id}/{e.id}"
         out.add(TupleKey(tenant_ref(e.tenant_id), "tenant", obj))
         for subject in owners:
             out.add(TupleKey(user_ref(subject), "owner", obj))
         if creators and e.creator is not None:
-            if is_principal_subject(e.creator):
-                out.add(TupleKey(user_ref(e.creator), "owner", obj))
-            else:
+            if not is_principal_subject(e.creator):
                 legacy += 1
+            elif email_subjects or not is_email_subject(e.creator):
+                out.add(TupleKey(user_ref(e.creator), "owner", obj))
     return out, legacy, skipped
 
 
+def email_creators(entries: Iterable[CatalogEntry]) -> int:
+    return sum(1 for e in entries if _object(e) is not None and is_email_subject(e.creator))
+
+
 async def build_plan(
-    client: OpenFgaClient, catalog: ResourceCatalog, *, tenant_id: str | None = None, owners: Sequence[str] = (), creators: bool = False,
+    client: OpenFgaClient, catalog: ResourceCatalog, *, tenant_id: str | None = None, owners: Sequence[str] = (),
+    creators: bool = False, email_subjects: bool = False,
 ) -> Plan:
-    entries = catalog.entries(tenant_id)
+    entries = list(catalog.entries(tenant_id))
     plan = Plan()
-    plan.desired, plan.skipped_creators, plan.skipped_entries = desired_tuples(entries, owners, creators=creators)
+    plan.desired, plan.skipped_creators, plan.skipped_entries = desired_tuples(
+        entries, owners, creators=creators, email_subjects=email_subjects
+    )
+    if creators and not email_subjects:
+        plan.skipped_email_creators = email_creators(entries)
     tenants = {e.tenant_id for e in entries}
     if tenant_id:
         tenants.add(tenant_id)
-    listed = {f"{e.kind}:{e.tenant_id}/{e.id}" for e in entries}
+    listed = {obj for e in entries if (obj := _object(e)) is not None}
     scoped_kinds = set(REGISTERED_KINDS)
     for t in await client.read():
         parts = split_object(t.object)
@@ -125,14 +163,16 @@ def render(plan: Plan, *, applied: bool, prune: bool, tenants: int) -> str:
         lines.append(f"orphan tuples are {'deleted (--prune)' if applied and prune else 'kept: pass --prune --apply to delete them'}")
     if plan.skipped_creators:
         lines.append(f"rows with a legacy creator (no owner tuple): {plan.skipped_creators}")
+    if plan.skipped_email_creators:
+        lines.append(f"rows with an e-mail creator (no owner tuple: cfaccess is not configured): {plan.skipped_email_creators}")
     if plan.skipped_entries:
         lines.append(f"rows skipped (an id OpenFGA cannot hold): {plan.skipped_entries}")
     return "\n".join(lines) + "\n"
 
 
 async def resolve_owner_emails(emails: Sequence[str], tenant_id: str, env: Mapping[str, str]) -> list[str]:
-    """For each e-mail, the account's subjects: the membership source's id (`zitadel:<id>`) and the e-mail itself, which
-    older rows hold (docs/iam.md, "Subjects in recorded data")."""
+    """For each e-mail, the account's subjects: the membership source's id (`zitadel:<id>`) and, only while `cfaccess`
+    is configured, the e-mail itself (docs/iam.md, "Subjects in recorded data")."""
     if not emails:
         return []
     name = (env.get("EAP_IAM_MEMBERSHIP") or "").strip()
@@ -146,7 +186,9 @@ async def resolve_owner_emails(emails: Sequence[str], tenant_id: str, env: Mappi
         found = [m for m in members if (m.email or "").lower() == email.lower()]
         if not found:
             raise SystemExit("--owner-email matches no member of the tenant")
-        subjects += [f"{source.name}:{found[0].id}", email.lower()]
+        subjects.append(f"{source.name}:{found[0].id}")
+        if email_subjects_allowed(env):
+            subjects.append(email.lower())
     return subjects
 
 
@@ -157,7 +199,7 @@ def _args(argv: Sequence[str] | None, *, backfill: bool) -> argparse.Namespace:
     p.add_argument("--apply", action="store_true", help="write the difference (default: a dry run that only prints it)")
     p.add_argument("--prune", action="store_true", help="with --apply, also delete the tuples of objects the catalog no longer lists")
     p.add_argument("--owner", action="append", default=[], help="a subject that becomes owner of every resource (repeatable)")
-    p.add_argument("--owner-email", action="append", default=[], help="like --owner, resolved through the membership source to both of the account's subjects")
+    p.add_argument("--owner-email", action="append", default=[], help="like --owner, resolved through the membership source to the account's subject (and, with cfaccess, the e-mail)")
     return p.parse_args(argv)
 
 
@@ -189,11 +231,21 @@ async def amain(
         return 2
     client = OpenFgaClient(settings, http)
     try:
-        catalog = catalog or default_catalog()
+        legacy_emails = email_subjects_allowed(env)
         owners = list(args.owner)
+        if not legacy_emails and any(is_email_subject(o) for o in owners):
+            print(
+                "reconcile failed: an --owner is an e-mail address, and no identity provider in EAP_IAM_IDENTITY names a "
+                "person by e-mail; pass the account's subject (zitadel:<id>) or --owner-email",
+                file=sys.stderr,
+            )
+            return 2
+        catalog = catalog or default_catalog()
         if args.owner_email:
             owners += await resolve_owner_emails(args.owner_email, args.tenant or env.get("EAP_BACKFILL_TENANT", "studio"), env)
-        plan = await build_plan(client, catalog, tenant_id=args.tenant, owners=owners, creators=backfill)
+        plan = await build_plan(
+            client, catalog, tenant_id=args.tenant, owners=owners, creators=backfill, email_subjects=legacy_emails
+        )
         if args.apply:
             await apply_plan(client, plan, prune=args.prune)
         tenants = len({t.object.split(":", 1)[1].split("/", 1)[0] for t in plan.desired})
@@ -202,6 +254,9 @@ async def amain(
     except PolicyUnavailable as exc:
         print(f"reconcile failed: {exc.detail}", file=sys.stderr)
         return 1
+    except GrantError as exc:  # an --owner OpenFGA cannot hold: nothing was written
+        print(f"reconcile failed: {exc.detail}", file=sys.stderr)
+        return 2
     finally:
         if http is None:
             await client.aclose()

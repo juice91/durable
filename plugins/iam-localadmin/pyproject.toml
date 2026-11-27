@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eap-iam-localadmin"
+version = "0.5.0"
+description = "IAM plug-in: one built-in admin account (username and password) for deployments without an identity provider"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dependencies = [
+    "eap-iam",
+    "eap-run-store",
+    "argon2-cffi>=23.1",
+    "pyjwt>=2.8",
+    "sqlalchemy>=2.0",
+]
+
+[project.entry-points."eap.iam.identity"]
+localadmin = "eap_iam_localadmin:create_identity"
+
+[project.entry-points."eap.iam.membership"]
+localadmin = "eap_iam_localadmin:create_membership"
+
+[project.entry-points."eap.db.migrations"]
+localadmin = "eap_iam_localadmin:MIGRATIONS"
+
+[tool.uv.sources]
+eap-iam = { workspace = true }
+eap-run-store = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eap_iam_localadmin"]

@@ -22,10 +22,12 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from eap_api.approvals import DecisionResult, decide
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.ports import RunLauncher
 from eap_api.services.agent_archive import archived_step_problems
 from eap_api.services.workflow_inputs import input_schema_errors, non_finite_errors
@@ -34,7 +36,7 @@ from eap_api.text_checks import MAX_REPORTED_ERRORS
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
 from eap_observability.context import current_trace_context
 from eap_observability.redaction import log_failure
-from eap_run_store import CANCEL_EVENT_KEY, ENQUEUE_FAILED_ERROR, EventLog, RunIdConflict, RunStore
+from eap_run_store import CANCEL_EVENT_KEY, ENQUEUE_FAILED_ERROR, EventLog, RunActor, RunIdConflict, RunStore
 from eap_run_store.definition_errors import (
     WORKFLOW_ARCHIVED_CODE,
     WORKFLOW_ARCHIVED_NEW_WORK,
@@ -97,38 +99,32 @@ def _finish_cancel(run_store: Any, tenant_id: str, run_id: uuid.UUID) -> Any:
     return run_store.cancel_run_tree(tenant_id, run_id)
 
 
-def _child_sync_runs(run_store: Any, tenant_id: str, parent_id: uuid.UUID) -> list[uuid.UUID]:
-    """The knowledge-base source sync runs the workflow run `parent_id` started (same tenant) that have not ended,
-    oldest first."""
-    with run_store.Session() as session:
-        rows = session.execute(
-            text(
-                "SELECT s.run_id FROM kb_source_syncs s JOIN runs r ON r.tenant_id = s.tenant_id AND r.id::text = s.run_id"
-                " WHERE s.tenant_id = :t AND s.parent_run_id = :p AND r.status NOT IN ('completed', 'failed', 'needs_attention', 'skipped')"
-                " ORDER BY s.started_at, s.id"
-            ),
-            {"t": tenant_id, "p": str(parent_id)},
-        ).scalars().all()
-    return [uuid.UUID(str(r)) for r in rows]
-
-
 def _cancel_child_syncs(
     run_store: Any, event_log: Any, launcher: RunLauncher, tenant_id: str, parent_id: uuid.UUID, requested_by: str
 ) -> None:
     """Cancel the sync runs of a workflow run: each gets `cancel_requested` (a sync that already ended drops it),
     the DBOS cancel of its tree and the guarded terminal write. Idempotent; the caller maps a raise to 503."""
-    for child in _child_sync_runs(run_store, tenant_id, parent_id):
+    for child in run_store.unfinished_child_syncs(tenant_id, parent_id):
         event_log.append(tenant_id, child, CANCEL_EVENT_KEY, "cancel_requested", {"requested_by": requested_by})
         _cascade(launcher, child)
         _finish_cancel(run_store, tenant_id, child)
 
 
-class WorkflowRunService:
-    def __init__(self, session: Session, run_store: RunStore, event_log: EventLog, launcher: RunLauncher) -> None:
+class WorkflowRunService(AccessBound):
+    def __init__(
+        self, session: Session, run_store: RunStore, event_log: EventLog, launcher: RunLauncher,
+        access: Access | None = None,
+    ) -> None:
         self._db = session
         self._runs = run_store
         self._events = event_log
         self._launcher = launcher
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _authorize(self, run: dict[str, Any], action: str) -> None:
+        """A workflow run is decided by the rights on its workflow (the model's `run` type inherits them)."""
+        if run.get("workflow_id"):
+            acl.require(self._access, action, "workflow", str(run["workflow_id"]))
 
     # ----------------------------------------------------------------------------- start
 
@@ -168,6 +164,8 @@ class WorkflowRunService:
         run_id: uuid.UUID | None = None,
         rerun_of: uuid.UUID | None = None,
         pause_after_each_step: bool = False,
+        trigger_id: uuid.UUID | str | None = None,
+        actor: RunActor | None = None,
     ) -> dict[str, Any]:
         """Run a published workflow version as a durable, tenant-scoped run; the 202 body (run id, status).
 
@@ -176,8 +174,10 @@ class WorkflowRunService:
         version's input_schema (loc/msg/type only, never the input), a non-finite number anywhere in the
         input, input over 32 KiB as JSON, or the version points at something this tenant can no longer run;
         409 `run_id` already used by a different request. A retry with the same `run_id`, input and version
-        answers again and re-enqueues. A failed hand-off is 503 and marks the run failed with
-        ENQUEUE_FAILED_ERROR (if still queued); the same retry re-queues it."""
+        answers again and re-enqueues. `trigger_id`: the inbound webhook trigger whose delivery starts the run. A failed hand-off is 503 and marks the run failed with
+        ENQUEUE_FAILED_ERROR (if still queued); the same retry re-queues it. `actor`: who the run acts as, instead of
+        the request's identity (an external client's run acts as its key, for nobody)."""
+        acl.require(self._access, "run", "workflow", str(workflow_id))
         workflow = self._workflow(tenant_id, workflow_id)
         version_row = self._version_row(workflow, version)
         spec = WorkflowSpec.model_validate(version_row.spec)
@@ -212,6 +212,9 @@ class WorkflowRunService:
             _, created = run_store.create_workflow_run(
                 tenant_id, workflow.id, version_row.version, input_json, run_id, trace_id=trace_id,
                 traceparent=traceparent, rerun_of=rerun_of, pause_after_each_step=pause_after_each_step,
+                trigger_id=trigger_id,
+                # A run an outside system started acts as its trigger, for nobody (never the person who enabled it).
+                actor=actor if trigger_id is None else RunActor(kind="webhook", subject=str(trigger_id)),
             )
         except RunIdConflict:
             raise refuse(409, "run_id is already in use") from None
@@ -273,10 +276,11 @@ class WorkflowRunService:
 
     # ----------------------------------------------------------------------------- decisions
 
-    def _workflow_run(self, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
+    def _workflow_run(self, tenant_id: str, run_id: uuid.UUID, action: str = "approve") -> dict[str, Any]:
         run = self._runs.get_run(tenant_id, run_id)
         if run is None or run.get("kind") != "workflow":
             raise refuse(404, "Run not found")
+        self._authorize(run, action)
         return run
 
     @staticmethod
@@ -363,6 +367,8 @@ class WorkflowRunService:
         if run is None:
             raise refuse(404, "Run not found")
         kind = run.get("kind")
+        if kind == "workflow":
+            self._authorize(run, "run")  # cancel is `run` on the workflow (the model's run.can_cancel)
         if kind not in CANCELLABLE_KINDS:
             raise refuse(409, CANCEL_NOT_SUPPORTED_DETAIL, code=CANCEL_NOT_SUPPORTED)
         # Step 1, its own transaction (EventLog.append commits before returning): under the run-row

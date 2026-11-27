@@ -8,6 +8,7 @@ import { mcpServers } from "@/lib/mcpServers";
 import type { AgentSpec } from "@/lib/api";
 import { fetchModels, fetchProcessorCatalog } from "./specSections";
 import { modelsFixture, processorCatalogFixture } from "./specSections.fixtures";
+import { modelListLoaded } from "@/test/modelList";
 
 // RM.17: the Knowledge and Memory steps load these when shown; never reach the network.
 vi.mock("@/lib/knowledge", () => ({ listKnowledgeBases: vi.fn(() => Promise.resolve([])), listEmbeddingModels: vi.fn(() => Promise.resolve([])) }));
@@ -139,7 +140,8 @@ describe("AgentEditor processors and request context", () => {
     // Scope note (P0.21): tool results are outside the processors.
     expect(screen.getByText(/Request context values are not processed/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Output processor type")).not.toBeDisabled());
-    await waitFor(() => expect(fetchModels).toHaveBeenCalled());
+    // A new moderation processor takes its model from the list, so the list must be there first.
+    await modelListLoaded(fetchModels);
     fireEvent.change(screen.getByLabelText("Output processor type"), { target: { value: "moderation" } });
     fireEvent.click(screen.getByRole("button", { name: "Add output processor" }));
     // The shared picker preselects the first listed model: provider and model both shown.

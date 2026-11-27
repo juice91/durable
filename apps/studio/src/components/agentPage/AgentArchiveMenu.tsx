@@ -135,7 +135,7 @@ export async function unarchiveAgent(agent: Pick<Agent, "id" | "name">, onChange
 }
 
 /** Shown under the header of an archived agent's page. */
-export function ArchivedBanner({ agent, onChanged }: { agent: Agent; onChanged: (agent: Agent) => void }) {
+export function ArchivedBanner({ agent, onChanged, mayUnarchive = true }: { agent: Agent; onChanged: (agent: Agent) => void; mayUnarchive?: boolean }) {
   const [busy, setBusy] = useState(false);
   return (
     <div
@@ -149,17 +149,19 @@ export function ArchivedBanner({ agent, onChanged }: { agent: Agent; onChanged: 
           Archived agents
         </Link>
       </span>
-      <Button
-        size="sm"
-        disabled={busy}
-        onClick={async () => {
-          setBusy(true);
-          await unarchiveAgent(agent, onChanged);
-          setBusy(false);
-        }}
-      >
-        Unarchive
-      </Button>
+      {mayUnarchive ? (
+        <Button
+          size="sm"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            await unarchiveAgent(agent, onChanged);
+            setBusy(false);
+          }}
+        >
+          Unarchive
+        </Button>
+      ) : null}
     </div>
   );
 }

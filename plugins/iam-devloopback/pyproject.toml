@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-iam-devloopback"
-version = "0.3.0"
+version = "0.5.0"
 description = "IAM identity plug-in: the dev bearer dev:<tenant>:<user>, accepted only from a loopback TCP peer"
 readme = "README.md"
 requires-python = ">=3.13"

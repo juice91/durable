@@ -5,7 +5,7 @@ Table definitions stay where the code that uses them lives; this module only col
 
 from __future__ import annotations
 
-from sqlalchemy import MetaData
+from sqlalchemy import ForeignKeyConstraint, MetaData
 
 
 def target_metadata() -> list[MetaData]:
@@ -15,7 +15,20 @@ def target_metadata() -> list[MetaData]:
     from eap_run_store import Base as RunStoreBase  # runs, execution_events, side_effects
     from eap_worker.tickets import metadata as tickets_metadata  # fake_external_tickets, fake_external_ticket_calls
 
+    _add_cross_metadata_keys(ApiBase.metadata, RunStoreBase.metadata)
     return [ApiBase.metadata, RunStoreBase.metadata, tickets_metadata]
+
+
+def _add_cross_metadata_keys(api: MetaData, run_store: MetaData) -> None:
+    """Foreign keys from a run-store table to an API table: declared here, where both are loaded, once."""
+    exports = run_store.tables["workflow_exports"]
+    name = "fk_workflow_exports_workflow"
+    if any(c.name == name for c in exports.constraints):
+        return
+    workflows = api.tables["workflows"]
+    exports.append_constraint(
+        ForeignKeyConstraint(["tenant_id", "workflow_id"], [workflows.c.tenant_id, workflows.c.id], name=name)
+    )
 
 
 def schema_diff(connection) -> list:

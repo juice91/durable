@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Turns on Kubernetes Secret encryption at rest in the pydanticos Colima/k3s profile, re-encrypts the Secrets that
 # already exist, and verifies the result. Idempotent: on a cluster that already encrypts it only repairs the persistent
-# configuration and prints the status. An operator runs it once, by hand (deploy/README.md, "Secrets encryption at
-# rest"); up.sh never runs it. New clusters need nothing: up.sh starts them with --secrets-encryption.
+# configuration and prints the status. An operator runs it once, by hand
+#; up.sh never runs it. New clusters need nothing: up.sh starts them with --secrets-encryption.
 #
 #   k3s-secrets-encryption.sh [--yes]        enable, re-encrypt, verify
 #   k3s-secrets-encryption.sh --status       print `k3s secrets-encrypt status` and exit (read-only)

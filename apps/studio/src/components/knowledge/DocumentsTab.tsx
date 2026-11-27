@@ -1,5 +1,6 @@
 "use client";
 
+import { useKnowledgePermissions } from "./useKnowledgePermissions";
 import React, { useState } from "react";
 import { DataList, type DataListColumn } from "@/components/shared/DataList";
 import { TraceLink } from "@/components/traces/TraceLink";
@@ -40,6 +41,7 @@ function versionLabel(doc: KnowledgeDocument): string {
  * ingest, and "Re-extract outdated" (a dry run, then a new version of each outdated document).
  */
 export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, onOpenDocument, onUpload, chunkerVersion = 2, onReextracted }: DocumentsTabProps) {
+  const mayEdit = useKnowledgePermissions(kbId).can("edit");
   const [reextractOpen, setReextractOpen] = useState(false);
   const [retrying, setRetrying] = useState<Record<string, boolean>>({});
   const [actionError, setActionError] = useState<string | null>(null);
@@ -152,7 +154,7 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
       className: "whitespace-nowrap",
       cell: (doc) => (
         <span className="flex items-center justify-end gap-2">
-          {doc.status === "failed" || stuck.has(doc.document_key) ? (
+          {mayEdit && (doc.status === "failed" || stuck.has(doc.document_key)) ? (
             <Button size="sm" disabled={retrying[doc.document_key]} onClick={() => void retry(doc)} data-testid="knowledge-document-retry" aria-label={`Retry ingest of ${doc.title}`}>
               {retrying[doc.document_key] ? "Retrying…" : "Retry"}
             </Button>
@@ -169,7 +171,7 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-testid="knowledge-documents-tab">
-      {docs.documents.length > 0 ? (
+      {mayEdit && docs.documents.length > 0 ? (
         <div className="flex min-w-0 flex-wrap justify-end gap-2">
           <Button size="sm" variant="secondary" onClick={() => setReextractOpen(true)} data-testid="knowledge-documents-reextract">
             Re-extract outdated
@@ -199,7 +201,7 @@ export function DocumentsTab({ kbId, docs, progress, startedRuns, openDocument, 
         empty={{
           title: "No documents yet",
           description: "Upload Markdown, text, HTML, reStructuredText, PDF, YAML or JSON files, or paste text. Each is split into sections and embedded.",
-          action: <Button variant="primary" onClick={onUpload}>Upload documents</Button>,
+          action: mayEdit ? <Button variant="primary" onClick={onUpload}>Upload documents</Button> : undefined,
         }}
       />
       {docs.hasMore && !docs.loading ? (

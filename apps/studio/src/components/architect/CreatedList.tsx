@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -93,6 +94,7 @@ function Group({ heading, headingId, kind, items, showArchived, onToggle, select
 export function CreatedList({ agents, workflows, selectedAgentId, onNew, onSelectAgent }: CreatedListProps) {
   const [showArchived, setShowArchived] = useState(false);
   useEffect(() => setShowArchived(readShowArchived()), []);
+  const mayCreate = useCan("agent", null, "create");
   const toggle = () => {
     const next = !showArchived;
     setShowArchived(next);
@@ -104,18 +106,20 @@ export function CreatedList({ agents, workflows, selectedAgentId, onNew, onSelec
   };
   return (
     <div data-testid="architect-created" className="flex min-w-0 flex-col gap-4">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="primary" data-testid="architect-new">
-            <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
-            New
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem data-testid="architect-new-agent" onSelect={() => onNew("agent")}>Agent</DropdownMenuItem>
-          <DropdownMenuItem data-testid="architect-new-workflow" onSelect={() => onNew("workflow")}>Workflow</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {mayCreate ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="primary" data-testid="architect-new">
+              <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
+              New
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuItem data-testid="architect-new-agent" onSelect={() => onNew("agent")}>Agent</DropdownMenuItem>
+            <DropdownMenuItem data-testid="architect-new-workflow" onSelect={() => onNew("workflow")}>Workflow</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
       <Group heading="Agents" headingId="architect-created-agents" kind="agent" items={agents} showArchived={showArchived} onToggle={toggle} selectedId={selectedAgentId} onSelect={onSelectAgent} />
       <Group heading="Workflows" headingId="architect-created-workflows" kind="workflow" items={workflows} showArchived={showArchived} onToggle={toggle} selectedId={null} />
     </div>

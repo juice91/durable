@@ -8,6 +8,7 @@ import { routes } from "@/lib/routes";
 import { PROCESSOR_PHASES, PROCESSOR_PHASE_LABELS } from "@/lib/processors";
 import { cn } from "@/lib/cn";
 import { Badge } from "@/components/ui/Badge";
+import { AccessSection } from "@/components/access/AccessSection";
 import { DraftDirtyBadge } from "@/components/agents/DraftDirtyBadge";
 import { Button, focusRing } from "@/components/ui/Button";
 import { sectionsOf, type CoreStepId } from "@/components/agents/specSections";
@@ -135,6 +136,8 @@ export function ConfigPanel({ agent, versions, versionRef = null, turnStatus = n
           {config.restoredFrom ? <span className={muted}>restored from v{config.restoredFrom}</span> : null}
         </p>
       </Section>
+
+      <AccessSection kind="agent" id={agent.id} heading={false} wrapper={(content) => <Section id="access" title="Access">{content}</Section>} />
 
       {spec === null ? (
         <p className={cn("px-3 py-3 text-label", muted)} role="status">

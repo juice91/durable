@@ -29,6 +29,7 @@ export function accountLinks(me: IamMe): AccountLink[] {
 
 export function signInMethod(provider: string): string {
   if (provider === "zitadel") return "ZITADEL single sign-on";
+  if (provider === "localadmin") return "Built-in admin account";
   if (provider === "cf-access") return "Cloudflare Access";
   if (provider === "loopback-dev") return "Dev bearer (SSH loopback)";
   if (provider === "api-key" || provider === "apikey") return "API key";

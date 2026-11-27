@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { useCan } from "@/lib/permissions";
 import React, { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -52,7 +54,11 @@ export function CatalogEntrySheet({ entry, onClose, onInstalled }: CatalogEntryS
   );
 }
 
+/** What "why can't I?" asks about here. */
+const CREATE_ACTIONS = ["create"] as const;
+
 function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (server: McpServer) => void }) {
+  const mayCreate = useCan("mcp_server", null, "create");
   const firstChoice: Choice | null = entry.packages.length > 0 ? { kind: "package", index: 0 } : entry.remotes.length > 0 ? { kind: "remote", index: 0 } : null;
   const [choice, setChoice] = useState<Choice | null>(firstChoice);
   const [name, setName] = useState("");
@@ -266,7 +272,11 @@ function EntryForm({ entry, onInstalled }: { entry: CatalogEntry; onInstalled: (
         {error ? <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{error}</p> : null}
       </SheetBody>
       <SheetFooter>
-        <Button type="submit" variant="primary" disabled={busy || !choice}>{busy ? "Working…" : runLabel}</Button>
+        {mayCreate ? (
+          <Button type="submit" variant="primary" disabled={busy || !choice}>{busy ? "Working…" : runLabel}</Button>
+        ) : (
+          <PermissionNotice kind="mcp_server" id={null} actions={CREATE_ACTIONS} />
+        )}
       </SheetFooter>
     </form>
   );

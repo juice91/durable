@@ -1,4 +1,4 @@
-"""S3-compatible backend on aiobotocore (Cloudflare R2 in the deployment, MinIO in tests).
+"""S3-compatible backend on aiobotocore (MinIO in tests).
 
 Path-style addressing. Request checksums are only sent when the API requires them: R2 and MinIO
 reject the default CRC checksum headers newer botocore adds. A client is opened per call, deliberately:

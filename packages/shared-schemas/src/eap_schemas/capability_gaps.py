@@ -65,12 +65,6 @@ class GapLine(BaseModel):
 
 GAPS: tuple[GapDecl, ...] = (
     GapDecl(
-        id="gap.inbound_webhook", short="Inbound webhook trigger", kind="trigger", entry_id="trigger.webhook", status="designed_not_built",
-        title="Inbound webhooks (HMAC-verified) that start a run or wake a waiting step",
-        designed_in="pr:111", alternatives=("trigger.schedule",),
-        needs_note="polling on a schedule is valid only when the source can be queried for recent items",
-    ),
-    GapDecl(
         id="gap.wait_event_step", short="wait_event step", kind="step", entry_id="step.wait_event", status="designed_not_built",
         title="wait_event step: wait for an external event before continuing", designed_in="pr:111",
         alternatives=("step.approval",),

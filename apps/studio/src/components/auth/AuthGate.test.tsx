@@ -16,6 +16,7 @@ vi.mock("@/lib/auth/controller", () => ({
   installAuthFetch: vi.fn(),
   keepFresh: vi.fn(),
   setGiveUpHandler: vi.fn(),
+  signOut: vi.fn(),
 }));
 
 import { AuthGate } from "./AuthGate";

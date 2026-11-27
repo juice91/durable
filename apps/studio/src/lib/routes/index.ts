@@ -13,6 +13,8 @@ import { observabilityRoutes } from "./observability";
 import { processorRoutes } from "./processors";
 import { settingsRoutes } from "./settings";
 import { toolRoutes } from "./tools";
+import { externalAccessRoutes } from "./externalAccess";
+import { webhookRoutes } from "./webhooks";
 import { workflowRoutes } from "./workflows";
 
 /** Each area's builders. Builder names must be unique across areas: a later spread would silently
@@ -29,6 +31,8 @@ export const ROUTE_AREAS = {
   evaluation: evaluationRoutes,
   observability: observabilityRoutes,
   settings: settingsRoutes,
+  webhooks: webhookRoutes,
+  externalAccess: externalAccessRoutes,
 } as const;
 
 export const routes = {
@@ -43,6 +47,8 @@ export const routes = {
   ...evaluationRoutes,
   ...observabilityRoutes,
   ...settingsRoutes,
+  ...webhookRoutes,
+  ...externalAccessRoutes,
 } as const;
 
 export type Routes = typeof routes;

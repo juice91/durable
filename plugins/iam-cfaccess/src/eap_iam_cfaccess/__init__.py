@@ -1,7 +1,12 @@
-"""The Cloudflare Access JWT as the identity of a person (design 1.3). RS256 only, verified on every request."""
+"""The Cloudflare Access JWT as the identity of a person (design 1.3). RS256 only, verified on every request.
+
+LEGACY, SINGLE-TENANT ONLY. Access has no tenant concept: every person it lets through becomes a user of the one tenant
+`EAP_CF_ACCESS_TENANT`, named by e-mail. It is not in the deployed chain, and it refuses to start when the configuration
+names another tenant (tenant provisioning design, F1)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -116,9 +121,46 @@ def _settings(env: Mapping[str, str]) -> tuple[str, tuple[str, ...], str]:
     return team, auds, tenant
 
 
+def _mapped_tenants(raw: str) -> set[str] | None:
+    """The tenants `EAP_ZITADEL_ORG_TENANT_MAP` names (`<org>=<tenant>,...` or a JSON object), read here because a
+    plug-in imports no other plug-in. None for a value that cannot be read: the caller refuses rather than guesses."""
+    raw = raw.strip()
+    if not raw:
+        return set()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        return {str(v).strip() for v in data.values()} if isinstance(data, dict) else None
+    pairs = [part.partition("=") for part in raw.split(",") if part.strip()]
+    return {tenant.strip() for _, _, tenant in pairs} if all(sep for _, sep, _ in pairs) else None
+
+
+def _require_single_tenant(env: Mapping[str, str], tenant: str) -> None:
+    mapped = _mapped_tenants(env.get("EAP_ZITADEL_ORG_TENANT_MAP", ""))
+    reason = ""
+    if env.get("EAP_TENANT_REGISTRY", "").strip().lower() == "enforce":
+        reason = "EAP_TENANT_REGISTRY=enforce"
+    elif mapped is None:
+        reason = "EAP_ZITADEL_ORG_TENANT_MAP cannot be read"
+    elif mapped - {tenant}:
+        reason = "EAP_ZITADEL_ORG_TENANT_MAP names a tenant other than EAP_CF_ACCESS_TENANT"
+    if reason:
+        raise IamConfigError(
+            f"the cfaccess identity plug-in is legacy and single-tenant: it would make every Cloudflare Access user a "
+            f"member of one tenant, and {reason}. Remove cfaccess from EAP_IAM_IDENTITY"
+        )
+
+
 def create(ctx: PluginContext, *, fetcher: Callable[[], Any] | None = None) -> CfAccessProvider:
     env = ctx.env
     team, auds, tenant = _settings(env)
+    _require_single_tenant(env, tenant)
+    log.warning(
+        "IAM identity provider cfaccess is legacy and single-tenant: every Cloudflare Access user is a user of tenant %r",
+        tenant,
+    )
     cache = JwksCache(
         fetcher or (lambda: fetch_jwks(f"https://{team}/cdn-cgi/access/certs")),
         ttl=float(env.get("EAP_CF_ACCESS_JWKS_TTL_SECONDS", "3600")),

@@ -102,6 +102,35 @@ describe("MembersSection", () => {
     await waitFor(() => expect(body).toEqual({ email: "cy@example.test", role: "editor" }));
   });
 
+  it("says that users are created in the identity provider when the platform cannot create them, and still adds one", async () => {
+    let body: unknown = null;
+    route({
+      "GET /api/v1/iam/members": () => json({ ...members(), can_create_users: false }),
+      "GET /api/v1/iam/capabilities": () => json(caps(false)),
+      "POST /api/v1/iam/members": () => json({ id: "u3", email: "cy@example.test", display_name: null, roles: ["viewer"], status: "active" }, 201),
+    });
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") body = JSON.parse(String(init.body));
+      return original(url, init);
+    });
+    view();
+    await screen.findAllByTestId("member-row");
+    expect(screen.getByTestId("members-no-create")).toHaveTextContent(/create the person in the .*ZITADEL console first/i);
+    expect(screen.getByTestId("members-invite-submit")).toHaveTextContent("Add member");
+    fireEvent.change(screen.getByLabelText("E-mail"), { target: { value: "cy@example.test" } });
+    fireEvent.click(screen.getByTestId("members-invite-submit"));
+    await waitFor(() => expect(body).toEqual({ email: "cy@example.test", role: "viewer" }));
+  });
+
+  it("offers a plain invitation when the platform can create users", async () => {
+    route({ "GET /api/v1/iam/members": () => json({ ...members(), can_create_users: true }), "GET /api/v1/iam/capabilities": () => json(caps(false)) });
+    view();
+    await screen.findAllByTestId("member-row");
+    expect(screen.queryByTestId("members-no-create")).toBeNull();
+    expect(screen.getByTestId("members-invite-submit")).toHaveTextContent("Invite");
+  });
+
   it("removes a member after a confirmation", async () => {
     let deleted = false;
     route({

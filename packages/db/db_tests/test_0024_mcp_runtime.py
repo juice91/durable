@@ -84,7 +84,7 @@ def test_upgrade_constraints_downgrade_and_reupgrade():
                 if "chat_attachments" not in repr(d) and "'builtin'" not in repr(d) and "'created_via'" not in repr(d)
                 and "'slug'" not in repr(d) and "'revision'" not in repr(d) and "'archived_at'" not in repr(d) and "ix_spans_external" not in repr(d) and "ck_spans_source" not in repr(d) and "<spans>" not in repr(d) and "_tenant_slug" not in repr(d) and "tenant_secrets" not in repr(d) and "workflow_explanations" not in repr(d)
                 and "mcp_catalog_entries" not in repr(d) and "'keep_warm'" not in repr(d)
-                and not any(t in repr(d) for t in ("audit_log", "definition_provenance", "capability_snapshots", "api_keys", "'principal'", "'on_behalf_of'", "'started_by_kind'", "'published_by'"))
+                and not any(t in repr(d) for t in ("audit_log", "definition_provenance", "capability_snapshots", "api_keys", "'principal'", "'on_behalf_of'", "'started_by_kind'", "'published_by'", "'grant_set'", "'actor_roles'", "webhook_", "'trigger_id'", "ix_runs_trigger_active", "external_clients", "external_endpoints", "external_runs", "external_client", "workflow_exports"))
                 and not any(t in repr(d) for t in ("settings_connections", "kb_sources", "kb_source_syncs", "kb_source_records", "kb_entit"))
             ] == []
 

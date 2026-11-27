@@ -128,10 +128,11 @@ def test_gaps_are_generated_from_the_registry():
     in_gaps = {i for g in gaps for i in g.entry_ids}
     assert not_available <= in_gaps and not_writable <= in_gaps  # every non-available entry is explained by a gap
     assert in_gaps <= set(entries)  # and every gap points at a real entry
-    webhook = next(g for g in gaps if g.id == "gap.inbound_webhook")
-    assert webhook.status == "designed_not_built" and webhook.alternatives == ("trigger.schedule",)
-    assert entries["trigger.webhook"].status == "designed_not_built"
-    assert entries["trigger.webhook"].designed_in == webhook.designed_in
+    # Inbound webhooks shipped: the gap is gone and the entry is a real, available declaration (wait_event is still a gap).
+    assert "gap.inbound_webhook" not in {g.id for g in gaps}
+    assert entries["trigger.webhook"].status == "available" and entries["trigger.webhook"].designed_in is None
+    wait = next(g for g in gaps if g.id == "gap.wait_event_step")
+    assert wait.status == "designed_not_built" and entries["step.wait_event"].status == "designed_not_built"
 
 
 def test_every_designed_in_is_a_file_on_main_or_a_pr_reference():
@@ -142,8 +143,8 @@ def test_every_designed_in_is_a_file_on_main_or_a_pr_reference():
     assert designed_in_problem("pr:111", lambda p: False) is None
     assert designed_in_problem("../etc/passwd", lambda p: True) is not None
     assert designed_in_problem(None, lambda p: True) == "designed_in is missing"
-    # The three designs that are only pull requests today are referenced as such (webhooks and wait_event: 111, A2A: 100).
-    assert {g.id: g.designed_in for g in GAPS}["gap.inbound_webhook"] == "pr:111"
+    # The designs that are only pull requests today are referenced as such (wait_event: 111, A2A: 100).
+    assert {g.id: g.designed_in for g in GAPS}["gap.wait_event_step"] == "pr:111"
     assert {g.id: g.designed_in for g in GAPS}["gap.a2a_agent"] == "pr:100"
 
 
@@ -154,7 +155,7 @@ def test_a_probe_cannot_add_a_builtin_or_switch_on_a_design():
     declared = collect_declared()
     fake = CapabilityEntry(id="tool.made.up", kind="tool", title="x", description="x")
     outcome = ProbeOutcome(
-        overrides={"tool.clock.now": ("disabled", "off"), "trigger.webhook": ("available", None), "tool.nope": ("disabled", "x")},
+        overrides={"tool.clock.now": ("disabled", "off"), "step.wait_event": ("available", None), "tool.nope": ("disabled", "x")},
         extra=(fake, CapabilityEntry(id="model.x", kind="model", title="x", description="x"),
                CapabilityEntry(id="tool.clock.now", kind="model", title="shadow", description="x")),
         degraded=(),
@@ -162,7 +163,7 @@ def test_a_probe_cannot_add_a_builtin_or_switch_on_a_design():
     merged = {e.id: e for e in merge(declared, outcome)}
     assert "tool.made.up" not in merged and "tool.nope" not in merged
     assert merged["tool.clock.now"].status == "disabled" and merged["tool.clock.now"].kind == "tool"
-    assert merged["trigger.webhook"].status == "designed_not_built"
+    assert merged["step.wait_event"].status == "designed_not_built"
     assert "model.x" in merged
 
 
@@ -266,7 +267,7 @@ def test_list_filters_and_refuses_unknown_values():
     assert {e["id"] for e in steps["entries"]} >= {"step.agent", "step.foreach", "step.wait_event"}
     assert all("input_schema" not in e for e in steps["entries"])
     designed = run(svc.list(VIEWER, status="designed_not_built"))
-    assert {e["id"] for e in designed["entries"]} == {"trigger.webhook", "step.wait_event", "step.a2a_agent", "feature.iam_per_user"}
+    assert {e["id"] for e in designed["entries"]} == {"step.wait_event", "step.a2a_agent", "feature.iam_per_user"}
     assert [g["id"] for g in designed["known_gaps"]] == [g.id for g in known_gaps()]
     hit = run(svc.list(VIEWER, query="text check verbatim"))
     assert "tool_option.text.check.verbatim_exempt" in {e["id"] for e in hit["entries"]}
@@ -344,7 +345,7 @@ def test_listing_etag_and_304(client, fresh_probe_cache):
     assert client.get(BASE, headers={**h, "If-None-Match": "*"}).status_code == 304
     assert client.get(BASE, headers={**h, "If-None-Match": '"stale"'}).status_code == 200
     filtered = client.get(BASE, params={"kind": "trigger", "status": "available"}, headers=h).json()
-    assert {e["id"] for e in filtered["entries"]} == {"trigger.api_run", "trigger.schedule"}
+    assert {e["id"] for e in filtered["entries"]} == {"trigger.api_run", "trigger.schedule", "trigger.webhook"}
     one = client.get(f"{BASE}/step.foreach", headers=h)
     assert one.status_code == 200 and one.json()["entry"]["writable_by_architect"] is False
     missing = client.get(f"{BASE}/step.foreeach", headers=h)
@@ -421,8 +422,10 @@ def test_mcp_clients_read_the_same_registry(world):  # noqa: F811
     assert not listing.is_error, listing.data
     assert {e["id"] for e in listing.data["entries"]} >= {"step.agent", "step.foreach", "step.wait_event"}
     assert listing.data["known_gaps"]
-    got = world.call(key, "capability.get", {"capability_id": "trigger.webhook"})
-    assert got.data["entry"]["status"] == "designed_not_built" and got.data["gaps"][0]["id"] == "gap.inbound_webhook"
+    got = world.call(key, "capability.get", {"capability_id": "step.wait_event"})
+    assert got.data["entry"]["status"] == "designed_not_built" and got.data["gaps"][0]["id"] == "gap.wait_event_step"
+    hook = world.call(key, "capability.get", {"capability_id": "trigger.webhook"})
+    assert hook.data["entry"]["status"] == "available" and not hook.data["gaps"]
     missing = world.call(key, "capability.get", {"capability_id": "trigger.webhok"})
     assert missing.error["code"] == "unknown_capability" and "trigger.webhook" in missing.error["message"]
     assert world.call(key, "capability.list", {"status": "bogus"}).error["code"] == "invalid_status"

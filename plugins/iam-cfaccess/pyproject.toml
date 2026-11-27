@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "eap-iam-cfaccess"
-version = "0.3.0"
+version = "0.5.0"
 description = "IAM identity plug-in: the Cloudflare Access JWT (Cf-Access-Jwt-Assertion), e-mail as the user subject"
 readme = "README.md"
 requires-python = ">=3.13"

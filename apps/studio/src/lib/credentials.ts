@@ -1,9 +1,10 @@
 /**
  * What Studio sends to the API to say who it is. No credential is built into the bundle.
  *
- * - On the public host the browser sends no `Authorization` header at all: the request carries the Cloudflare Access
- *   cookie (same origin), cloudflared adds the signed Access JWT and the API (`eap-iam-cfaccess`) identifies the
- *   user by e-mail.
+ * - With `EAP_STUDIO_AUTH=access` the browser sends no `Authorization` header on the public host:
+ *   the request carries the Cloudflare Access cookie (same origin) and cloudflared adds the signed Access JWT, which
+ *   only a single-tenant API that lists the `eap-iam-cfaccess` provider identifies.
+ * - With `EAP_STUDIO_AUTH=local` the built-in admin signs in (lib/auth/local.ts) and the page sends its bearer.
  * - On a loopback page (the SSH tunnel at `http://127.0.0.1:13000`) the Studio server publishes a dev bearer as a
  *   RUNTIME value (`window.__EAP_RUNTIME_CONFIG__.devBearer`, from EAP_STUDIO_LOOPBACK_DEV_BEARER, only for a request
  *   whose Host is a loopback name) and the API accepts it only from a loopback TCP peer. It is honoured here only
@@ -28,7 +29,8 @@ export function runtimeDevBearer(hostname: string | undefined, runtime: RuntimeC
 
 /** The `Authorization` value to send, or undefined when the request should carry only the Access cookie. */
 export function authorizationValue(): string | undefined {
-  if (process.env.NODE_ENV !== "production") {
+  if (process.env.NODE_ENV !== "production" && !getAccessToken()) {
+    // A signed-in session (a sign-in mode under development) wins over the development token.
     const fromEnv = process.env.NEXT_PUBLIC_EAP_DEV_TOKEN;
     if (fromEnv) return fromEnv;
   }

@@ -39,6 +39,12 @@ async function openDialog() {
   fireEvent.click(button);
   return screen.findByTestId("eval-run-dialog");
 }
+/** The dialog's start button, once it can be clicked: it is disabled while the target's tools are checked. */
+async function enabledStart(dialog: HTMLElement) {
+  const start = within(dialog).getByTestId("eval-run-start");
+  await waitFor(() => expect(start).toBeEnabled());
+  return start;
+}
 const startCalls = () => callsTo(fake.state, "POST", /evals\/runs$/);
 const startBody = (n = 0) => startCalls()[n].body as { run_id: string; suite_id: string; version: unknown; max_concurrency: number };
 const set = (el: HTMLElement, value: string) => fireEvent.change(el, { target: { value } });
@@ -51,7 +57,7 @@ describe("the target", () => {
     const target = within(dialog).getByTestId("eval-run-target");
     expect(target).toHaveValue("2");
     expect(optionsOf(target).map((o) => o.textContent)).toEqual(["v2 (latest)", "v1", "Draft"]);
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await waitFor(() => expect(startCalls()).toHaveLength(1));
     expect(startBody()).toMatchObject({ suite_id: SUITE, version: 2, max_concurrency: 4 });
     expect(startBody().run_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
@@ -64,7 +70,7 @@ describe("the target", () => {
     set(within(dialog).getByTestId("eval-run-target"), "1");
     set(within(dialog).getByTestId("eval-run-concurrency"), "7");
     await waitFor(() => expect(callsTo(fake.state, "GET", /evals\/warnings$/).at(-1)?.query.get("version")).toBe("1"));
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await waitFor(() => expect(startCalls()).toHaveLength(1));
     expect(startBody()).toMatchObject({ version: 1, max_concurrency: 7 });
   });
@@ -75,7 +81,7 @@ describe("the target", () => {
     set(within(dialog).getByTestId("eval-run-target"), "draft");
     expect(within(dialog).getByText(/unpublished draft/)).toBeInTheDocument();
     await waitFor(() => expect(callsTo(fake.state, "GET", /evals\/warnings$/).at(-1)?.query.get("version")).toBe("draft"));
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await waitFor(() => expect(startCalls()).toHaveLength(1));
     expect(startBody().version).toBe("draft");
   });
@@ -196,7 +202,7 @@ describe("idempotency through the client run_id", () => {
     const release = holdStart(fake.state);
     renderSuite();
     const dialog = await openDialog();
-    const start = within(dialog).getByTestId("eval-run-start");
+    const start = await enabledStart(dialog);
     fireEvent.click(start);
     fireEvent.click(start);
     await waitFor(() => expect(start).toHaveTextContent("Starting…"));
@@ -227,10 +233,10 @@ describe("idempotency through the client run_id", () => {
     fake.fail({ method: "POST", path: /evals\/runs$/, status: 503, body: { detail: "Eval run recorded but could not be started; retry the same request (same run_id)" }, once: true });
     renderSuite();
     const dialog = await openDialog();
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     expect(await within(dialog).findByTestId("eval-run-error")).toHaveTextContent("retry the same request");
     expect(nextRouter.url).not.toContain("run=");
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await waitFor(() => expect(nextRouter.url).toContain("run="));
     expect(startCalls()).toHaveLength(2);
     expect(startBody(0).run_id).toBe(startBody(1).run_id);
@@ -241,11 +247,10 @@ describe("idempotency through the client run_id", () => {
     fake.fail({ method: "POST", path: /evals\/runs$/, status: 503, body: { detail: "down" }, once: true });
     renderSuite();
     const dialog = await openDialog();
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await within(dialog).findByTestId("eval-run-error");
     set(within(dialog).getByTestId("eval-run-target"), "1");
-    await waitFor(() => expect(within(dialog).getByTestId("eval-run-start")).toBeEnabled());
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await waitFor(() => expect(startCalls()).toHaveLength(2));
     expect(startBody(0).run_id).not.toBe(startBody(1).run_id);
   });
@@ -257,7 +262,7 @@ describe("idempotency through the client run_id", () => {
     await waitFor(() => expect(screen.queryByTestId("eval-run-dialog")).not.toBeInTheDocument());
     expect(startCalls()).toHaveLength(0);
     dialog = await openDialog();
-    fireEvent.click(within(dialog).getByTestId("eval-run-start"));
+    fireEvent.click(await enabledStart(dialog));
     await waitFor(() => expect(startCalls()).toHaveLength(1));
   });
 });

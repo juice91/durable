@@ -1,5 +1,7 @@
 import { BASE_URL, resolveBaseUrl } from "./base-url";
+import { refusedMessage } from "./access";
 import { authorizationHeaders } from "./credentials";
+import { reportFromBody } from "./refusals";
 import { rememberRevision, revisionFromEtag, revisionKey, track, trackAll, writeResource } from "./revisions";
 
 /** An MCP tool an agent may call: `server` is the tenant MCP server's NAME, `tool` the tool's name on it. */
@@ -100,6 +102,7 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
   let details: ApiErrorDetail[] = [];
   try {
     const data = await response.json();
+    reportFromBody(response.status, data); // "why can't I?": a refusal of the policy engine
     if (response.status === 412 && data?.code === "revision_mismatch" && typeof data.current_revision === "number") {
       return new ConflictError(typeof data.detail === "string" ? data.detail : "This content was changed by someone else", data.current_revision, data.current);
     }
@@ -114,6 +117,7 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
     } else if (data.detail && typeof data.detail === "object" && typeof data.detail.message === "string") {
       message = data.detail.message;
     }
+    message = (await refusedMessage(response.status, data)) ?? message;
   } catch {
     // Keep the HTTP status fallback when the response is not JSON.
   }

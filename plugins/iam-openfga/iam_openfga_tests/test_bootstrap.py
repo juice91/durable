@@ -41,7 +41,7 @@ def test_a_changed_model_is_written_as_a_new_model_in_the_same_store():
     fake = FakeOpenFga()
     run_cli(fake)
     fake.calls.clear()
-    changed = model_text().replace("define can_read: viewer\n    define can_create_agent", "define can_read: viewer or admin\n    define can_create_agent", 1)
+    changed = model_text().replace("define can_read: viewer\n    define can_write", "define can_read: viewer or admin\n    define can_write", 1)
     path = __import__("pathlib").Path(__import__("tempfile").mkdtemp()) / "m.fga"
     path.write_text(changed)
     code, text = run_cli(fake, "--model-file", str(path))

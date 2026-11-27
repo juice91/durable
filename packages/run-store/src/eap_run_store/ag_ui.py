@@ -1,7 +1,7 @@
 """AG-UI run mapping (0016_ag_ui): which of our runs an AG-UI `(threadId, runId)` names, and the
 client tool calls a conversation's latest turn left pending.
 
-`ag_ui_runs` holds one row per AG-UI run (D4 of docs/plans/2026-11-13-milestone-ag-ui.md), keyed by
+`ag_ui_runs` holds one row per AG-UI run (D4 of an internal design note), keyed by
 tenant, scope (`agent` | `workflow` and its id), the client's threadId and runId. A POST with a known
 runId never starts anything new: the API reads the row (`get_ag_ui_run`) and compares fingerprints.
 `record_ag_ui_run` is idempotent: the first writer wins and every later call gets that row back.

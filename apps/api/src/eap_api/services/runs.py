@@ -17,6 +17,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
+from eap_api.services.run_access import authorize_run
 from eap_api.ports import RunLauncher, RunWaitTimeout, StartedRun
 from eap_api.services.agent_archive import refuse_if_archived
 from eap_api.services.run_filters import plain_refusals
@@ -264,16 +267,21 @@ def launch_recorded_run(
 
 
 @plain_refusals
-class RunService:
+class RunService(AccessBound):
     """Runs of agents: start (idempotently), read, list, events, histogram, wait. Implements RunStarter."""
 
     def __init__(
-        self, db: Session, run_store: RunStore, event_log: EventLog, launcher: RunLauncher
+        self, db: Session, run_store: RunStore, event_log: EventLog, launcher: RunLauncher, access: Access | None = None
     ) -> None:
         self.db = db
         self.run_store = run_store
         self.event_log = event_log
         self.launcher = launcher
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _authorize(self, run: dict[str, Any], action: str = "read") -> None:
+        """A run is as readable as the agent or workflow it belongs to (see `run_access.authorize_run`)."""
+        authorize_run(self._access, self.run_store, run, action)
 
     # -- start ---------------------------------------------------------------------------------
 
@@ -294,6 +302,7 @@ class RunService:
         `(run, created)`: created when this call inserted the run, not when the tenant already had it. The
         enqueue is attempted in both cases, so a crash between insert and enqueue heals when the client
         retries. The request's trace id and traceparent are stored on the run."""
+        acl.require(self._access, "run", "agent", str(agent_id))
         agent = lock_agent(self.db, tenant_id, agent_id)
         # A retry of a recorded run is compared with the row (below) and relaunched as recorded; only a
         # new run validates its options (a draft run against the live draft, then snapshotted).
@@ -349,7 +358,17 @@ class RunService:
     # -- read ----------------------------------------------------------------------------------
 
     def require_run(self, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
-        return get_run_or_404(self.run_store, tenant_id, run_id)
+        """The run, or NotFound when there is none or the caller may not read its agent or workflow."""
+        run = get_run_or_404(self.run_store, tenant_id, run_id)
+        self._authorize(run)
+        return run
+
+    def read_run(self, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any] | None:
+        """The run row for a caller that asks (MCP tools): None when there is none or it may not be read."""
+        try:
+            return self.require_run(tenant_id, run_id)
+        except NotFound:
+            return None
 
     def get_run(self, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any] | None:
         return self.run_store.get_run(tenant_id, run_id)
@@ -426,6 +445,8 @@ class RunService:
     run's request context value as text) and `q`, a case-insensitive substring of the run's input,
     output, error, tool id or model id (span names and trace payloads are not searched). `q` runs
     under the metrics statement timeout (503 when it fires)."""
+        agent_ids = acl.sql_ids(acl.visible(self._access, "agent"))  # two engine calls, whatever the page size
+        workflow_ids = acl.sql_ids(acl.visible(self._access, "workflow"))
         statuses = status_filter(run_status)
         tag_list = list_param(tags, "tags", split=True)
         metadata_map = metadata_filter(metadata) or {}
@@ -442,6 +463,7 @@ class RunService:
                 tool_id=tool_id, workflow_id=workflow_id, knowledge_base_id=knowledge_base_id,
                 parent_run_id=parent_run_id, created_from=start, created_to=end, model=model, provider=provider,
                 tags=tag_list, metadata=metadata_map or None, text_query=text_query(q),
+                visible_agent_ids=agent_ids, visible_workflow_ids=workflow_ids,
             )
         except MetricsQueryTimeout:
             # Only with `model` / `provider` / `q`: those filters run under the metrics statement timeout.

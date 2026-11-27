@@ -94,3 +94,33 @@ def test_without_a_membership_source_the_stored_scopes_stand_and_a_tenant_key_is
     assert auth(provider(record(), None)).scopes == {"mcp", "manage"}
     tenant = auth(provider(record(owner=None), Source([])))
     assert tenant.on_behalf_of == "admin" and "owner" not in tenant.extra and tenant.scopes == {"mcp", "manage"}
+
+
+# --- the Architect's run token carries the CURRENT roles of the person it acts for (a policy engine reads them) ---------
+
+
+def run_principal(provider, requested_by="zitadel:u1"):
+    provider._architect_run = lambda credential: ("t1", "00000000-0000-0000-0000-000000000001", requested_by)
+    return asyncio.run(provider._run_token("run-token"))
+
+
+def test_a_run_token_carries_the_persons_current_roles_cached_briefly():
+    now = [0.0]
+    source = Source(["editor"])
+    p = provider(record(), source, clock=lambda: now[0])
+    run = run_principal(p)
+    assert run.kind == "run" and run.on_behalf_of == "zitadel:u1" and run.roles == {"editor"}
+    assert run.scopes == {"mcp", "manage"}  # the policy engine narrows it, as before
+    source.roles = ["viewer"]
+    assert run_principal(p).roles == {"editor"} and source.calls == 1
+    now[0] = OWNER_ROLES_TTL_SECONDS + 1
+    assert run_principal(p).roles == {"viewer"}
+
+
+def test_a_run_token_has_no_roles_without_a_person_a_source_or_an_answer():
+    assert run_principal(provider(record(), Source(["admin"])), requested_by=None).roles == frozenset()
+    assert run_principal(provider(record(), None)).roles == frozenset()
+    source = Source(["admin"])
+    source.fail = True
+    # Not a 503: with the transitional engine the Architect keeps working; with openfga no role means no right.
+    assert run_principal(provider(record(), source)).roles == frozenset()

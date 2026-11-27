@@ -34,18 +34,21 @@ def test_it_satisfies_the_core_protocols():
     policy = engine(FakeOpenFga())
     assert isinstance(policy, PolicyEngine) and isinstance(policy, GrantingPolicyEngine)
     assert policy.name == "openfga" and not policy.transitional
-    assert {"grants", "list_filter", "explain", "contextual_roles"} == set(policy.features)
+    assert {"grants", "list_filter", "explain", "contextual_roles", "agent_grants"} == set(policy.features)
+    from eap_iam import AgentGrantEngine
+
+    assert isinstance(policy, AgentGrantEngine)
 
 
 def test_check_asks_the_relation_of_the_action_and_sends_the_roles_as_contextual_tuples():
     fake = FakeOpenFga()
-    fake.allowed.add(("user:zitadel:u1", "can_publish", "agent:acme/a1"))
+    fake.allowed.add(("user:zitadel%3Au1", "can_publish", "agent:acme/a1"))
     d = run(engine(fake).check(principal(roles=["editor", "unknown-role"]), "publish", ref()))
     assert d.allowed and d.reason == "allow:can_publish" and d.explain == {"relation": "can_publish"}
     assert fake.calls["check"] == 1
     name, body = fake.requests[0]
-    assert body["tuple_key"] == {"user": "user:zitadel:u1", "relation": "can_publish", "object": "agent:acme/a1"}
-    assert body["contextual_tuples"]["tuple_keys"] == [{"user": "user:zitadel:u1", "relation": "editor", "object": "tenant:acme"}]
+    assert body["tuple_key"] == {"user": "user:zitadel%3Au1", "relation": "can_publish", "object": "agent:acme/a1"}
+    assert body["contextual_tuples"]["tuple_keys"] == [{"user": "user:zitadel%3Au1", "relation": "editor", "object": "tenant:acme"}]
     assert body["authorization_model_id"] == "01FAKEMODEL"
 
 
@@ -56,13 +59,13 @@ def test_a_denied_check_says_why_without_naming_anything_hidden():
 
 def test_the_action_may_carry_its_kind():
     fake = FakeOpenFga()
-    fake.allowed.add(("user:zitadel:u1", "can_run", "workflow:acme/w"))
+    fake.allowed.add(("user:zitadel%3Au1", "can_run", "workflow:acme/w"))
     assert run(engine(fake).check(principal(), "workflow.run", ref("workflow", "w"))).allowed
 
 
 def test_a_collection_answers_create_against_the_tenant():
     fake = FakeOpenFga()
-    fake.allowed.add(("user:zitadel:u1", "can_create_secret", "tenant:acme"))
+    fake.allowed.add(("user:zitadel%3Au1", "can_create_secret", "tenant:acme"))
     p = principal(roles=["admin"])
     assert run(engine(fake).check(p, "create", ResourceRef("secret", None, T))).allowed
     assert not run(engine(fake).check(p, "read", ResourceRef("secret", None, T))).allowed  # no such collection action
@@ -71,7 +74,7 @@ def test_a_collection_answers_create_against_the_tenant():
 
 def test_the_tenant_itself_has_its_own_relations():
     fake = FakeOpenFga()
-    fake.allowed.add(("user:zitadel:u1", "can_manage_members", "tenant:acme"))
+    fake.allowed.add(("user:zitadel%3Au1", "can_manage_members", "tenant:acme"))
     assert run(engine(fake).check(principal(), "manage_members", ResourceRef("tenant", T, T))).allowed
 
 
@@ -109,7 +112,7 @@ def test_an_api_key_abstains_because_its_constraints_decide():
 
 def test_a_run_is_checked_as_the_principal_it_acts_for():
     fake = FakeOpenFga()
-    fake.allowed.add(("user:zitadel:boss", "can_read", "agent:acme/a1"))
+    fake.allowed.add(("user:zitadel%3Aboss", "can_read", "agent:acme/a1"))
     p = principal(subject="architect-run:r1", kind="run", on_behalf_of="zitadel:boss")
     assert run(engine(fake).check(p, "read", ref())).allowed
     orphan = principal(subject="architect-run:r1", kind="run")
@@ -121,7 +124,7 @@ def test_a_run_is_checked_as_the_principal_it_acts_for():
 
 def test_check_many_is_one_batch_check_for_a_page():
     fake = FakeOpenFga()
-    fake.allowed |= {("user:zitadel:u1", "can_read", f"agent:acme/a{i}") for i in range(0, 50, 2)}
+    fake.allowed |= {("user:zitadel%3Au1", "can_read", f"agent:acme/a{i}") for i in range(0, 50, 2)}
     out = run(engine(fake).check_many(principal(), "read", [ref(id=f"a{i}") for i in range(50)]))
     assert fake.calls["batch_check"] == 1 and sum(fake.calls.values()) == 1
     assert [k for k, d in out.items() if d.allowed] == [f"a{i}" for i in range(0, 50, 2)]
@@ -129,7 +132,7 @@ def test_check_many_is_one_batch_check_for_a_page():
 
 def test_check_many_over_the_batch_limit_costs_one_list_not_one_call_per_row():
     fake = FakeOpenFga()
-    fake.allowed |= {("user:zitadel:u1", "can_read", f"agent:acme/a{i}") for i in range(0, 300, 3)}
+    fake.allowed |= {("user:zitadel%3Au1", "can_read", f"agent:acme/a{i}") for i in range(0, 300, 3)}
     out = run(engine(fake).check_many(principal(), "read", [ref(id=f"a{i}") for i in range(300)]))
     assert fake.calls["list_objects"] == 1 and fake.calls["batch_check"] == 0 and fake.calls["check"] == 0
     assert sum(d.allowed for d in out.values()) == 100 and out["a3"].allowed and not out["a4"].allowed
@@ -137,7 +140,7 @@ def test_check_many_over_the_batch_limit_costs_one_list_not_one_call_per_row():
 
 def test_check_many_falls_back_to_batches_when_the_list_is_truncated_and_logs_it(caplog):
     fake = FakeOpenFga()
-    fake.allowed |= {("user:zitadel:u1", "can_read", f"agent:acme/a{i}") for i in range(0, 120, 2)}
+    fake.allowed |= {("user:zitadel%3Au1", "can_read", f"agent:acme/a{i}") for i in range(0, 120, 2)}
     fake.list_cap = 10
     with caplog.at_level(logging.WARNING, logger="eap.iam.openfga"):
         out = run(engine(fake, list_limit=10).check_many(principal(), "read", [ref(id=f"a{i}") for i in range(120)]))
@@ -160,8 +163,8 @@ def test_check_many_repeats_and_untestable_rows_do_not_cost_calls():
 
 def test_filter_ids_is_one_admin_check_and_one_list():
     fake = FakeOpenFga()
-    fake.allowed |= {("user:zitadel:u1", "can_read", f"agent:acme/a{i}") for i in range(5)}
-    fake.allowed.add(("user:zitadel:u1", "can_read", "agent:other/stolen"))  # a stray tuple of another tenant
+    fake.allowed |= {("user:zitadel%3Au1", "can_read", f"agent:acme/a{i}") for i in range(5)}
+    fake.allowed.add(("user:zitadel%3Au1", "can_read", "agent:other/stolen"))  # a stray tuple of another tenant
     f = run(engine(fake).filter_ids(principal(roles=["viewer"]), "read", "agent"))
     assert isinstance(f, Only) and sorted(f.ids) == [f"a{i}" for i in range(5)]
     assert fake.calls["check"] == 1 and fake.calls["list_objects"] == 1 and sum(fake.calls.values()) == 2
@@ -169,21 +172,21 @@ def test_filter_ids_is_one_admin_check_and_one_list():
 
 def test_a_tenant_admin_is_all_after_one_check():
     fake = FakeOpenFga()
-    fake.allowed.add(("user:zitadel:u1", "admin", "tenant:acme"))
+    fake.allowed.add(("user:zitadel%3Au1", "admin", "tenant:acme"))
     assert isinstance(run(engine(fake).filter_ids(principal(roles=["admin"]), "read", "agent")), All)
     assert sum(fake.calls.values()) == 1
 
 
 def test_filter_ids_narrows_to_the_candidates():
     fake = FakeOpenFga()
-    fake.allowed |= {("user:zitadel:u1", "can_read", f"agent:acme/a{i}") for i in range(5)}
+    fake.allowed |= {("user:zitadel%3Au1", "can_read", f"agent:acme/a{i}") for i in range(5)}
     f = run(engine(fake).filter_ids(principal(), "read", "agent", ["a1", "a9", "a3"]))
     assert f == Only(("a1", "a3"))
 
 
 def test_a_truncated_list_with_candidates_is_checked_exactly_and_without_them_only_hides(caplog):
     fake = FakeOpenFga()
-    fake.allowed |= {("user:zitadel:u1", "can_read", f"agent:acme/a{i:03}") for i in range(30)}
+    fake.allowed |= {("user:zitadel%3Au1", "can_read", f"agent:acme/a{i:03}") for i in range(30)}
     fake.list_cap = 5
     p = principal()
     with caplog.at_level(logging.WARNING, logger="eap.iam.openfga"):
@@ -257,7 +260,7 @@ def test_a_wrong_key_is_seen_by_the_server_as_wrong():
 def test_register_links_the_resource_to_its_tenant_and_makes_the_creator_owner():
     fake = FakeOpenFga()
     run(engine(fake).register_resource(ref(), creator="zitadel:u1"))
-    assert fake.tuples == {("tenant:acme", "tenant", "agent:acme/a1"), ("user:zitadel:u1", "owner", "agent:acme/a1")}
+    assert fake.tuples == {("tenant:acme", "tenant", "agent:acme/a1"), ("user:zitadel%3Au1", "owner", "agent:acme/a1")}
     run(engine(fake).register_resource(ref(), creator="zitadel:u1"))  # idempotent
     assert len(fake.tuples) == 2
 
@@ -286,7 +289,7 @@ def test_unregister_deletes_the_links_the_grants_and_the_runs_below():
     run(e.register_resource(ref("run", "r1"), parent=ref("workflow", "w1")))
     run(e.register_resource(ref("workflow", "w2"), creator="zitadel:u1"))
     run(e.unregister_resource(ref("workflow", "w1")))
-    assert fake.tuples == {("tenant:acme", "tenant", "workflow:acme/w2"), ("user:zitadel:u1", "owner", "workflow:acme/w2")}
+    assert fake.tuples == {("tenant:acme", "tenant", "workflow:acme/w2"), ("user:zitadel%3Au1", "owner", "workflow:acme/w2")}
 
 
 def test_grant_revoke_and_list():
@@ -299,7 +302,7 @@ def test_grant_revoke_and_list():
     listed = run(e.list_grants(ref()))
     assert sorted((g.relation, g.subject) for g in listed) == [("approver", "zitadel:u3"), ("owner", "zitadel:u1"), ("runner", "zitadel:u2")]
     run(e.revoke(Grant("zitadel:u2", "runner", ref())))
-    assert ("user:zitadel:u2", "runner", "agent:acme/a1") not in fake.tuples
+    assert ("user:zitadel%3Au2", "runner", "agent:acme/a1") not in fake.tuples
     assert all(g.relation in GRANT_RELATIONS for g in run(e.list_grants(ref())))
 
 
@@ -307,7 +310,7 @@ def test_grant_revoke_and_list():
     "grant",
     [
         Grant("zitadel:u2", "tenant", ref()),  # an internal relation
-        Grant("zitadel:u2", "usable_by", ref("secret", "s")),
+        Grant("zitadel:u2", "granted_to", ref("secret", "s")),  # agent grants have their own writer, not Studio's
         Grant("zitadel:u2", "runner", ref("secret", "s")),  # a secret has no runner
         Grant("zitadel:u2", "approver", ref("knowledge_base", "k")),
         Grant("*", "runner", ref()),  # a wildcard subject
@@ -352,3 +355,74 @@ def test_it_is_discovered_through_the_entry_point():
     from eap_iam.registry import installed
 
     assert "openfga" in installed(GROUP_POLICY, {})
+
+
+# --- the Access tab: viewer grants, role grants, what a kind can hold, what an action needs ------------------------------
+
+
+def test_a_role_grant_is_a_userset_of_the_resources_own_tenant_and_lists_as_a_role():
+    fake = FakeOpenFga()
+    e = engine(fake)
+    run(e.grant(Grant("viewer", "runner", ref("workflow", "w1"), subject_type="role")))
+    run(e.grant(Grant("zitadel:u2", "viewer", ref("workflow", "w1"))))
+    assert fake.tuples == {
+        ("tenant:acme#viewer", "runner", "workflow:acme/w1"), ("user:zitadel%3Au2", "viewer", "workflow:acme/w1"),
+    }
+    # A userset of another tenant (never written by us) is not shown as this tenant's role.
+    fake.tuples.add(("tenant:other#admin", "runner", "workflow:acme/w1"))
+    listed = run(e.list_grants(ref("workflow", "w1")))
+    assert [(g.subject_type, g.subject, g.relation) for g in listed] == [("role", "viewer", "runner"), ("user", "zitadel:u2", "viewer")]
+    run(e.revoke(Grant("viewer", "runner", ref("workflow", "w1"), subject_type="role")))
+    assert ("tenant:acme#viewer", "runner", "workflow:acme/w1") not in fake.tuples
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        Grant("viewer", "owner", ref(), subject_type="role"),  # an owner is a person
+        Grant("owner", "runner", ref(), subject_type="role"),  # not a role
+        Grant("viewer", "owner", ref("secret", "s"), subject_type="role"),
+        Grant("zitadel:u2", "runner", ref(), subject_type="group"),
+        Grant("zitadel:u2", "viewer", ref("secret", "s")),  # a secret's only grant is owner
+    ],
+)
+def test_a_role_grant_the_model_cannot_hold_is_refused_and_writes_nothing(grant):
+    fake = FakeOpenFga()
+    with pytest.raises(GrantError):
+        run(engine(fake).grant(grant))
+    assert not fake.tuples and sum(fake.calls.values()) == 0
+
+
+def test_grantable_relations_are_exactly_the_models():
+    e = engine(FakeOpenFga())
+    table = {kind: [(g.relation, g.roles) for g in e.grantable(kind)] for kind in ("agent", "workflow", "knowledge_base", "secret", "mcp_server")}
+    roles = ("admin", "editor", "viewer")
+    assert table["agent"] == table["workflow"] == [("owner", ()), ("editor", roles), ("runner", roles), ("approver", roles), ("viewer", roles)]
+    assert table["knowledge_base"] == [("owner", ()), ("editor", roles), ("runner", roles), ("viewer", roles)]
+    assert table["secret"] == table["mcp_server"] == [("owner", ())]
+    assert e.grantable("nothing") == []
+
+
+@pytest.mark.parametrize(
+    "action,kind,has_id,roles,relations",
+    [
+        ("read", "agent", True, ("admin", "editor", "viewer"), ("owner", "editor", "runner", "approver", "viewer")),
+        ("run", "agent", True, ("admin", "editor"), ("owner", "editor", "runner")),
+        ("publish", "workflow", True, ("admin", "editor"), ("owner", "editor")),
+        ("approve", "workflow", True, ("admin",), ("approver",)),
+        ("archive", "agent", True, ("admin",), ("owner",)),
+        ("edit", "secret", True, ("admin",), ("owner",)),
+        ("run", "mcp_server", True, ("admin", "editor"), ("owner",)),
+        ("create", "secret", False, ("admin",), ()),
+        ("create", "agent", False, ("admin", "editor"), ()),
+        ("manage_settings", "tenant", False, ("admin",), ()),
+        ("grant_use", "secret", True, ("admin",), ()),
+    ],
+)
+def test_what_an_action_needs_is_read_from_the_model(action, kind, has_id, roles, relations):
+    need = engine(FakeOpenFga()).requirements(action, kind, has_id)
+    assert (need.roles, need.relations) == (roles, relations)
+
+
+def test_what_the_model_has_no_relation_for_needs_nothing_and_says_so():
+    assert engine(FakeOpenFga()).requirements("fly", "agent", True) is None

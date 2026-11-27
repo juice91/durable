@@ -1,5 +1,7 @@
 "use client";
 
+import { PermissionNotice } from "@/components/access/PermissionNotice";
+import { Can, useCan } from "@/lib/permissions";
 import { CopyButton } from "@/components/ui/CopyButton";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
@@ -13,6 +15,9 @@ import { toast } from "@/components/ui/Toaster";
 import { ApiKeyCreateDialog } from "./ApiKeyCreateDialog";
 import { McpConnectPanel } from "./McpConnectPanel";
 import { OtlpConnectPanel } from "./OtlpConnectPanel";
+
+/** What "why can't I?" asks about on the key list. */
+const KEY_ACTIONS = ["create"] as const;
 
 /** The section's element id: Connect (AG-UI) links to `/settings#api-keys`. */
 export const API_KEYS_SECTION_ID = "api-keys";
@@ -87,9 +92,11 @@ function KeyRow({ apiKey, onRevoke }: { apiKey: ApiKey; onRevoke: (key: ApiKey) 
         </dl>
       </div>
       {apiKey.status === "active" ? (
-        <Button variant="secondary" size="sm" onClick={() => onRevoke(apiKey)} aria-label={`Revoke ${apiKey.name}`} data-testid="api-key-revoke">
-          Revoke
-        </Button>
+        <Can kind="api_key" id={apiKey.id} action="revoke">
+          <Button variant="secondary" size="sm" onClick={() => onRevoke(apiKey)} aria-label={`Revoke ${apiKey.name}`} data-testid="api-key-revoke">
+            Revoke
+          </Button>
+        </Can>
       ) : null}
     </li>
   );
@@ -100,6 +107,7 @@ function KeyRow({ apiKey, onRevoke }: { apiKey: ApiKey; onRevoke: (key: ApiKey) 
  * Revoke. A new key's plaintext is shown once, in the create dialog; this list never has it.
  */
 export function ApiKeysSection() {
+  const mayCreate = useCan("api_key", null, "create");
   const [keys, setKeys] = useState<ApiKey[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Management is refused in this deployment (not dev mode): retrying cannot help.
@@ -187,7 +195,7 @@ export function ApiKeysSection() {
             Keys let third-party frontends (CopilotKit, any AG-UI client) run your published agents and workflows, and let MCP clients manage this workspace. Use them from a server, not a browser.
           </p>
         </div>
-        {devOnly ? null : (
+        {devOnly || !mayCreate ? null : (
           <Button variant="primary" size="sm" onClick={() => setCreating(true)} data-testid="api-key-create">
             <Plus strokeWidth={ICON_STROKE_WIDTH} aria-hidden="true" />
             Create key
@@ -226,6 +234,7 @@ export function ApiKeysSection() {
           ))}
         </ul>
       )}
+      {mayCreate ? null : <PermissionNotice kind="api_key" id={null} actions={KEY_ACTIONS} />}
       <p role="status" className="min-h-5 text-label text-muted-foreground" data-testid="api-keys-status">
         {status}
       </p>

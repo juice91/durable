@@ -10,8 +10,8 @@ COPY apps/studio/package.json apps/studio/package.json
 RUN pnpm install --frozen-lockfile --filter @eap/studio...
 
 FROM base AS builder
-# Empty = same-origin: the browser calls /api/v1/... on the origin that served Studio (Cloudflare Tunnel, or the
-# Next.js /api rewrite over the SSH tunnel). Build with a URL only to point Studio at a different API origin.
+# Empty = same-origin: the browser calls /api/v1/... on the origin that served Studio (your ingress or reverse proxy, or
+# the Next.js /api rewrite). Build with a URL only to point Studio at a different API origin.
 ARG NEXT_PUBLIC_EAP_API_URL=
 # Target of the /api/:path* rewrite in next.config.ts (baked at build time).
 ARG EAP_API_INTERNAL_URL=http://api.pydanticos.svc.cluster.local:8000
@@ -21,8 +21,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/studio/node_modules ./apps/studio/node_modules
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/studio ./apps/studio
-# No credential is built in: the public host authenticates with the Cloudflare Access cookie and JWT, the loopback page
-# gets its dev bearer at runtime (EAP_STUDIO_LOOPBACK_DEV_BEARER). CI greps the built bundle for the dev bearer.
+# No credential is built in: on a public host people sign in (docs/iam.md), the loopback page gets its dev bearer at
+# runtime (EAP_STUDIO_LOOPBACK_DEV_BEARER). CI greps the built bundle for the dev bearer.
 RUN pnpm --filter @eap/studio build
 
 FROM node:22-bookworm-slim AS runtime

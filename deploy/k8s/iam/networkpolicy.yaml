@@ -54,7 +54,8 @@ spec:
       ports:
         - {protocol: TCP, port: 5432}
 ---
-# Public sign-in and the later token verification: the Cloudflare Tunnel connector, the API and the worker.
+# Token verification by the API and the worker. Public sign-in goes through your ingress controller, which needs its own
+# rule (docs/expose.md).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -74,11 +75,11 @@ spec:
             matchExpressions:
               - key: app.kubernetes.io/name
                 operator: In
-                values: [cloudflared, api, worker]
+                values: [api, worker]
       ports:
         - {protocol: TCP, port: 8080}
 ---
-# Authorization checks: the API and the worker only (HTTP 8080 and gRPC 8081). Not the tunnel, not Studio.
+# Authorization checks: the API and the worker only (HTTP 8080 and gRPC 8081). Not an ingress, not Studio.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

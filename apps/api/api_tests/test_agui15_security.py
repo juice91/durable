@@ -3,7 +3,7 @@ tests/recovery/test_agui_crash.py).
 
 Real Postgres, a real in-process worker on a private DBOS schema and the real decide path: the
 fixtures of the AGUI.8 acceptance suite (`test_agui8_acceptance`). Each test maps to an item of
-the plan's AGUI.15 list (docs/plans/2026-11-13-milestone-ag-ui.md, "### AGUI.15"):
+the plan's AGUI.15 list (an internal design note, "### AGUI.15"):
 
 - cross-tenant, cross-agent, cross-workflow and key-scope sweeps over EVERY /ag-ui route
   (enumerated from the app, so a new route fails the sweep until it is listed): another tenant's

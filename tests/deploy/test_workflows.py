@@ -29,6 +29,12 @@ PRIVILEGED_WORKFLOWS = {
 # The release family has its own, stricter rules (test_release_workflows_are_least_privilege); the CLA bot rule
 # (no checkout, no run step) does not fit workflows that must run the release scripts.
 RELEASE_WORKFLOWS = ("labeler.yml", "release.yml", "release-tag.yml", "release-public.yml")
+# Operator-only workflows (docs/github-flow.md; excluded from the public export). Each may read exactly the
+# secrets listed and, in the review's case, hold pull-requests: write; every other rule above still applies.
+OPERATOR_SECRETS = {
+    "claude-code-review.yml": {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"},
+    "project-sync.yml": {"PROJECT_TOKEN"},
+}
 CLA_SENTENCE = "I have read the CLA Document and I hereby sign the CLA"
 
 
@@ -112,7 +118,7 @@ def test_self_hosted_workflows_never_run_fork_code():
         if "pull_request" in events:
             # Only CI Heavy, CI and the labeler (when CI_RUNNER is set) run for pull requests, and only for
             # branches of this repository. The labeler runs the base commit's script, not the pull request's.
-            assert name in ("ci-heavy.yml", "ci.yml", "labeler.yml"), name
+            assert name in ("ci-heavy.yml", "ci.yml", "compose.yml", "labeler.yml", *OPERATOR_SECRETS), name
             for job in self_hosted:
                 assert _guarded(job), name
         push = events.get("push")
@@ -134,6 +140,8 @@ def test_deploy_credentials_do_not_come_from_github_secrets():
         text = (WORKFLOW_DIR / name).read_text()
         if name in PRIVILEGED_WORKFLOWS:
             text = text.replace("secrets.GITHUB_TOKEN", "")
+        for secret in OPERATOR_SECRETS.get(name, ()):
+            text = text.replace(f"secrets.{secret}", "")
         assert not re.search(r"\$\{\{\s*secrets\.", text), name
 
 
@@ -149,7 +157,8 @@ def test_no_workflow_lists_issue_comment_or_a_write_permission():
         text = (WORKFLOW_DIR / name).read_text()
         assert "issue_comment" not in text, name
         assert "contents: write" not in text, name
-        assert "pull-requests: write" not in text, name
+        if name != "claude-code-review.yml":  # the review comments on the pull request
+            assert "pull-requests: write" not in text, name
 
 
 def test_privileged_workflows_never_check_out_or_run_pr_code():
@@ -429,3 +438,76 @@ def test_labeler_skips_when_the_base_commit_has_no_labeler_script():
     steps = _load("labeler.yml")["jobs"]["label"]["steps"]
     guard = "hashFiles('scripts/release/labels.py') != ''"
     assert all(step.get("if") == guard for step in steps[1:])
+
+
+# ---- GitHub flow: Claude PR review and Project sync (operator-only; absent from the public tree) -------------------
+
+
+def test_claude_review_comments_only_on_ready_same_repo_pull_requests_and_skips_without_a_credential():
+    if "claude-code-review.yml" not in WORKFLOW_NAMES:
+        return
+    workflow = _load("claude-code-review.yml")
+    assert workflow["on"]["pull_request"]["types"] == ["opened", "synchronize", "ready_for_review"]
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["review"]
+    assert job["runs-on"] == CI_RUNNER_EXPRESSION
+    assert job["timeout-minutes"] == "15"
+    assert _guarded(job) and "!github.event.pull_request.draft" in job["if"]
+    # Least privilege: contents stay read-only (no pushes or commits), one comment scope, the App token exchange.
+    assert job["permissions"] == {"contents": "read", "pull-requests": "write", "id-token": "write"}
+    assert workflow["concurrency"]["cancel-in-progress"] == "true"
+    steps = job["steps"]
+    check = steps[0]
+    assert check["id"] == "auth" and "::notice::" in check["run"]
+    # Everything after the credential check runs only when one exists; the secrets reach it through env, not run text.
+    assert all(step.get("if") == "steps.auth.outputs.present == 'true'" for step in steps[1:])
+    assert not re.search(r"\$\{\{\s*secrets\.", check["run"])
+    assert next(s for s in steps if s.get("uses", "").startswith("actions/checkout"))["with"]["persist-credentials"] == "false"
+    action = next(s for s in steps if s.get("uses", "").startswith("anthropics/claude-code-action@"))
+    args = action["with"]["claude_args"]
+    tools = re.search(r'--allowedTools "([^"]+)"', args).group(1)
+    assert "Edit" not in tools and "Write" not in tools and "Bash(git push" not in tools and "Bash(git commit" not in tools
+    assert {"Read", "Grep", "Glob", "Bash(gh pr diff:*)", "Bash(git diff:*)", "Bash(git log:*)"} <= set(tools.split(","))
+    assert "AGENTS.md" in action["with"]["prompt"]
+    for secret in OPERATOR_SECRETS["claude-code-review.yml"]:
+        assert f"secrets.{secret}" in (WORKFLOW_DIR / "claude-code-review.yml").read_text()
+
+
+def test_project_sync_needs_its_token_and_variable_and_finds_ids_by_name():
+    if "project-sync.yml" not in WORKFLOW_NAMES:
+        return
+    workflow = _load("project-sync.yml")
+    assert workflow["on"]["pull_request"]["types"] == ["opened", "ready_for_review", "converted_to_draft"]
+    assert workflow["permissions"] == {"contents": "read"}
+    job = workflow["jobs"]["sync"]
+    assert job["runs-on"] == CI_RUNNER_EXPRESSION and "timeout-minutes" in job
+    assert _guarded(job)
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert job["env"]["PROJECT_TOKEN"] == "${{ secrets.PROJECT_TOKEN }}"
+    assert job["env"]["PROJECT_NUMBER"] == "${{ vars.PROJECT_NUMBER }}"
+    # No checkout: nothing from the pull request runs next to the project token.
+    assert not any(str(step.get("uses", "")).startswith("actions/checkout") for step in job["steps"])
+    run = job["steps"][0]["run"]
+    assert '[ -z "$PROJECT_TOKEN" ] || [ -z "$PROJECT_NUMBER" ]' in run and "::notice::Project sync skipped" in run
+    assert "In review" in run and "In progress" in run
+    assert 'field(name: \\"Status\\")' in run and "options { id name }" in run  # ids are looked up, not hard-coded
+    assert not re.search(r"PVT[SF]?_|PVTSSF_", run)
+    assert "closingIssuesReferences" in run
+
+
+def test_github_flow_files_are_operator_only_in_the_export():
+    flow = [
+        ".github/workflows/claude-code-review.yml",
+        ".github/workflows/project-sync.yml",
+        ".github/ISSUE_TEMPLATE",
+        ".github/pull_request_template.md",
+        "docs/github-flow.md",
+    ]
+    export = ROOT / "deploy" / "export" / "exclude-paths.txt"
+    if not export.exists():
+        return  # the public tree has no export tooling
+    rules = export.read_text().splitlines()
+    for path in flow:
+        assert path in rules, path
+    agents = (ROOT / "AGENTS.md").read_text()
+    link = "[docs/github-flow.md](docs/github-flow.md)"

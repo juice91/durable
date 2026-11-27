@@ -4,7 +4,7 @@ Revision ID: 0017_api_keys
 Revises: 0016_ag_ui
 Create Date: 2026-11-15 20:00:00
 
-One row per key (D16 of docs/plans/2026-11-13-milestone-ag-ui.md). A key reads
+One row per key (D16 of an internal design note). A key reads
 `pos_<id>_<secret>`; only `secret_hash`, the sha256 hex of `<id>:<secret>`, is stored, so the
 plaintext exists only in the creation response. `id` is globally unique (the key names it before the
 tenant is known); every other read is tenant-scoped.

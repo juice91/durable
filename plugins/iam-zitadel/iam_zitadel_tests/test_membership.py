@@ -152,3 +152,58 @@ def test_an_unconfigured_membership_is_left_out_of_the_capabilities():
     for membership, expected in ((create_membership(PluginContext(env=dict(ENV))), None), (source(seeded()), {"name": "zitadel", "mutable": True})):
         runtime = IamRuntime(settings=settings, providers=(), chain=IdentityChain(()), policy=FakePolicyEngine(), membership=membership)
         assert runtime.describe()["membership"] == expected
+
+
+# ---- F3: on the operator organisation the platform may grant roles but not create users -----------------------------
+
+NO_CREATE = ["org.read", "user.read", "user.grant.read", "user.grant.write"]
+
+
+def test_the_source_says_whether_it_can_create_users_and_asks_once():
+    fake = seeded()
+    s = source(fake)
+    assert run(s.can_create_users(TENANT)) is True
+    fake.permissions[ORG] = NO_CREATE
+    assert run(source(fake).can_create_users(TENANT)) is False
+    asked = len([p for _, p in fake.requests if p.endswith("/permissions/zitadel/me/_search")])
+    assert run(s.can_create_users(TENANT)) is True  # cached
+    assert len([p for _, p in fake.requests if p.endswith("/permissions/zitadel/me/_search")]) == asked
+
+
+def test_inviting_a_new_address_without_the_right_to_create_says_what_to_do_and_writes_nothing():
+    fake = seeded()
+    fake.permissions[ORG] = NO_CREATE
+    with pytest.raises(MembershipError) as err:
+        run(source(fake).invite(TENANT, "new@example.test", "viewer"))
+    assert err.value.code == "no_user_creation"
+    assert "ZITADEL console" in err.value.detail and "add" in err.value.detail
+    assert not [p for _, p in fake.mutations() if "permissions" not in p]
+
+
+def test_a_user_created_in_the_console_can_still_be_added():
+    fake = seeded()
+    fake.permissions[ORG] = NO_CREATE
+    fake.users["u-9"] = {"id": "u-9", "userName": "nia", "human": {"email": {"email": "nia@example.test"}}}
+    member = run(source(fake).invite(TENANT, "nia@example.test", "editor"))
+    assert (member.id, member.roles, member.status) == ("u-9", ("editor",), "active")
+
+
+def test_a_refused_creation_is_the_same_clear_answer_even_when_the_permissions_cannot_be_read():
+    fake = seeded()
+    original = fake.route
+
+    def route(method, path, body, org):
+        import httpx2
+
+        if path.endswith("/permissions/zitadel/me/_search"):
+            return httpx2.Response(500, json={"message": "down"})
+        if path == "/v2/users/human":
+            return httpx2.Response(403, json={"message": "No matching permissions found"})
+        return original(method, path, body, org)
+
+    fake.route = route
+    s = source(fake)
+    assert run(s.can_create_users(TENANT)) is True  # unknown: the invite itself will say
+    with pytest.raises(MembershipError) as err:
+        run(s.invite(TENANT, "new@example.test", "viewer"))
+    assert err.value.code == "no_user_creation"

@@ -3,6 +3,7 @@
 // forget a resource (one agent or every agent), and what a turn's events say about memory (recall
 // hits, post-turn updates). Routes: apps/api/src/eap_api/routes/memory.py; deleting a conversation is
 // in lib/conversations.ts.
+import { refusedMessage } from "./access";
 import { BASE_URL, apiHeaders } from "./api";
 import { resetWorkingMemoryCache } from "./workingMemoryCache";
 
@@ -116,6 +117,7 @@ async function failure(response: Response): Promise<MemoryApiError> {
     if (typeof data?.detail === "string") message = data.detail;
     else if (Array.isArray(data?.detail)) message = data.detail.map((item: { msg?: unknown }) => String(item?.msg ?? "")).join(", ");
     if (Array.isArray(data?.busy_conversations)) busy = data.busy_conversations.map(String);
+    message = (await refusedMessage(response.status, data)) ?? message;
   } catch {
     // Not JSON: the status is all there is.
   }

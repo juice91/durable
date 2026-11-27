@@ -116,10 +116,10 @@ async def ingest_traces(
     except OtlpDecodeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
     prepared = prepare_spans(raw, time.time_ns())
-    if prepared.spans:
-        from starlette.concurrency import run_in_threadpool
+    from starlette.concurrency import run_in_threadpool
 
-        await run_in_threadpool(service.store_spans, principal.tenant_id, principal.key_id, prepared.spans)
+    # Always through the service (it stores nothing for an empty export): the policy check is made for every request.
+    await run_in_threadpool(service.store_spans, principal.tenant_id, principal.key_id, prepared.spans)
     endpoint = os.environ.get("EAP_OTLP_FORWARD_ENDPOINT", "").strip()
     if endpoint:
         background.add_task(_forward, endpoint, content_type or JSON, body)

@@ -76,7 +76,7 @@ class ApiKeyIdentityProvider:
         try:
             roles = frozenset(await self._membership.roles_of(tenant_id, subject))
         except Exception as exc:  # noqa: BLE001 - any failure of the source is "cannot tell"
-            log.warning("membership lookup for a personal API key failed: %s", type(exc).__name__)
+            log.warning("membership lookup for a personal API key or an Architect run failed: %s", type(exc).__name__)
             raise AuthError(MEMBERSHIP_UNAVAILABLE_DETAIL, 503, www_authenticate=False) from None
         if len(self._owner_roles) >= OWNER_ROLES_CACHE_MAX:
             self._owner_roles = {k: v for k, v in self._owner_roles.items() if v[0] > now}
@@ -150,16 +150,33 @@ class ApiKeyIdentityProvider:
         run = await asyncio.to_thread(self._architect_run, credential)
         if run is None:
             raise AuthError(INVALID_API_KEY_DETAIL)
-        tenant_id, run_id = run
+        tenant_id, run_id, requested_by = run
+        roles = await self._roles_of_person(tenant_id, requested_by)
         return Principal(
             tenant_id=tenant_id,
             kind="run",
             subject=f"{ARCHITECT_RUN_PREFIX}{run_id}",
             provider=PROVIDER_RUN_TOKEN,
+            # The person who started the Architect's turn (design 8): the run records its actor when the turn starts, so
+            # the token needs no claim for it and cannot be made to name someone else. The policy engine decides for this
+            # person; the Architect never has more rights than they do.
+            on_behalf_of=requested_by,
+            roles=roles,
             scopes=frozenset({"mcp", "manage"}),
         )
 
-    def _architect_run(self, credential: str) -> tuple[str, str] | None:
+    async def _roles_of_person(self, tenant_id: str, subject: str | None) -> frozenset[str]:
+        """The CURRENT roles of the person a run acts for, for a policy engine that takes roles from the principal
+        (cached like a key owner's). No person, no membership source or a source that fails: no roles, so such an
+        engine grants nothing by role (fail closed); the transitional engine reads none and is unaffected."""
+        if subject is None or self._membership is None:
+            return frozenset()
+        try:
+            return await self._roles_of_owner(tenant_id, subject)
+        except AuthError:  # already logged
+            return frozenset()
+
+    def _architect_run(self, credential: str) -> tuple[str, str, str | None] | None:
         secret = os.environ.get("EAP_SECRETS_KEY")  # read per call, as the lookup always did
         token = verify_run_token(signing_key(secret), credential) if secret else None
         if token is None:
@@ -171,11 +188,22 @@ class ApiKeyIdentityProvider:
         with self._engine.connect() as conn:
             row = conn.execute(
                 text(
-                    "SELECT r.status, a.slug, a.builtin FROM runs r JOIN agents a ON a.id = r.agent_id "
+                    "SELECT r.status, a.slug, a.builtin, r.started_by_kind, r.principal, r.on_behalf_of "
+                    "FROM runs r JOIN agents a ON a.id = r.agent_id "
                     "WHERE r.id = :r AND r.tenant_id = :t"
                 ),
                 {"r": token.run_id, "t": token.tenant_id},
             ).first()
         if row is None or row[0] in TERMINAL_RUN_STATUSES or not row[2] or row[1] != ARCHITECT_SLUG:
             return None
-        return token.tenant_id, token.run_id
+        return token.tenant_id, token.run_id, _requested_by(row[3], row[4], row[5])
+
+
+def _requested_by(kind: str | None, principal: str | None, on_behalf_of: str | None) -> str | None:
+    """The person an Architect run acts for, from the actor the run recorded: a run started by a user names that user
+    (`user:<subject>`); one started by a key or a schedule names whoever that acted for (`on_behalf_of`). None: unknown
+    (a legacy run), which the policy engine treats as nobody."""
+    if kind == "user" and principal and principal.startswith("user:"):
+        return principal[len("user:"):]
+    return on_behalf_of or None
+

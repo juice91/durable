@@ -13,6 +13,11 @@ type tenant
     define editor: [user, group#member] or admin
     define viewer: [user, group#member] or editor
     define can_read: viewer
+    define can_write: editor
+    define can_run: editor
+    define can_manage_connections: admin
+    define can_read_telemetry: admin
+    define can_otlp: admin
     define can_create_agent: editor
     define can_create_workflow: editor
     define can_create_knowledge_base: editor
@@ -23,15 +28,18 @@ type tenant
     define can_manage_members: admin
     define can_read_audit: admin
     define can_manage_settings: admin
+    # External agents (docs/external-access.md): exports, external clients and enabling. Editors read.
+    define can_manage_external_access: admin
+    define can_read_external_access: editor
 
 type agent
   relations
     define tenant: [tenant]
     define owner: [user, group#member]
-    define editor: [user, group#member] or owner or editor from tenant
-    define runner: [user, group#member] or editor
-    define approver: [user, group#member] or admin from tenant
-    define viewer: [user, group#member] or runner or approver or viewer from tenant
+    define editor: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or owner or editor from tenant
+    define runner: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or editor
+    define approver: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or admin from tenant
+    define viewer: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or runner or approver or viewer from tenant
     define can_read: viewer
     define can_run: runner
     define can_edit: editor
@@ -45,10 +53,10 @@ type workflow
   relations
     define tenant: [tenant]
     define owner: [user, group#member]
-    define editor: [user, group#member] or owner or editor from tenant
-    define runner: [user, group#member] or editor
-    define approver: [user, group#member] or admin from tenant
-    define viewer: [user, group#member] or runner or approver or viewer from tenant
+    define editor: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or owner or editor from tenant
+    define runner: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or editor
+    define approver: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or admin from tenant
+    define viewer: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or runner or approver or viewer from tenant
     define can_read: viewer
     define can_run: runner
     define can_edit: editor
@@ -62,9 +70,9 @@ type knowledge_base
   relations
     define tenant: [tenant]
     define owner: [user, group#member]
-    define editor: [user, group#member] or owner or editor from tenant
-    define runner: [user, group#member] or editor
-    define viewer: [user, group#member] or runner or viewer from tenant
+    define editor: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or owner or editor from tenant
+    define runner: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or editor
+    define viewer: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or runner or viewer from tenant
     define can_read: viewer
     define can_run: runner
     define can_edit: editor
@@ -76,19 +84,22 @@ type secret
   relations
     define tenant: [tenant]
     define owner: [user, group#member]
-    define usable_by: [user, group#member, tenant#editor]
+    define granted_to: [agent, workflow]
+    # Retired by the agent-grants migration (docs/iam.md, "Agent and workflow grants"); no relation reads it any more.
+    define legacy_usable_by: [user, group#member, tenant#editor]
     define can_read: owner or viewer from tenant
     define can_edit: owner or admin from tenant
     define can_archive: owner or admin from tenant
     define can_manage_access: owner or admin from tenant
-    define can_grant_use: usable_by or owner or admin from tenant
+    define can_grant_use: admin from tenant
+    define can_use_as_agent: granted_to
 
 type schedule
   relations
     define tenant: [tenant]
     define owner: [user, group#member]
-    define editor: [user, group#member] or owner or editor from tenant
-    define viewer: [user, group#member] or editor or viewer from tenant
+    define editor: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or owner or editor from tenant
+    define viewer: [user, group#member, tenant#admin, tenant#editor, tenant#viewer] or editor or viewer from tenant
     define can_read: viewer
     define can_run: editor
     define can_edit: editor
@@ -99,11 +110,14 @@ type mcp_server
   relations
     define tenant: [tenant]
     define owner: [user, group#member]
+    define granted_to: [agent, workflow]
     define can_read: owner or viewer from tenant
+    define can_run: owner or editor from tenant
     define can_edit: owner or admin from tenant
     define can_archive: owner or admin from tenant
     define can_manage_access: owner or admin from tenant
-    define can_grant_use: owner or editor from tenant
+    define can_grant_use: admin from tenant
+    define can_use_as_agent: granted_to
 
 type api_key
   relations

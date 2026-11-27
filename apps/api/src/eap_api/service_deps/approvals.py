@@ -6,13 +6,16 @@ from typing import Annotated
 
 from fastapi import Depends
 
-from eap_api.deps import ApprovalStoreDep, RunLauncherDep, StoresDep
+from eap_api.deps import ApprovalStoreDep, RunLauncherDep, SessionDep, StoresDep
+from eap_api.service_deps.iam import AccessDep
 from eap_api.services.approvals import ApprovalService
 
 
-def get_approval_service(store: ApprovalStoreDep, stores: StoresDep, launcher: RunLauncherDep) -> ApprovalService:
+def get_approval_service(
+    store: ApprovalStoreDep, stores: StoresDep, launcher: RunLauncherDep, access: AccessDep, db: SessionDep
+) -> ApprovalService:
     _, event_log = stores
-    return ApprovalService(store, event_log, launcher)
+    return ApprovalService(store, event_log, launcher, access, db)
 
 
 ApprovalServiceDep = Annotated[ApprovalService, Depends(get_approval_service)]

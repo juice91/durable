@@ -58,10 +58,26 @@ class InvalidInput(ServiceError):
     code = "invalid_input"
 
 
+class Unauthorized(ServiceError):
+    """The credential the operation itself takes (a password, a refresh token) was refused."""
+
+    code = "unauthorized"
+
+
 class Forbidden(ServiceError):
-    """The caller is authenticated but may not do this."""
+    """The caller is authenticated but may not do this.
+
+    `refused` names what the policy engine refused (`{action, kind, id}`), the caller's own request, so a client can
+    ask why (`GET /iam/explain`)."""
 
     code = "forbidden"
+
+    def __init__(
+        self, message: str, *, code: str | None = None, details: list[Any] | None = None, detail_object: Any = None,
+        refused: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, code=code, details=details, detail_object=detail_object)
+        self.refused = refused
 
 
 class Unavailable(ServiceError):
@@ -74,3 +90,13 @@ class PayloadTooLarge(ServiceError):
     """The input exceeds a size limit the platform enforces (413)."""
 
     code = "payload_too_large"
+
+
+class TooManyRequests(ServiceError):
+    """A rate or concurrency limit refused the request; `retry_after` is the seconds a caller should wait."""
+
+    code = "too_many_requests"
+
+    def __init__(self, message: str, *, retry_after: int = 30, code: str | None = None) -> None:
+        super().__init__(message, code=code)
+        self.retry_after = retry_after

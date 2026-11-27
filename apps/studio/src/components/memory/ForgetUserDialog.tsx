@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useId, useState } from "react";
 import { forgetResource, type ForgetResult } from "@/lib/memory";
 import { Button } from "@/components/ui/Button";
@@ -34,6 +35,8 @@ export function forgetSummary(result: ForgetResult): string {
  */
 export function ForgetUserDialog({ agentId, agentName, resourceId, onDone, onCancel }: ForgetUserDialogProps) {
   const [scope, setScope] = useState<ForgetScope>("agent");
+  // Forgetting across every agent is a tenant-wide change.
+  const mayForgetEverywhere = useCan("tenant", null, "manage_settings");
   const [keepConversations, setKeepConversations] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,10 +82,12 @@ export function ForgetUserDialog({ agentId, agentName, resourceId, onDone, onCan
             <input type="radio" name={name} value="agent" checked={scope === "agent"} onChange={() => setScope("agent")} disabled={busy} data-testid="memory-forget-scope-agent" />
             This agent ({agentName})
           </label>
-          <label className="flex items-center gap-2 text-label text-foreground">
-            <input type="radio" name={name} value="all" checked={scope === "all"} onChange={() => setScope("all")} disabled={busy} data-testid="memory-forget-scope-all" />
-            All agents
-          </label>
+          {mayForgetEverywhere ? (
+            <label className="flex items-center gap-2 text-label text-foreground">
+              <input type="radio" name={name} value="all" checked={scope === "all"} onChange={() => setScope("all")} disabled={busy} data-testid="memory-forget-scope-all" />
+              All agents
+            </label>
+          ) : null}
         </fieldset>
         <div className="flex items-start gap-2">
           <input

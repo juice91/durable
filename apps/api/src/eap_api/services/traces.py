@@ -8,6 +8,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentVersionModel
+from eap_api.services.access import Access, AccessBound
+from eap_api.services.run_access import authorize_run
 from eap_api.services.run_filters import plain_refusals
 from eap_api.services.errors import InvalidInput, NotFound, Unavailable
 from eap_api.services.runs import run_json
@@ -26,14 +28,22 @@ TRACE_NOT_FOUND = "Trace not found"
 
 
 @plain_refusals
-class TraceService:
-    def __init__(self, db: Session, run_store: RunStore, feedback: TraceFeedbackStore) -> None:
+class TraceService(AccessBound):
+    """A trace is a run: it is as readable as the agent or workflow it belongs to (IAM P2b; `read`), and so is its feedback."""
+
+    def __init__(
+        self, db: Session, run_store: RunStore, feedback: TraceFeedbackStore, access: Access | None = None
+    ) -> None:
         self.db = db
         self.run_store = run_store
         self.feedback = feedback
+        self._access = access  # None: no caller to check
 
     def read_trace(self, tenant_id: str, run_id: uuid.UUID) -> dict[str, Any]:
         """The run's span tree with tokens and cost; NotFound for an unknown run or another tenant's."""
+        run = self.run_store.get_run(tenant_id, run_id)
+        if run is not None:  # an unknown run is the trace read's own 404 (or its timeout)
+            authorize_run(self._access, self.run_store, run)
         db = self.db
 
         def workflow_spec(workflow_id: str, version: int) -> dict[str, Any] | None:
@@ -103,5 +113,7 @@ class TraceService:
         return {"items": [r.as_json() for r in items]}
 
     def _require_trace(self, tenant_id: str, trace_id: uuid.UUID) -> None:
-        if self.run_store.get_run(tenant_id, trace_id) is None:
+        run = self.run_store.get_run(tenant_id, trace_id)
+        if run is None:
             raise NotFound(TRACE_NOT_FOUND)
+        authorize_run(self._access, self.run_store, run)

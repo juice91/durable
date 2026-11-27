@@ -312,6 +312,8 @@ describe("create mode", () => {
     // Name is empty: nothing is sent.
     expect(api.agents.create).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "N" } });
+    // Until the model list arrives the picker is two free-text inputs.
+    await waitFor(() => expect(screen.getByLabelText("Model provider")).toHaveAttribute("data-select-trigger"));
     fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "test" } });
     await waitFor(() => expect(screen.getByLabelText("Model name")).toBeEnabled());
     fireEvent.click(screen.getByLabelText("Model name"));

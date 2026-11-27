@@ -5,6 +5,7 @@ The fake implements just the Management and v2 calls the plug-in makes, with ZIT
 
 from __future__ import annotations
 
+import base64
 import itertools
 import json
 import time
@@ -73,7 +74,11 @@ def machine_key_json() -> str:
 
 
 class FakeZitadel:
-    """A stateful fake of the Management API, enough for the membership source and the bootstrap CLI."""
+    """A stateful fake of the Management, Admin, auth and v2 APIs, enough for the membership source and the bootstrap CLI.
+
+    Shapes follow ZITADEL v4.20.5 as observed on a real container (test_contract.py runs the same operations on both):
+    enum and boolean fields holding the zero value are left out of answers, a policy write that changes nothing is HTTP
+    400 `...NotChanged`, and `role_claim` builds the project-roles claim `{role: {granting org id: primary domain}}`."""
 
     def __init__(self) -> None:
         self.ids = itertools.count(1)
@@ -86,6 +91,22 @@ class FakeZitadel:
                         "human": {"email": {"email": "admin@example.test"}, "profile": {"displayName": "Admin"}}},
         }
         self.grants: list[dict[str, Any]] = []
+        self.orgs: dict[str, dict[str, str]] = {ORG: {"name": "Durable", "primaryDomain": "durable.auth.example.test"}}
+        self.org_members: dict[str, dict[str, list[str]]] = {}  # org id -> user id -> manager roles
+        self.iam_members: dict[str, list[str]] = {"machine-1": ["IAM_OWNER"]}
+        self.keys: dict[str, list[dict[str, Any]]] = {}  # user id -> keys
+        self.permissions: dict[str, list[str]] = {}  # org id -> the caller's permissions (default: may create users)
+        # The instance's defaults of ZITADEL's cmd/defaults.yaml: self-registration and external sign-up are on.
+        self.default_policy: dict[str, Any] = {
+            "allowUsernamePassword": True, "allowRegister": True, "allowExternalIdp": True, "allowDomainDiscovery": True,
+            "forceMfa": False, "passwordlessType": "PASSWORDLESS_TYPE_ALLOWED", "passwordCheckLifetime": "864000s",
+            "externalLoginCheckLifetime": "864000s", "mfaInitSkipLifetime": "2592000s",
+            "secondFactorCheckLifetime": "64800s", "multiFactorCheckLifetime": "43200s",
+        }
+        self.default_factors: list[str] = ["SECOND_FACTOR_TYPE_OTP", "SECOND_FACTOR_TYPE_U2F"]
+        self.org_policies: dict[str, dict[str, Any]] = {}  # custom login policies
+        self.org_factors: dict[str, list[str]] = {}
+        self.restrictions: dict[str, Any] = {}
         self.invited: list[dict[str, Any]] = []
         self.down = False
         self.refuse_token = False
@@ -100,11 +121,26 @@ class FakeZitadel:
         self.users[user_id] = {"id": user_id, "userName": email, "human": {"email": {"email": email}}}
         self.grants.append(self._grant(user_id, list(roles), name or email))
 
-    def _grant(self, user_id: str, roles: list[str], name: str) -> dict[str, Any]:
+    def _grant(self, user_id: str, roles: list[str], name: str, org: str = ORG) -> dict[str, Any]:
         user = self.users[user_id]
         email = user["human"]["email"]["email"]
         return {"id": f"g{next(self.ids)}", "userId": user_id, "projectId": PROJECT, "roleKeys": roles,
-                "state": "USER_GRANT_STATE_ACTIVE", "email": email, "displayName": name, "orgId": ORG}
+                "state": "USER_GRANT_STATE_ACTIVE", "email": email, "displayName": name, "orgId": org}
+
+    def add_org(self, org_id: str, name: str) -> None:
+        self.orgs[org_id] = {"name": name, "primaryDomain": f"{name.lower()}.auth.example.test"}
+
+    def grant_in(self, org_id: str, user_id: str, *roles: str) -> None:
+        """A grant made in `org_id`'s context, whatever organisation the user belongs to (ZITADEL allows that)."""
+        self.grants.append(self._grant(user_id, list(roles), user_id, org=org_id))
+
+    def role_claim(self, user_id: str) -> dict[str, dict[str, str]]:
+        claim: dict[str, dict[str, str]] = {}
+        for grant in self.grants:
+            if grant["userId"] == user_id:
+                for role in grant["roleKeys"]:
+                    claim.setdefault(role, {})[grant["orgId"]] = self.orgs[grant["orgId"]]["primaryDomain"]
+        return claim
 
     def handle(self, request: httpx2.Request) -> httpx2.Response:
         method, path = request.method, request.url.path
@@ -127,10 +163,90 @@ class FakeZitadel:
 
     def route(self, method: str, path: str, body: dict[str, Any], org: str | None) -> httpx2.Response:
         ok = lambda data=None: httpx2.Response(200, json=data or {})  # noqa: E731
+        here = org or ORG
+        zero = lambda data: {k: v for k, v in data.items() if v not in (False, "", [], None)}  # noqa: E731
         if path == "/management/v1/orgs/me":
-            return ok({"org": {"id": ORG, "name": "Durable"}})
+            return ok({"org": {"id": here, **self.orgs[here]}})
+        if path == "/auth/v1/permissions/zitadel/me/_search":
+            return ok({"result": self.permissions.get(here, ["org.read", "user.read", "user.write", "user.grant.write"])})
+        if path == "/admin/v1/policies/login":
+            current = {**self.default_policy, "isDefault": True, "secondFactors": self.default_factors}
+            if method == "GET":
+                return ok({"policy": zero(current)})
+            wanted = {k: body.get(k, "" if isinstance(v, str) else False) for k, v in self.default_policy.items()}
+            if wanted == self.default_policy:
+                return httpx2.Response(400, json={"message": "Default Login Policy has not been changed (INSTANCE-5M9vdd)"})
+            if wanted["forceMfa"] and not self.default_factors:
+                raise AssertionError("a second factor must exist before one is forced")
+            self.default_policy = wanted
+            return ok()
+        if path == "/admin/v1/policies/login/second_factors" and method == "POST":
+            self.default_factors.append(body["type"])
+            return ok()
+        if path == "/admin/v1/restrictions":
+            if method == "GET":
+                return ok(zero({"details": {"sequence": "1"}, **self.restrictions}))
+            self.restrictions.update(body)
+            return ok()
+        if path == "/management/v1/policies/login":
+            if method == "GET":
+                custom = self.org_policies.get(here)
+                if custom is None:
+                    return ok({"policy": zero({**self.default_policy, "isDefault": True, "secondFactors": self.default_factors}), "isDefault": True})
+                return ok({"policy": zero({**custom, "secondFactors": self.org_factors.get(here, [])})})
+            if method == "PUT":
+                custom = self.org_policies[here]
+                wanted = {k: body.get(k, "" if isinstance(v, str) else False) for k, v in custom.items()}
+                if wanted == custom:
+                    return httpx2.Response(400, json={"message": "Errors.Org.LoginPolicy.NotChanged (Org-5M9vdd)"})
+                if wanted["forceMfa"] and not self.org_factors.get(here):
+                    raise AssertionError("a second factor must exist before one is forced")
+                self.org_policies[here] = wanted
+                return ok()
+        if path == "/management/v1/policies/login/second_factors" and method == "POST":
+            self.org_factors.setdefault(here, []).append(body["type"])
+            return ok()
+        if path == "/admin/v1/members/_search":
+            wanted_ids = [q["userIdQuery"]["userId"] for q in body.get("queries", []) if "userIdQuery" in q]
+            return ok(zero({"result": [{"userId": u, "roles": r} for u, r in self.iam_members.items() if not wanted_ids or u in wanted_ids]}))
+        if path == "/admin/v1/members" and method == "POST":
+            if body["userId"] in self.iam_members:
+                return httpx2.Response(409, json={"message": "Errors.Instance.Member.AlreadyExists"})
+            self.iam_members[body["userId"]] = body["roles"]
+            return ok()
+        if path.startswith("/admin/v1/members/"):
+            uid = path.rsplit("/", 1)[1]
+            if method == "DELETE":
+                self.iam_members.pop(uid, None)
+            else:
+                self.iam_members[uid] = body["roles"]
+            return ok()
+        if path.startswith("/management/v1/orgs/me/members"):
+            members = self.org_members.setdefault(here, {})
+            if path.endswith("/_search"):
+                wanted_ids = [q["userIdQuery"]["userId"] for q in body.get("queries", []) if "userIdQuery" in q]
+                return ok(zero({"result": [{"userId": u, "roles": r} for u, r in members.items() if not wanted_ids or u in wanted_ids]}))
+            if method == "POST":
+                if body["userId"] in members:
+                    return httpx2.Response(409, json={"message": "Errors.Org.Member.AlreadyExists"})
+                members[body["userId"]] = body["roles"]
+                return ok()
+            members[path.rsplit("/", 1)[1]] = body["roles"]
+            return ok()
+        if path == "/management/v1/users/machine" and method == "POST":
+            uid = f"u-machine{next(self.ids)}"
+            self.users[uid] = {"id": uid, "userName": body["userName"], "machine": {"name": body["name"]}, "org": here}
+            return ok({"userId": uid})
+        if path.startswith("/management/v1/users/") and path.endswith("/keys/_search"):
+            return ok(zero({"result": self.keys.get(path.split("/")[4], [])}))
+        if path.startswith("/management/v1/users/") and path.endswith("/keys") and method == "POST":
+            uid = path.split("/")[4]
+            kid = f"key-{next(self.ids)}"
+            self.keys.setdefault(uid, []).append({"id": kid, "type": body["type"], "expirationDate": body.get("expirationDate")})
+            details = json.dumps({"type": "serviceaccount", "keyId": kid, "key": f"FAKE-PRIVATE-{kid}", "userId": uid})
+            return ok({"keyId": kid, "keyDetails": base64.b64encode(details.encode()).decode()})
         if path == "/management/v1/projects/_search":
-            return ok({"result": list(self.projects.values())})
+            return ok({"result": list(self.projects.values()) if here == ORG else []})
         if path == "/management/v1/projects" and method == "POST":
             pid = PROJECT if not self.projects else f"proj-{next(self.ids)}"
             self.projects[pid] = {"id": pid, **body}
@@ -174,10 +290,11 @@ class FakeZitadel:
             for q in queries:
                 if "emailQuery" in q:
                     want = q["emailQuery"]["emailAddress"].lower()
-                    users = [u for u in users if u["human"]["email"]["email"].lower() == want]
+                    users = [u for u in users if "human" in u and u["human"]["email"]["email"].lower() == want]
                 if "userNameQuery" in q:
                     want = q["userNameQuery"]["userName"].lower()
-                    users = [u for u in users if u["userName"].lower().startswith(want)]
+                    exact = q["userNameQuery"].get("method") == "TEXT_QUERY_METHOD_EQUALS"
+                    users = [u for u in users if (u["userName"].lower() == want if exact else u["userName"].lower().startswith(want))]
             return ok({"result": users})
         if path == "/management/v1/users/grants/_search":
             grants = self.grants
@@ -188,6 +305,8 @@ class FakeZitadel:
                     grants = [g for g in grants if g["projectId"] == q["projectIdQuery"]["projectId"]]
             return ok({"result": grants})
         if path == "/v2/users/human" and method == "POST":
+            if "user.write" not in self.permissions.get(body["organization"]["orgId"], ["user.write"]):
+                return httpx2.Response(403, json={"message": "No matching permissions found (AUTH-5mWD2)"})
             uid = f"u-new{next(self.ids)}"
             self.users[uid] = {"id": uid, "userName": body["username"], "human": {"email": {"email": body["email"]["email"]}}}
             self.invited.append(body)
@@ -196,7 +315,7 @@ class FakeZitadel:
             parts = path.split("/")
             uid, tail = parts[4], parts[5:]
             if tail == ["grants"] and method == "POST":
-                self.grants.append(self._grant(uid, body["roleKeys"], self.users[uid]["human"]["email"]["email"]))
+                self.grants.append(self._grant(uid, body["roleKeys"], self.users[uid]["human"]["email"]["email"], org=here))
                 return ok()
             if len(tail) == 2 and tail[0] == "grants":
                 grant = next((g for g in self.grants if g["id"] == tail[1] and g["userId"] == uid), None)

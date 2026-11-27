@@ -50,10 +50,12 @@ interface RuntimePanelProps {
   enabled: boolean;
   /** Called after a start, stop or restart so the page can reload the server row. */
   onChanged: () => void;
+  /** The caller may start, stop, restart and reconfigure the server, and read its logs. */
+  mayEdit?: boolean;
 }
 
 /** Env variable names of a managed server; a ref-valued one shows `secret:<name>` and can be pointed at another stored secret. */
-function EnvList({ serverId, env, onChanged }: { serverId: string; env: { name: string; ref: string | null }[]; onChanged: () => void }) {
+function EnvList({ serverId, env, onChanged, mayEdit }: { serverId: string; env: { name: string; ref: string | null }[]; onChanged: () => void; mayEdit: boolean }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [names, setNames] = useState<string[]>([]);
   const [choice, setChoice] = useState("");
@@ -94,7 +96,7 @@ function EnvList({ serverId, env, onChanged }: { serverId: string; env: { name: 
             <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <span className="min-w-0 break-all font-mono text-label text-foreground">{variable.name}</span>
               <span className="min-w-0 break-all font-mono text-caption text-muted-foreground">{variable.ref ?? "Stored with the server"}</span>
-              {editing === variable.name ? null : (
+              {editing === variable.name || !mayEdit ? null : (
                 <Button size="sm" aria-label={`Change ${variable.name}`} onClick={() => open(variable.name)}>Change</Button>
               )}
             </div>
@@ -122,7 +124,7 @@ function EnvList({ serverId, env, onChanged }: { serverId: string; env: { name: 
   );
 }
 
-export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps) {
+export function RuntimePanel({ serverId, enabled, onChanged, mayEdit = true }: RuntimePanelProps) {
   const [runtime, setRuntime] = useState<McpRuntime | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [acting, setActing] = useState<McpRuntimeAction | null>(null);
@@ -168,8 +170,8 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
     void loadRuntime();
   }, [loadRuntime]);
   useEffect(() => {
-    void loadLogs();
-  }, [loadLogs]);
+    if (mayEdit) void loadLogs();
+  }, [loadLogs, mayEdit]);
 
   const transitional = runtime?.state === "pending" || runtime?.state === "starting" || runtime?.state === "stopping";
   useEffect(() => {
@@ -187,7 +189,7 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
     try {
       setRuntime(await mcpServers.runtimeAction(serverId, action));
       onChanged();
-      void loadLogs();
+      if (mayEdit) void loadLogs();
     } catch (reason: unknown) {
       const unreachable = !(reason instanceof ApiError) || reason.status === 502;
       setActionError(unreachable ? CLUSTER_UNREACHABLE : message(reason, "The action failed"));
@@ -208,11 +210,13 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
       <section aria-labelledby="runtime-title" className="flex min-w-0 flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="runtime-title" className="text-title font-semibold text-foreground">Runtime</h2>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" disabled={!idle || !runtime || !allowed.start || !enabled} onClick={() => void act("start")}>Start</Button>
-            <Button size="sm" disabled={!idle || !runtime || !allowed.stop} onClick={() => void act("stop")}>Stop</Button>
-            <Button size="sm" disabled={!idle || !runtime || !allowed.restart || !enabled} onClick={() => void act("restart")}>Restart</Button>
-          </div>
+          {mayEdit ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" disabled={!idle || !runtime || !allowed.start || !enabled} onClick={() => void act("start")}>Start</Button>
+              <Button size="sm" disabled={!idle || !runtime || !allowed.stop} onClick={() => void act("stop")}>Stop</Button>
+              <Button size="sm" disabled={!idle || !runtime || !allowed.restart || !enabled} onClick={() => void act("restart")}>Restart</Button>
+            </div>
+          ) : null}
         </div>
         <div className={card}>
           <div className="mb-3 flex justify-end">
@@ -246,6 +250,7 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
 
       {runtime?.env && runtime.env.length > 0 ? (
         <EnvList
+          mayEdit={mayEdit}
           serverId={serverId}
           env={runtime.env}
           onChanged={() => {
@@ -256,32 +261,34 @@ export function RuntimePanel({ serverId, enabled, onChanged }: RuntimePanelProps
         />
       ) : null}
 
-      <section aria-labelledby="runtime-logs-title" className="flex min-w-0 flex-col gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="runtime-logs-title" className="text-title font-semibold text-foreground">Logs</h2>
-          <div className="flex flex-wrap items-center gap-2">
-            <label htmlFor="runtime-log-tail" className="text-label text-muted-foreground">Lines</label>
-            <Select
-              id="runtime-log-tail"
-              value={String(tail)}
-              onValueChange={(v) => setTail(Number(v))}
-              className="rounded-md border border-input bg-background px-2 py-1 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {TAILS.map((value) => <option key={value} value={value}>{value}</option>)}
-            </Select>
-            <Button size="sm" disabled={logsLoading} onClick={() => void loadLogs()}>Refresh</Button>
+      {mayEdit ? (
+        <section aria-labelledby="runtime-logs-title" className="flex min-w-0 flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 id="runtime-logs-title" className="text-title font-semibold text-foreground">Logs</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <label htmlFor="runtime-log-tail" className="text-label text-muted-foreground">Lines</label>
+              <Select
+                id="runtime-log-tail"
+                value={String(tail)}
+                onValueChange={(v) => setTail(Number(v))}
+                className="rounded-md border border-input bg-background px-2 py-1 text-body text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {TAILS.map((value) => <option key={value} value={value}>{value}</option>)}
+              </Select>
+              <Button size="sm" disabled={logsLoading} onClick={() => void loadLogs()}>Refresh</Button>
+            </div>
           </div>
-        </div>
-        {logsError ? (
-          <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{logsError}</p>
-        ) : lines === null ? (
-          <p role="status" className="text-body text-muted-foreground">Loading logs…</p>
-        ) : lines.length === 0 ? (
-          <p className="text-body text-muted-foreground">No log lines yet.</p>
-        ) : (
-          <pre tabIndex={0} aria-label="Runtime logs" data-testid="runtime-logs" className="max-h-96 min-w-0 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/40 p-3 font-mono text-caption text-foreground">{lines.join("\n")}</pre>
-        )}
-      </section>
+          {logsError ? (
+            <p role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-body text-destructive-text">{logsError}</p>
+          ) : lines === null ? (
+            <p role="status" className="text-body text-muted-foreground">Loading logs…</p>
+          ) : lines.length === 0 ? (
+            <p className="text-body text-muted-foreground">No log lines yet.</p>
+          ) : (
+            <pre tabIndex={0} aria-label="Runtime logs" data-testid="runtime-logs" className="max-h-96 min-w-0 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted/40 p-3 font-mono text-caption text-foreground">{lines.join("\n")}</pre>
+          )}
+        </section>
+      ) : null}
     </div>
   );
 }

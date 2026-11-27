@@ -65,7 +65,7 @@ def test_capabilities_list_the_active_plugins_and_the_caller(client, tenant):
     assert r.status_code == 200
     body = r.json()
     names = [p["name"] for p in body["identity"]]
-    assert body["mode"] == "dev" and names == ["apikey", "devloopback"] or names == ["fake"]
+    assert body["mode"] == "dev" and names == ["apikey", "devloopback", "webhook"] or names == ["fake"]
     assert body["policy"]["name"] in ("openaccess", "fake")
     assert body["membership"] is None
     assert body["me"]["subject"] == "alice" and body["me"]["tenant_id"] == tenant and body["me"]["kind"] == "user"

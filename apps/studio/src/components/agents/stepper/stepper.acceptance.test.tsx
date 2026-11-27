@@ -211,6 +211,8 @@ describe("step navigation", () => {
     // The picker clears the model when the provider changes; a wildcard provider takes a typed name.
     // (The "Select a provider…" placeholder is disabled in the themed Select, so the provider is
     // changed to another one, which clears the model, rather than to the empty value.)
+    // Until the model list arrives the picker is two free-text inputs, which keep the model name.
+    await waitFor(() => expect(screen.getByLabelText("Model provider")).toHaveAttribute("data-select-trigger"));
     fireEvent.change(screen.getByLabelText("Model provider"), { target: { value: "litellm" } });
     expect(identity()).toHaveTextContent("Required");
     expect(identity()).toHaveAccessibleName(/needs attention/);

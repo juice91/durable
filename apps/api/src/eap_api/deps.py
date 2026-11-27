@@ -28,16 +28,19 @@ from eap_run_store import (
 )
 from eap_run_store.chat_attachments import ChatAttachmentStore, MessageFeedbackStore
 from eap_run_store.evals import EvalStore
+from eap_run_store.external_access import ExternalAccessStore
 from eap_run_store.knowledge import KnowledgeStore
 from eap_run_store.memory import MemoryStore
 from eap_run_store.scorers import ScorerStore
 from eap_run_store.spans import SpanStore
 from eap_run_store.trace_feedback import TraceFeedbackStore
+from eap_run_store.webhooks import WebhookStore
 from fastapi import Depends, Request
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from eap_api.launcher import RunLauncher
+from eap_api.inbound_guard import InboundGuard, ip_rate_from_env
 from eap_api.otlp_limits import TokenBucketLimiter, rate_limit_from_env
 from eap_api.sse import DeltaSource, StreamLimiter
 
@@ -103,6 +106,16 @@ def mcp_limiter_of(app: Any) -> StreamLimiter:
             max_per_principal=int(os.environ.get("EAP_MCP_MAX_CONCURRENT_PER_KEY", "10")),
         ),
     )
+
+
+def external_guard_of(app: Any, ip_per_minute: int) -> InboundGuard:
+    """The external surface's request limiter (per address and per key; in memory, per process), made once per app."""
+    return _lazy(app, "external_guard", lambda: InboundGuard(ip_per_minute))
+
+
+def external_limiter_of(app: Any, max_global: int, max_per_key: int) -> StreamLimiter:
+    """The external surface's calls-in-flight limiter, made once per app."""
+    return _lazy(app, "external_limiter", lambda: StreamLimiter(max_global=max_global, max_per_principal=max_per_key))
 
 
 def mcp_control_app_of(app: Any) -> Any | None:
@@ -325,3 +338,33 @@ def get_otlp_limiter(request: Request) -> TokenBucketLimiter:
 
 
 OtlpLimiterDep = Annotated[TokenBucketLimiter, Depends(get_otlp_limiter)]
+
+
+def get_webhook_guard(request: Request) -> InboundGuard:
+    """The inbound webhook limiter and refusal counters (in memory, per process)."""
+    return _lazy(request.app, "webhook_guard", lambda: InboundGuard(ip_rate_from_env()))
+
+
+WebhookGuardDep = Annotated[InboundGuard, Depends(get_webhook_guard)]
+
+
+def webhook_store_of(app: Any) -> WebhookStore:
+    return _lazy(app, "webhook_store", lambda: WebhookStore(run_stores_of(app)[0].engine))
+
+
+def get_webhook_store(request: Request) -> WebhookStore:
+    return webhook_store_of(request.app)
+
+
+WebhookStoreDep = Annotated[WebhookStore, Depends(get_webhook_store)]
+
+
+def external_access_store_of(app: Any) -> ExternalAccessStore:
+    return _lazy(app, "external_access_store", lambda: ExternalAccessStore(run_stores_of(app)[0].engine))
+
+
+def get_external_access_store(request: Request) -> ExternalAccessStore:
+    return external_access_store_of(request.app)
+
+
+ExternalAccessStoreDep = Annotated[ExternalAccessStore, Depends(get_external_access_store)]

@@ -1,4 +1,4 @@
-"""Task 9 crash-injection matrix (docs/plans/2026-11-11-milestone-1-vertical-slice.md).
+"""Task 9 crash-injection matrix (an internal design note).
 
 Each scenario kills a real process at a named point (the worker's EAP_CRASH_AT hook, or the API
 process inside its launcher), recovers with a fresh process, and then asserts the same invariants:

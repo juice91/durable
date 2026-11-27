@@ -9,6 +9,7 @@ from eap_iam.types import (
     ACTION_MCP_MANAGE,
     ACTION_MCP_READ,
     ACTION_RUN_AGUI,
+    ACTION_RUN_EXTERNAL,
     ROLE_ADMIN,
     ROLE_EDITOR,
     ROLE_VIEWER,
@@ -22,12 +23,14 @@ ACTION_SCOPES: dict[str, tuple[str, ...]] = {
     ACTION_INGEST_OTLP: ("otlp",),
     ACTION_MCP_READ: ("mcp", "manage"),
     ACTION_MCP_MANAGE: ("manage",),
+    ACTION_RUN_EXTERNAL: ("run",),
 }
 
 
 # The scopes a personal API key may carry, by the role of its owner (the union over the owner's roles). A viewer reads
 # only (`mcp` is the read scope of the MCP control endpoint); `agui:run` starts runs, `manage` and `otlp` write.
-# `otlp` stays with admins: it feeds the tenant's telemetry store.
+# `otlp` stays with admins: it feeds the tenant's telemetry store. No role holds `run`: it belongs to an external client
+# (a key an admin makes for it), never to a person.
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     ROLE_ADMIN: frozenset({"agui:run", "mcp", "manage", "otlp"}),
     ROLE_EDITOR: frozenset({"agui:run", "mcp", "manage"}),

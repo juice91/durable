@@ -28,6 +28,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from eap_api.ports import RunLauncher
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
 from eap_api.schemas import DocumentPut, document_key_problem
 from eap_api.services.refusals import refusal
 from eap_knowledge import ExtractionFailed, ExtractLimits, UnsupportedMimeType, extract
@@ -753,18 +755,28 @@ def search_view(run: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     return False, view
 
 
-class KnowledgeService:
-    """Knowledge bases, documents, ingest, re-extract, reindex and the search tester (tenant-scoped)."""
+class KnowledgeService(AccessBound):
+    """Knowledge bases, documents, ingest, re-extract, reindex and the search tester (tenant-scoped).
 
-    def __init__(self, store: KnowledgeStore, run_store: RunStore, launcher: RunLauncher) -> None:
+    Per-resource authorisation (IAM P2b): a knowledge base is the resource; its documents, sources and runs are checked
+    through it (`read` to see, `edit` to change, `run` to search), so no tuple is written per document."""
+
+    def __init__(
+        self, store: KnowledgeStore, run_store: RunStore, launcher: RunLauncher, access: Access | None = None
+    ) -> None:
         self.store = store
         self.run_store = run_store
         self.launcher = launcher
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _require(self, action: str, kb_id: str) -> None:
+        acl.require(self._access, action, "knowledge_base", str(kb_id))
 
     # ------------------------------------------------------------------ embedding models
 
     def embedding_models(self) -> list[dict[str, Any]]:
         """Every allowed concrete model with its dimensions, then `provider:*=<dims>` wildcards."""
+        acl.require(self._access, "read", "tenant", None)
         policy = _policy()
         items: list[dict[str, Any]] = [
             {"id": m.id, "provider": m.provider, "name": m.name, "dimensions": m.dimensions, "wildcard": False}
@@ -780,11 +792,15 @@ class KnowledgeService:
     # ------------------------------------------------------------------ knowledge bases
 
     def list_knowledge_bases(self, tenant_id: str) -> list[dict[str, Any]]:
-        return self.store.list_knowledge_bases(tenant_id)
+        items = self.store.list_knowledge_bases(tenant_id)
+        flt = acl.visible(self._access, "knowledge_base")  # one engine call, whatever the count
+        allowed = set(acl.keep(flt, [str(i["id"]) for i in items]))
+        return [i for i in items if str(i["id"]) in allowed]
 
     def create_knowledge_base(
         self, tenant_id: str, *, name: str, description: str | None, embedding_model: str, chunking: Any
     ) -> dict[str, Any]:
+        acl.require(self._access, "create", "knowledge_base", None)
         model = _resolve_model(embedding_model)
         try:
             kb = self.store.create_knowledge_base(
@@ -793,13 +809,16 @@ class KnowledgeService:
             )
         except KnowledgeBaseNameConflict as exc:
             raise refusal(409, str(exc))
+        acl.register(self._access, "knowledge_base", str(kb["id"]))  # before the response: the creator owns it
         return {**kb, "document_count": 0, "chunk_count": 0}
 
     def get_knowledge_base(self, tenant_id: str, kb_id: str) -> dict[str, Any]:
+        self._require("read", kb_id)
         kb = _kb_or_404(self.store, tenant_id, kb_id)
         return {**kb, **ingest_totals(self.store, tenant_id, kb["id"])}
 
     def update_knowledge_base(self, tenant_id: str, kb_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        self._require("edit", kb_id)
         try:
             self.store.update_knowledge_base(tenant_id, kb_id, **fields)
         except KnowledgeBaseNotFound:
@@ -809,6 +828,7 @@ class KnowledgeService:
         return _kb_or_404(self.store, tenant_id, kb_id)
 
     def delete_knowledge_base(self, tenant_id: str, kb_id: str, force: bool = False) -> None:
+        self._require("archive", kb_id)
         store = self.store
         kb = _kb_or_404(store, tenant_id, kb_id)
         if not force:
@@ -823,10 +843,12 @@ class KnowledgeService:
                 )
         if not _retry_deadlock_once(lambda: store.delete_knowledge_base(tenant_id, kb["id"])):
             raise refusal(404, KB_NOT_FOUND)
+        acl.unregister(self._access, "knowledge_base", str(kb["id"]))
 
     # ------------------------------------------------------------------ documents
 
     def list_documents(self, tenant_id: str, kb_id: str, limit: int, after: str | None) -> dict[str, Any]:
+        self._require("read", kb_id)
         kb = _kb_or_404(self.store, tenant_id, kb_id)
         after_key = None
         if after is not None:
@@ -839,6 +861,7 @@ class KnowledgeService:
         return {"items": [document_view(d) for d in items], "next_after": next_after}
 
     def get_document(self, tenant_id: str, kb_id: str, document_key: str, include_content: bool) -> dict[str, Any]:
+        self._require("read", kb_id)
         store = self.store
         kb = _kb_or_404(store, tenant_id, kb_id)
         document = store.get_document(tenant_id, kb["id"], document_key)
@@ -860,6 +883,7 @@ class KnowledgeService:
     ) -> dict[str, Any]:
         """Upload a document (see the route's docstring for the status rules). Returns the answer's body;
         `unchanged` says whether it is the 200 (no run) or the 202."""
+        self._require("edit", kb_id)
         _check_document_key(document_key)
         if body.document_key is not None and body.document_key != document_key:
             raise refusal(422, "document_key in the body must match the path")
@@ -914,6 +938,7 @@ class KnowledgeService:
         }
 
     def delete_document(self, tenant_id: str, kb_id: str, document_key: str) -> None:
+        self._require("edit", kb_id)
         store = self.store
         kb = _kb_or_404(store, tenant_id, kb_id)
         if not _retry_deadlock_once(lambda: store.delete_document(tenant_id, kb["id"], document_key)):
@@ -924,6 +949,7 @@ class KnowledgeService:
     ) -> dict[str, Any]:
         """A new ingest run of the document's latest version. `unchanged` True (and `run_id` None) when it is
         already ingested: the route answers 200 for that and 202 otherwise."""
+        self._require("edit", kb_id)
         store, run_store, launcher = self.store, self.run_store, self.launcher
         kb = _kb_or_404(store, tenant_id, kb_id)
         document = store.get_document(tenant_id, kb["id"], document_key)
@@ -967,6 +993,7 @@ class KnowledgeService:
         self, tenant_id: str, kb_id: str, document_key: str, run_id: uuid.UUID | None
     ) -> dict[str, Any]:
         """A new version with the same content and an ingest run of it (see the route's docstring)."""
+        self._require("edit", kb_id)
         store, run_store, launcher = self.store, self.run_store, self.launcher
         kb = _kb_or_404(store, tenant_id, kb_id)
         document = store.get_document(tenant_id, kb["id"], document_key)
@@ -1012,6 +1039,7 @@ class KnowledgeService:
         chunker_version: int | None, dry_run: bool,
     ) -> dict[str, Any]:
         """Re-extract many documents. The answer's `started` says whether the route answers 202 or 200."""
+        self._require("edit", kb_id)
         store, run_store, launcher = self.store, self.run_store, self.launcher
         kb = _kb_or_404(store, tenant_id, kb_id)
         format_set: set[str] | None = None
@@ -1109,6 +1137,7 @@ class KnowledgeService:
     ) -> dict[str, Any]:
         """Re-embed into a new generation. A dry run answers the estimate (`dry_run` True: the route's 200);
         otherwise the kb_ingest run (the 202)."""
+        self._require("edit", kb_id)
         store, run_store, launcher = self.store, self.run_store, self.launcher
         model = _resolve_model(embedding_model)
         kb = _kb_or_404(store, tenant_id, kb_id)
@@ -1205,6 +1234,7 @@ class KnowledgeService:
             _retry_deadlock_once(lambda: store.cancel_reindex(tenant_id, kb_id))
 
     def cancel_reindex(self, tenant_id: str, kb_id: str) -> None:
+        self._require("edit", kb_id)
         kb = _kb_or_404(self.store, tenant_id, kb_id)
         _retry_deadlock_once(lambda: self.store.cancel_reindex(tenant_id, kb["id"]))
 
@@ -1215,6 +1245,7 @@ class KnowledgeService:
         filter: dict[str, Any] | None, run_id: uuid.UUID | None,
     ) -> tuple[dict[str, Any], bool, uuid.UUID]:
         """Record the `knowledge.search` tool run: (the run, whether this call created it, its id)."""
+        self._require("run", kb_id)
         run_store = self.run_store
         kb = _kb_or_404(self.store, tenant_id, kb_id)
         try:
@@ -1276,6 +1307,8 @@ class KnowledgeService:
         self, tenant_id: str, run_id: uuid.UUID, fallback: dict[str, Any]
     ) -> tuple[bool, dict[str, Any]]:
         """(finished, body) of the search run as it is now (`fallback` when the read finds nothing)."""
+        if fallback.get("knowledge_base_id") is not None:
+            self._require("run", fallback["knowledge_base_id"])
         current = self.run_store.get_run(tenant_id, run_id) or fallback
         if current["error"] == ENQUEUE_FAILED_ERROR and current["status"] == "failed":
             # A concurrent owner's enqueue failed, but this one succeeded: the workflow exists.

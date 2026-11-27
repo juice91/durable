@@ -16,8 +16,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from eap_api.models import AgentModel
+from eap_api.services import access as acl
+from eap_api.services.access import Access, AccessBound
+from eap_api.services.agent_grants import AgentGrantService, PublishGrants
 from eap_api.services.errors import Conflict
 from eap_api.workflows.models import WorkflowModel, WorkflowVersionModel
+from eap_run_store import AuditStore
 from eap_run_store.definition_errors import refuse
 from eap_run_store.definitions import (
     publish_workflow,
@@ -105,9 +109,13 @@ def stale_revision(expected: int | None, current: Callable[[], Versioned]) -> Co
     )
 
 
-class WorkflowService:
-    def __init__(self, session: Session) -> None:
+class WorkflowService(AccessBound):
+    def __init__(self, session: Session, access: Access | None = None) -> None:
         self._db = session
+        self._access = access  # None: no caller to check (see eap_api.services.access)
+
+    def _require(self, action: str, workflow_id: str | None) -> None:
+        acl.require(self._access, action, "workflow", None if workflow_id is None else str(workflow_id))
 
     # ----------------------------------------------------------------------------- helpers
 
@@ -148,10 +156,12 @@ class WorkflowService:
     # ------------------------------------------------------------------------------- drafts
 
     def create(self, tenant_id: str, spec: WorkflowSpec) -> Versioned:
+        self._require("create", None)
         workflow = WorkflowModel(tenant_id=tenant_id, name=spec.name, draft_spec=spec.model_dump(mode="json"))
         self._db.add(workflow)
         self._db.commit()
         self._db.refresh(workflow)
+        acl.register(self._access, "workflow", str(workflow.id))  # before the response: the creator owns what it made
         return workflow_json(workflow, None), workflow.revision
 
     def list(self, tenant_id: str, archived: str = "false") -> list[dict[str, Any]]:
@@ -160,15 +170,19 @@ class WorkflowService:
         if archived != "all":
             query = query.filter(WorkflowModel.archived.is_(archived == "true"))
         workflows = query.order_by(WorkflowModel.created_at, WorkflowModel.id).all()
+        shown = set(acl.keep(acl.visible(self._access, "workflow"), [str(w.id) for w in workflows]))  # one engine call
+        workflows = [w for w in workflows if str(w.id) in shown]
         return [workflow_json(w, self._latest_version(w)) for w in workflows]
 
     def get(self, tenant_id: str, workflow_id: str) -> Versioned:
+        self._require("read", workflow_id)
         workflow = self._get(tenant_id, workflow_id)
         return workflow_json(workflow, self._latest_version(workflow)), workflow.revision
 
     def replace_draft(
         self, tenant_id: str, workflow_id: str, spec: WorkflowSpec, expected_revision: int | None
     ) -> Versioned:
+        self._require("edit", workflow_id)
         workflow = self._get(tenant_id, workflow_id)
 
         def current() -> Versioned:
@@ -190,24 +204,63 @@ class WorkflowService:
 
     # ----------------------------------------------------------------------------- versions
 
+    def _grants(self) -> AgentGrantService:
+        return AgentGrantService(self._db, self._access, AuditStore(self._db.get_bind()) if self._access is not None else None)
+
+    def publish_grants(self, tenant_id: str, workflow_id: str) -> dict[str, Any]:
+        """What publishing the draft would newly grant (the publish card's line), and whether the caller may approve it."""
+        self._require("publish", workflow_id)
+        plan = self._grants().plan("workflow", str(workflow_id), self._get(tenant_id, workflow_id).draft_spec)
+        return (plan or PublishGrants("workflow", str(workflow_id))).to_json()
+
+    def access_grants(self) -> AgentGrantService:
+        return self._grants()
+
+    def access_status(self, tenant_id: str, workflow_id: str) -> dict[str, Any]:
+        """The Access section: what this workflow is authorised to use (docs/iam.md, "Agent and workflow grants")."""
+        self._require("read", workflow_id)
+        workflow = self._get(tenant_id, workflow_id)
+        latest = (
+            self._db.query(WorkflowVersionModel)
+            .filter(WorkflowVersionModel.workflow_id == workflow.id, WorkflowVersionModel.tenant_id == tenant_id)
+            .order_by(WorkflowVersionModel.version.desc()).first()
+        )
+        return self._grants().status("workflow", str(workflow_id), None if latest is None else latest.spec)
+
     def publish(self, tenant_id: str, user_id: str, workflow_id: str) -> Versioned:
+        self._require("publish", workflow_id)
+        grants = self._grants()
+        plan = grants.plan("workflow", str(workflow_id), self._get(tenant_id, workflow_id).draft_spec)
+        grants.require_approvable(plan)  # newly used secrets: an admin approves, and approving grants them
         result = self._run_op(lambda conn: publish_workflow(conn, tenant_id, str(workflow_id), created_by=user_id))
+        grants.apply(plan, f"published version {result.version['version']}")
         return {**_version_json(result.version), "warnings": result.warnings}, result.revision
 
     def restore(
         self, tenant_id: str, user_id: str, workflow_id: str, version_num: int, *, discard_draft: bool = False
     ) -> Versioned:
+        self._require("publish", workflow_id)  # a restore publishes a new version
+        grants = self._grants()
+        old = (
+            self._db.query(WorkflowVersionModel)
+            .filter(WorkflowVersionModel.workflow_id == str(workflow_id), WorkflowVersionModel.tenant_id == tenant_id,
+                    WorkflowVersionModel.version == version_num).first()
+        )
+        plan = grants.plan("workflow", str(workflow_id), None if old is None else old.spec)
+        grants.require_approvable(plan)
         result = self._run_op(
             lambda conn: restore_workflow_version(
                 conn, tenant_id, str(workflow_id), version_num, created_by=user_id, discard_draft=discard_draft
             )
         )
+        grants.apply(plan, f"restored version {version_num} as version {result.version['version']}")
         return (
             {**_version_json(result.version), "restored_from": version_num, "warnings": result.warnings},
             result.revision,
         )
 
     def archive(self, tenant_id: str, workflow_id: str, archived: bool, force: bool = False) -> Versioned:
+        self._require("archive", workflow_id)
         result = self._run_op(
             lambda conn: set_workflow_archived(conn, tenant_id, str(workflow_id), archived, force=force)
         )
@@ -218,6 +271,7 @@ class WorkflowService:
 
     def list_versions(self, tenant_id: str, workflow_id: str) -> list[dict[str, Any]]:
         """Published versions, newest first."""
+        self._require("read", workflow_id)
         workflow = self._get(tenant_id, workflow_id)
         versions = (
             self._db.query(WorkflowVersionModel)
@@ -228,6 +282,7 @@ class WorkflowService:
         return [_version_row_json(v) for v in versions]
 
     def get_version(self, tenant_id: str, workflow_id: str, version_num: int) -> dict[str, Any]:
+        self._require("read", workflow_id)
         workflow = self._get(tenant_id, workflow_id)
         version = (
             self._db.query(WorkflowVersionModel)
@@ -244,6 +299,7 @@ class WorkflowService:
 
     def agent_output_schema(self, tenant_id: str, agent_id: str, version: int | None) -> dict[str, Any]:
         """The output schema an agent step would read: the pinned `version`, else the latest published one."""
+        acl.require(self._access, "read", "agent", str(agent_id))
         agent = (
             self._db.query(AgentModel)
             .filter(AgentModel.id == str(agent_id), AgentModel.tenant_id == tenant_id)

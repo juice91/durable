@@ -4,36 +4,57 @@ metadata:
   name: pydanticos-config
 data:
   EAP_AUTH_MODE: dev
-  # IAM plug-ins (docs/superpowers/specs/2026-11-22-iam-design.md): identity providers in order (first match wins) and
-  # exactly one policy engine. `apikey` = tenant API keys and the Architect run token; `cfaccess` = the Cloudflare
-  # Access JWT, whose e-mail is the user (the public Studio carries the Access cookie and cloudflared adds the JWT);
-  # `devloopback` = the dev bearer, accepted only from a loopback TCP peer (kubectl port-forward, the SSH tunnel);
-  # `openaccess` = every user is admin. The three EAP_CF_ACCESS_* values are required by `cfaccess` and are not
-  # secrets: the team domain, the AUD tag of the "Durable Studio" Access application, and the one tenant every Access
-  # user belongs to (Access has no tenant concept; "studio" is the tenant the dev bearer always used).
+  # Inbound webhooks (docs/webhooks.md): off, so every hook URL answers 404. Enable them once the hooks path is reachable
+  # through your Ingress or reverse proxy (docs/expose.md).
+  EAP_WEBHOOKS_ENABLED: "false"
+  # External agents (docs/external-access.md): off, so /api/v1/external/ answers 404. Switching it on needs
+  # EAP_AUTH_MODE=production.
+  EAP_EXTERNAL_ACCESS_ENABLED: "false"
+  # Peers whose CF-Connecting-IP header is believed as the sender's address (the per-address rate limits). Empty trusts
+  # nobody. Set it only to the CIDR of a proxy that overwrites that header on every request (docs/expose.md).
+  EAP_TRUSTED_PROXY_CIDRS: ""
+  # IAM plug-ins (docs/iam.md): identity providers in order (first match wins) and
+  # exactly one policy engine. `zitadel` = ZITADEL access tokens (Studio's own OIDC sign-in), verified first; a
+  # JWT-shaped bearer that fails is a 401 that never falls through. `apikey` = tenant API keys and the Architect run
+  # token; `devloopback` = the dev bearer, accepted only from a loopback TCP peer (kubectl port-forward, the SSH tunnel);
+  # `openaccess` = every user is admin. The `zitadel` plug-in is DORMANT until you have run its bootstrap
+  # (plugins/iam-zitadel/README.md) and stored EAP_ZITADEL_PROJECT_ID and EAP_ZITADEL_ORG_TENANT_MAP in the deploy secrets:
+  # nobody can sign in through ZITADEL without them. The membership source (the Members page) additionally needs
+  # EAP_ZITADEL_MACHINE_KEY and is left out of the capabilities answer while that is missing.
   #
-  # IAM P1 adds `zitadel` first: ZITADEL access tokens (Studio's own OIDC sign-in) are verified before anything else, and
-  # a JWT-shaped bearer that fails is a 401 that never falls through. `cfaccess` stays for the transition (the Access JWT
-  # of people who have not switched yet). The plug-in is DORMANT until the operator has run the bootstrap and stored
-  # EAP_ZITADEL_PROJECT_ID and EAP_ZITADEL_ORG_TENANT_MAP in the deploy secrets (deploy/README.md, "ZITADEL bootstrap and
-  # sign-in"); until then it recognises nothing and the chain behaves as before. The membership source (the Members
-  # page) additionally needs EAP_ZITADEL_MACHINE_KEY and is left out of the capabilities answer while that is missing.
-  EAP_IAM_IDENTITY: "zitadel,apikey,cfaccess,devloopback"
+  # The default sign-in is `localadmin`: ONE built-in admin account (docs/admin-account.md). up.sh generates its signing
+  # key into the cluster's Secret and ends with the link that creates the account (or set EAP_LOCAL_ADMIN_USERNAME and
+  # EAP_LOCAL_ADMIN_INITIAL_PASSWORD in the deploy secrets for an automated install). For several users
+  # or roles switch to ZITADEL: EAP_IAM_IDENTITY "zitadel,apikey,devloopback", EAP_IAM_MEMBERSHIP zitadel and
+  # EAP_STUDIO_AUTH zitadel (docs/admin-account.md, "Switching to ZITADEL").
+  EAP_IAM_IDENTITY: "localadmin,apikey,devloopback"
+  # For trial use: every signed-in user is admin. For per-user authorization follow docs/iam.md, "Switching to OpenFGA".
   EAP_IAM_POLICY: openaccess
-  EAP_IAM_MEMBERSHIP: zitadel
+  EAP_IAM_MEMBERSHIP: localadmin
+  # OpenFGA (authorization, namespace iam): read by the API and the worker only when EAP_IAM_POLICY is `openfga`.
+  # The two ids are printed by the bootstrap and are not secrets; the preshared key
+  # comes from the Secret (OPENFGA_PRESHARED_KEY, the field OpenFGA itself reads). Switching is docs/iam.md, "Switching to
+  # OpenFGA". An empty store id with `openfga` selected refuses to start. The list limit must equal the server's
+  # OPENFGA_LIST_OBJECTS_MAX_RESULTS and the batch size must not exceed its OPENFGA_MAX_CHECKS_PER_BATCH_CHECK (both defaults).
+  EAP_OPENFGA_URL: http://openfga.iam.svc.cluster.local:8080
+  # Empty until you bootstrap your own OpenFGA (docs/iam.md, "Switching to OpenFGA"); set both before selecting `openfga`.
+  EAP_OPENFGA_STORE_ID: ""
+  EAP_OPENFGA_MODEL_ID: ""
+  EAP_OPENFGA_TIMEOUT_SECONDS: "3"
+  EAP_OPENFGA_LIST_LIMIT: "1000"
+  EAP_OPENFGA_BATCH_SIZE: "50"
+  # Agent-bound grants (docs/iam.md, "Agent and workflow grants"): the worker's run-time gates. "1" only after the switch
+  # to `openfga` and the grants backfill.
+  EAP_AGENT_GRANTS_ENFORCE: "0"
   # ZITADEL: the public issuer (the exact `iss`), and the in-cluster Service the API verifies tokens and calls the
   # management API through (the Host header stays the issuer's host; the iam-egress-zitadel policy allows it).
   EAP_ZITADEL_ISSUER: https://auth.example-org.ai
   EAP_ZITADEL_API_URL: http://zitadel.iam.svc.cluster.local:8080
-  # How Studio signs people in: `zitadel` (ON: OIDC code + PKCE against ZITADEL; Studio sends the access token as a
-  # Bearer) or `access` (the Cloudflare Access cookie and JWT; also the code default). The SSH-tunnel loopback page
-  # keeps the dev bearer either way. A missing EAP_ZITADEL_STUDIO_CLIENT_ID or EAP_ZITADEL_PROJECT_ID in the Secret
-  # makes Studio fall back to `access` (apps/studio/src/lib/auth/config.ts) instead of locking everyone out.
-  # Rollback: set this to `access` and redeploy; nothing else changes.
-  EAP_STUDIO_AUTH: zitadel
-  EAP_CF_ACCESS_TEAM_DOMAIN: example-org.cloudflareaccess.com
-  EAP_CF_ACCESS_AUD: REPLACE_WITH_ACCESS_APP_AUD
-  EAP_CF_ACCESS_TENANT: studio
+  # How Studio signs people in (docs/admin-account.md, "The three Studio sign-in modes"): `local` (the built-in admin
+  # account), `zitadel` (OIDC code + PKCE against ZITADEL, once EAP_ZITADEL_STUDIO_CLIENT_ID and
+  # EAP_ZITADEL_PROJECT_ID are in the deploy secrets) or `access` (an identity-aware proxy in front, with its identity plug-in). The loopback page of a
+  # port-forward keeps the dev bearer either way. A mode that cannot work shows "No sign-in method is configured".
+  EAP_STUDIO_AUTH: local
   # audit_log keeps 400 days (eap_worker.audit_retention prunes older rows daily); `off` keeps everything.
   EAP_AUDIT_RETENTION_DAYS: "400"
   # Studio over the SSH tunnel (http://127.0.0.1:13000) calls the API's own port-forward (http://127.0.0.1:18000)
@@ -51,17 +72,13 @@ data:
   # The worker reaches the API's MCP control endpoint as the Architect's run (the `control__*` tools); the bearer is a
   # two-minute run token signed with a key derived from EAP_SECRETS_KEY, so nothing else is configured.
   EAP_API_INTERNAL_URL: http://api:8000
-  # Cloudflare Workers AI provider (optional; model ids cloudflare:@cf/...). The account id is not a secret; the API token
-  # comes from the Secret (CLOUDFLARE_API_TOKEN). Leave both empty to keep the provider off. A gateway id routes every request
-  # through Cloudflare AI Gateway (logging, caching, rate limits); empty calls Workers AI directly.
-  EAP_CLOUDFLARE_ACCOUNT_ID: "YOUR_CLOUDFLARE_ACCOUNT_ID"
-  EAP_CLOUDFLARE_GATEWAY_ID: "default"
-  # Chat attachment bytes live in Cloudflare R2 (S3 API), reached over HTTPS 443. The endpoint holds the account id, which
-  # is not a secret; the access key and secret come from the Secret (EAP_BLOB_S3_ACCESS_KEY, EAP_BLOB_S3_SECRET_KEY). The bucket is created by the operator.
+  # Chat attachment bytes live in S3-compatible object storage, reached over HTTPS 443: any such store works, for example
+  # MinIO or AWS S3. Replace the endpoint with yours; the access key and secret come from the Secret (EAP_BLOB_S3_ACCESS_KEY,
+  # EAP_BLOB_S3_SECRET_KEY). You create the bucket. EAP_BLOB_S3_PATH_STYLE: "false" selects virtual-hosted addressing.
   EAP_BLOB_BACKEND: s3
-  EAP_BLOB_S3_ENDPOINT: https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com
+  EAP_BLOB_S3_ENDPOINT: https://YOUR_S3_ENDPOINT
   EAP_BLOB_S3_BUCKET: pydanticos-attachments
-  EAP_BLOB_S3_REGION: auto
+  EAP_BLOB_S3_REGION: us-east-1
   # up.sh replaces these with the cluster's `kubernetes` Service and endpoint addresses.
   EAP_MCP_API_SERVER_CIDRS: 10.43.0.1/32,192.168.5.3/32
   EAP_MCP_API_SERVER_PORTS: 443,6443

@@ -5,6 +5,9 @@ The `cloudflare` provider runs Workers AI models through Cloudflare's OpenAI-com
 
 ## Configure
 
+This provider is optional and stays off until configured. The shipped manifests set none of these variables: for a
+Kubernetes deployment add them to the `api` and `worker` containers (the token from a Secret).
+
 | Variable | Where | Meaning |
 |---|---|---|
 | `CLOUDFLARE_API_TOKEN` (fallback `EAP_CLOUDFLARE_API_TOKEN`) | Secret | API token. Required. |

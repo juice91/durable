@@ -1,0 +1,64 @@
+name: Compose quick start
+
+# The Docker Compose quick start (compose.yaml) end to end: build the images, start the stack from fresh volumes, create
+# the admin with the setup code, sign in, start it again, remove it (scripts/ci/compose_smoke.py). Building both images
+# is slow, so a pull request runs it only when it touches the quick start itself; main and the nightly run catch the rest.
+# The job leaves its Docker engine as it found it: at the end it removes what it made and caps the build cache
+# (scripts/ci/compose_runner.sh).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'compose.yaml'
+      - '.dockerignore'
+      - 'deploy/docker/**'
+      - 'apps/*/src/**'
+      - 'packages/*/src/**'
+      - 'plugins/*/src/**'
+      - 'uv.lock'
+      - 'pnpm-lock.yaml'
+      - 'scripts/ci/compose_*'
+      - '.github/workflows/compose.yml'
+  pull_request:
+    paths:
+      - 'compose.yaml'
+      - '.env.example'
+      - '.dockerignore'
+      - 'deploy/docker/**'
+      - 'docs/quickstart-compose.md'
+      - 'scripts/ci/compose_*'
+      - '.github/workflows/compose.yml'
+  schedule:
+    - cron: '47 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compose-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  quickstart:
+    # Pull requests from forks never run on a self-hosted runner (CI_RUNNER).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    env:
+      PROJECT: eap-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      # Images of this run alone, removed at the end (a self-hosted runner keeps its Docker between jobs).
+      EAP_IMAGE_TAG: smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the quick start end to end
+        run: |
+          set -euo pipefail
+          port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+          python3 scripts/ci/compose_smoke.py --project "$PROJECT" --port "$port" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Remove what the run made and cap the build cache
+        if: always()
+        # Also after a failed, cancelled or refused run: the script removes its own stack only when it finishes.
+        run: bash scripts/ci/compose_runner.sh cleanup 15GB

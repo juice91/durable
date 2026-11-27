@@ -18,6 +18,9 @@ MODES = (MODE_DEV, MODE_PRODUCTION, MODE_API_KEY)
 DEV_DEFAULT_IDENTITY = ("apikey", "devloopback")
 DEV_DEFAULT_POLICY = "openaccess"
 API_KEY_ALIAS_IDENTITY = ("apikey",)
+# The identity plug-in of inbound webhook signatures. It answers only the hook route (the one route that accepts the
+# `webhook` principal kind), so it is part of the chain whenever it is installed, whatever EAP_IAM_IDENTITY lists.
+WEBHOOK_IDENTITY = "webhook"
 
 AUTH_CONFIGURATION_ERROR = (
     "no production authentication is configured; set EAP_AUTH_MODE=dev for local development only "
@@ -76,6 +79,8 @@ def require_iam_configured(
             "EAP_AUTH_MODE=production needs EAP_IAM_IDENTITY with at least one identity provider " + AUTH_CONFIGURATION_ERROR
         )
 
+    if WEBHOOK_IDENTITY in identity and WEBHOOK_IDENTITY not in identity_names:
+        identity_names.append(WEBHOOK_IDENTITY)
     if len(set(identity_names)) != len(identity_names):
         raise IamConfigError(f"EAP_IAM_IDENTITY lists a plug-in twice: {','.join(identity_names)}")
     unknown = [n for n in identity_names if n not in identity]

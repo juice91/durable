@@ -1,5 +1,6 @@
 "use client";
 
+import { useMayChat } from "@/components/agentPage/useMayChat";
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { MoreHorizontal } from "lucide-react";
@@ -13,7 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/Dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/DropdownMenu";
 import { toast } from "@/components/ui/Toaster";
-import { api } from "@/lib/api";
+import { type Agent, api } from "@/lib/api";
 import {
   cloneConversation,
   deleteConversation,
@@ -37,7 +38,34 @@ interface Actions {
   onDelete: (c: Conversation) => void;
 }
 
-function columnsFor(names: Record<string, string>, actions: Actions): DataListColumn<Conversation>[] {
+type Builtins = Record<string, Agent["builtin_role"]>;
+
+/** A thread's menu, for whoever may chat with its agent. */
+function ThreadRowActions({ conversation: c, builtinRole, actions }: { conversation: Conversation; builtinRole: Agent["builtin_role"]; actions: Actions }) {
+  const chat = useMayChat({ id: c.agent_id, builtin_role: builtinRole });
+  if (!chat.can("run")) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Actions for ${labelOf(c)}`}
+          data-testid="thread-actions"
+          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-fill-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <MoreHorizontal aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} className="size-icon" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem data-testid="thread-rename" onSelect={() => actions.onRename(c)}>Rename</DropdownMenuItem>
+        <DropdownMenuItem data-testid="thread-clone" onSelect={() => actions.onClone(c)}>Clone conversation</DropdownMenuItem>
+        <DropdownMenuItem destructive data-testid="thread-delete" onSelect={() => actions.onDelete(c)}>Delete conversation</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function columnsFor(names: Record<string, string>, builtins: Builtins, actions: Actions): DataListColumn<Conversation>[] {
   return [
     {
       id: "title",
@@ -67,23 +95,7 @@ function columnsFor(names: Record<string, string>, actions: Actions): DataListCo
       header: <span className="sr-only">Actions</span>,
       align: "end",
       cell: (c) => (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label={`Actions for ${labelOf(c)}`}
-              data-testid="thread-actions"
-              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-fill-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <MoreHorizontal aria-hidden="true" strokeWidth={ICON_STROKE_WIDTH} className="size-icon" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem data-testid="thread-rename" onSelect={() => actions.onRename(c)}>Rename</DropdownMenuItem>
-            <DropdownMenuItem data-testid="thread-clone" onSelect={() => actions.onClone(c)}>Clone conversation</DropdownMenuItem>
-            <DropdownMenuItem destructive data-testid="thread-delete" onSelect={() => actions.onDelete(c)}>Delete conversation</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <ThreadRowActions conversation={c} builtinRole={builtins[c.agent_id] ?? null} actions={actions} />
       ),
     },
   ];
@@ -94,12 +106,14 @@ function ThreadsList({
   agentId,
   q,
   names,
+  builtins,
   agentOptions,
   setParam,
 }: {
   agentId: string;
   q: string;
   names: Record<string, string>;
+  builtins: Builtins;
   agentOptions: Array<[string, string]>;
   setParam: (patch: { agent_id?: string; q?: string }) => void;
 }) {
@@ -174,9 +188,9 @@ function ThreadsList({
   };
 
   const columns = useMemo(
-    () => columnsFor(names, { onRename: startRename, onClone: (c) => void clone(c), onDelete: (c) => { setDeleteError(null); setDeleting(c); } }),
+    () => columnsFor(names, builtins, { onRename: startRename, onClone: (c) => void clone(c), onDelete: (c) => { setDeleteError(null); setDeleting(c); } }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [names],
+    [names, builtins],
   );
 
   return (
@@ -272,12 +286,15 @@ export function ThreadsPage() {
   const agentId = params?.get("agent_id") ?? "";
   const q = params?.get("q") ?? "";
   const [names, setNames] = useState<Record<string, string>>({});
+  const [builtins, setBuiltins] = useState<Builtins>({});
 
   useEffect(() => {
     let live = true;
     api.agents.list().then(
       (agents) => {
-        if (live) setNames(Object.fromEntries(agents.map((a) => [a.id, a.name])));
+        if (!live) return;
+        setNames(Object.fromEntries(agents.map((a) => [a.id, a.name])));
+        setBuiltins(Object.fromEntries(agents.map((a) => [a.id, a.builtin_role])));
       },
       () => undefined,
     );
@@ -296,7 +313,7 @@ export function ThreadsPage() {
       <PageHeader crumbs={[navCrumb("threads", { current: true })]} />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
         <p className="text-body text-muted-foreground">The conversations of every agent. Open one to continue it in the agent&apos;s Chat tab.</p>
-        <ThreadsList agentId={agentId} q={q} names={names} agentOptions={agentOptions} setParam={setParam} />
+        <ThreadsList agentId={agentId} q={q} names={names} builtins={builtins} agentOptions={agentOptions} setParam={setParam} />
       </div>
     </>
   );

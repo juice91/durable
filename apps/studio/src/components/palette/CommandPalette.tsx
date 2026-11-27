@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import { navigateGuarded } from "@/components/frame/navigationGuard";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -122,6 +123,7 @@ export function CommandPalette() {
   const shortcuts = useShortcuts();
   const router = useRouter();
   const { theme, setTheme } = useTheme();
+  const mayCreateAgent = useCan("agent", null, "create");
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<PaletteScope>("all");
@@ -298,14 +300,14 @@ export function CommandPalette() {
             attrs: { "data-palette-command": `theme-${option.value}` },
           };
         }),
-        {
-          value: "command:new-agent",
-          keywords: ["New agent", "create"],
-          icon: <Plus {...iconProps} />,
-          label: "New agent",
-          onSelect: () => go(routes.agentNew()),
-          attrs: { "data-palette-command": "new-agent" },
-        },
+        ...(mayCreateAgent ? [{
+            value: "command:new-agent",
+            keywords: ["New agent", "create"],
+            icon: <Plus {...iconProps} />,
+            label: "New agent",
+            onSelect: () => go(routes.agentNew()),
+            attrs: { "data-palette-command": "new-agent" },
+        }] : []),
         {
           value: "command:settings",
           keywords: ["Go to settings", "preferences"],

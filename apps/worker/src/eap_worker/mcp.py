@@ -95,6 +95,7 @@ from eap_secrets.outbound_errors import (  # shared with the API's connection te
 )
 from eap_run_store.secrets import SecretStore
 from eap_worker.crash import crash_point
+from eap_worker.grants import denial_for_secrets, denial_for_server, record_denial, refuse_message, secret_names_in
 from eap_worker.secret_refs import SECRET_NOT_FOUND, SecretRefNotFound, resolve_args, resolve_string
 
 log = logging.getLogger("eap_worker.mcp")
@@ -725,7 +726,12 @@ class McpToolset(AbstractToolset[Any]):
         servers = await asyncio.to_thread(self._load, list(self.refs.values()))
         policy = OutboundPolicy.from_env()
         listed: dict[str, dict[str, Any]] = {}
+        refused: dict[str, str] = {}  # server -> the readable refusal: no connection is made, no credential is sent
         for server, conn in servers.items():
+            denial = await asyncio.to_thread(denial_for_server, ctx.deps.tenant_id, ctx.deps.run_id, conn.server_id, server)
+            if denial is not None:
+                refused[server] = refuse_message(denial)
+                continue
             first = next(r.tool for r in self.refs.values() if r.server == server)
             statuses: list[int] = []
             if self._ensure is not None:  # start a stopped managed server, wait for a starting one
@@ -741,6 +747,13 @@ class McpToolset(AbstractToolset[Any]):
                 raise McpToolUnavailable(server, first, code) from None
         tools: dict[str, ToolsetTool[Any]] = {}
         for name, ref in self.refs.items():
+            if ref.server in refused:  # visible to the model, but a call answers `permission_denied`
+                tools[name] = self._tool(ToolDefinition(
+                    name=name, description=f"Not authorized: {refused[ref.server]}",
+                    parameters_json_schema={"type": "object", "additionalProperties": True},
+                    metadata={"mcp_server": ref.server, "mcp_tool": ref.tool},
+                ))
+                continue
             found = listed[ref.server].get(ref.tool)
             if found is None:
                 raise McpToolUnavailable(ref.server, ref.tool, "tool_not_found")
@@ -774,6 +787,14 @@ class McpToolset(AbstractToolset[Any]):
             # completed), so the server row and secrets are read only when a call will really be
             # made. It runs in a thread (the store is synchronous) and drives the MCP call on the loop.
             conn = self._load([ref])[ref.server]
+            # Agent-bound grants: the server (and with it the credentials it carries) and every `secret:<name>` the call
+            # names must be in the run's start-time set; checked before any secret is read.
+            denial = denial_for_server(ctx.deps.tenant_id, ctx.deps.run_id, conn.server_id, ref.server) or (
+                denial_for_secrets(ctx.deps.tenant_id, ctx.deps.run_id, secret_names_in(tool_args))
+            )
+            if denial is not None:
+                record_denial(ctx.deps.tenant_id, ctx.deps.run_id, denial)
+                return {"is_error": True, "content": None, "error": refuse_message(denial)}
             args, values = tool_args, []
             if self._resolve is not None:
                 # `secret:<name>` strings in the arguments become the tenant's values only here, after

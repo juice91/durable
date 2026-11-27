@@ -101,6 +101,7 @@ class MemberView(BaseModel):
 class MemberList(BaseModel):
     items: list[MemberView]
     mutable: bool
+    can_create_users: bool  # False: an invitation only adds a user who already exists in the identity provider
 
 
 class InviteBody(BaseModel):

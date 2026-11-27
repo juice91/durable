@@ -1,5 +1,6 @@
 "use client";
 
+import { useCan } from "@/lib/permissions";
 import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CatalogEntrySheet } from "@/components/mcp/CatalogEntrySheet";
@@ -17,13 +18,14 @@ export default function McpCatalogPage() {
   const router = useRouter();
   const [entry, setEntry] = useState<CatalogEntry | null>(null);
   const [remoteOpen, setRemoteOpen] = useState(false);
+  const mayCreate = useCan("mcp_server", null, "create");
 
   return (
     <>
       <PageHeader
         crumbs={[navCrumb("mcp"), { label: "Catalog" }]}
         documentTitle="MCP catalog"
-        actions={<Button onClick={() => setRemoteOpen(true)}>Remote server by URL</Button>}
+        actions={mayCreate ? <Button onClick={() => setRemoteOpen(true)}>Remote server by URL</Button> : null}
       />
       <div className="mx-auto flex w-full min-w-0 max-w-7xl flex-col gap-4 px-4 py-6">
         <McpSectionTabs current="browse" />

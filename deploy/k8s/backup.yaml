@@ -10,12 +10,15 @@ spec:
   jobTemplate:
     spec:
       ttlSecondsAfterFinished: 604800
+      # Never + backoffLimit: each failed attempt stays as a pod with its log. With OnFailure the Job deleted the pod
+      # at the backoff limit, and the 2026-11-26 failures left nothing to read.
+      backoffLimit: 2
       template:
         metadata:
           labels:
             app.kubernetes.io/name: postgres-backup
         spec:
-          restartPolicy: OnFailure
+          restartPolicy: Never
           securityContext:
             runAsNonRoot: true
             runAsUser: 999
@@ -57,6 +60,7 @@ spec:
                 - {name: backups, mountPath: /backups}
                 - {name: tmp, mountPath: /tmp}
                 - {name: script, mountPath: /scripts, readOnly: true}
+                - {name: deploy-marker, mountPath: /deploy-marker, readOnly: true}
           volumes:
             - name: backups
               hostPath:
@@ -69,3 +73,8 @@ spec:
               configMap:
                 name: postgres-backup-script
                 defaultMode: 0555
+            # Present only while up.sh deploys; backup.sh waits for it to go.
+            - name: deploy-marker
+              configMap:
+                name: deploy-in-progress
+                optional: true

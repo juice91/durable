@@ -431,7 +431,9 @@ def test_worker_import_paths_do_not_load_client_tools_in_schemas_package():
 
 ROOTS = ["eap_schemas", "eap_runtime", "eap_run_store", "eap_api", "eap_worker", "eap_observability", "eap_db",
          "eap_secrets", "eap_processors", "eap_knowledge", "eap_pricing", "eap_mcp_runtime", "eap_kb_sources",
-         "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_openaccess", "eap_iam_openfga", "eap_iam_zitadel"]  # eap_pricing: the AC merge
+         "eap_iam", "eap_iam_apikey", "eap_iam_cfaccess", "eap_iam_devloopback", "eap_iam_localadmin",
+         "eap_iam_openaccess", "eap_iam_openfga",
+         "eap_iam_webhook", "eap_iam_zitadel", "eap_inbound"]  # eap_pricing: the AC merge
 
 
 def _agui_contract() -> dict:

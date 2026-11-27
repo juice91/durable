@@ -52,6 +52,8 @@ export interface Approval {
   /** The decision's audit (single read, decided steps): the comment and the submitted data. */
   comment?: string | null;
   resume_data?: unknown;
+  /** A pending publish that newly uses an ungranted MCP server or secret: the card's line (approving grants them). */
+  grants?: import("./agentGrants").PublishGrants | null;
 }
 
 export interface ApprovalPage {

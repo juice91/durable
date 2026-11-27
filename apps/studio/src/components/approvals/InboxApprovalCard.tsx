@@ -15,6 +15,12 @@ function namesArchitectDefinition(toolName: string | null, args: unknown): boole
   return [record.agent_id, record.workflow_id, record.id].some((value) => typeof value === "string" && SLUG.test(value));
 }
 
+/** The workflow the approval runs under, else its agent (the order the API checks). */
+function subjectOf(approval: Approval) {
+  if (approval.workflow_id) return { kind: "workflow" as const, id: approval.workflow_id };
+  return approval.agent_id ? { kind: "agent" as const, id: approval.agent_id } : null;
+}
+
 export interface InboxApprovalCardProps {
   approval: Approval;
   /**
@@ -65,7 +71,7 @@ export function InboxApprovalCard({ approval, onConflict, onDecided }: InboxAppr
   const showLink = approval.kind === "tool" && namesArchitectDefinition(approval.tool_name, approval.args);
   return (
     <>
-      <ApprovalCard approval={card} onRefresh={handleRefresh} onDecided={handleDecided} />
+      <ApprovalCard approval={card} subject={subjectOf(approval)} onRefresh={handleRefresh} onDecided={handleDecided} />
       {showLink ? (
         <Link data-testid="approval-architect-link" href={routes.architect()} className="mt-2 inline-block text-label underline underline-offset-4">
           Open in Architect
