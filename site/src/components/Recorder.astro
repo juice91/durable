@@ -1,0 +1,144 @@
+---
+// An illustration of recovery, with the platform's own event names (docs/concepts/durable-execution.md).
+// Without script it shows the first case from start to end.
+import { BASE } from "../../scripts/config.mjs";
+
+type Row = { seq?: number; event: string; step?: string; note?: string; kind?: "break" | "replay" | "bad" | "done" };
+
+const cases: { id: string; button: string; rows: Row[]; killAt: number; status: string; tone: string }[] = [
+  {
+    id: "model",
+    button: "During the model call",
+    killAt: 4,
+    status: "completed, recovered once",
+    tone: "done",
+    rows: [
+      { seq: 0, event: "run_started" },
+      { seq: 1, event: "step_started", step: "listing" },
+      { seq: 2, event: "step_completed", step: "listing", note: "result recorded" },
+      { seq: 3, event: "step_started", step: "write", note: "model is answering" },
+      { event: "Worker killed, then restarted", kind: "break" },
+      { event: "listing", note: "read from the record, not run again", kind: "replay" },
+      { event: "write", note: "model asked again", kind: "replay" },
+      { seq: 4, event: "step_completed", step: "write" },
+      { seq: 5, event: "step_started", step: "post" },
+      { seq: 6, event: "step_completed", step: "post", note: "sent once" },
+      { seq: 7, event: "run_completed", kind: "done" },
+    ],
+  },
+  {
+    id: "post",
+    button: "After the POST was sent",
+    killAt: 6,
+    status: "needs_attention",
+    tone: "break",
+    rows: [
+      { seq: 0, event: "run_started" },
+      { seq: 1, event: "step_started", step: "listing" },
+      { seq: 2, event: "step_completed", step: "listing", note: "result recorded" },
+      { seq: 3, event: "step_started", step: "write" },
+      { seq: 4, event: "step_completed", step: "write", note: "result recorded" },
+      { seq: 5, event: "step_started", step: "post", note: "call reserved, request sent" },
+      { event: "Worker killed, then restarted", kind: "break" },
+      { event: "post", note: "reserved, no result: not sent again", kind: "replay" },
+      { seq: 6, event: "step_failed", step: "post", note: "outcome unknown", kind: "bad" },
+      { seq: 7, event: "run_failed", note: "a person checks and decides", kind: "bad" },
+    ],
+  },
+];
+---
+
+<figure class="recorder" data-recorder>
+  <figcaption>
+    <span class="rec-title">What happens if the worker dies?</span>
+    <span class="rec-sub">A workflow that reads a feed, asks an agent to write, and posts the result.</span>
+  </figcaption>
+  <div class="rec-controls" hidden>
+    <span id="rec-when">Kill it</span>
+    <div role="group" aria-labelledby="rec-when">
+      {cases.map((c, i) => <button type="button" data-case={c.id} aria-pressed={i === 0 ? "true" : "false"}>{c.button}</button>)}
+    </div>
+  </div>
+  {cases.map((c, i) => (
+    <div class="rec-case" data-panel={c.id} data-kill={c.killAt} hidden={i !== 0}>
+      <ol class="rec-log">
+        {c.rows.map((r) => (
+          <li class={r.kind ?? ""}>
+            <span class="seq">{r.seq ?? ""}</span>
+            <span class="what"><b>{r.event}</b>{r.step && <i>{r.step}</i>}</span>
+            {r.note && <span class="note">{r.note}</span>}
+          </li>
+        ))}
+      </ol>
+      <p class="rec-status">Run status: <strong class={c.tone} data-final={c.status}>{c.status}</strong></p>
+    </div>
+  ))}
+  <div class="rec-foot">
+    <button type="button" class="rec-action" hidden>Kill the worker</button>
+    <a href={`${BASE}/docs/concepts/durable-execution/`}>How recovery works</a>
+  </div>
+  <p class="visually-hidden" role="status" data-announce></p>
+</figure>
+
+<script>
+  const root = document.querySelector<HTMLElement>("[data-recorder]");
+  if (root) {
+    const controls = root.querySelector<HTMLElement>(".rec-controls")!;
+    const action = root.querySelector<HTMLButtonElement>(".rec-action")!;
+    const announce = root.querySelector<HTMLElement>("[data-announce]")!;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let timers: number[] = [];
+    let current = "model";
+    let killed = false;
+    const panel = () => root.querySelector<HTMLElement>(`[data-panel="${current}"]`)!;
+
+    // Rows keep their space while pending, so the page does not move as the log fills.
+    const show = (upTo: number) => {
+      const rows = panel().querySelectorAll("li");
+      rows.forEach((row, i) => row.classList.toggle("pending", i >= upTo));
+      const status = panel().querySelector<HTMLElement>(".rec-status strong")!;
+      const finished = upTo >= rows.length;
+      status.textContent = finished ? status.dataset.final! : upTo > Number(panel().dataset.kill) ? "recovering" : "running";
+      status.classList.toggle("open", !finished);
+    };
+
+    const stop = () => { timers.forEach(clearTimeout); timers = []; };
+
+    const arm = () => {
+      stop();
+      killed = false;
+      show(Number(panel().dataset.kill));
+      action.textContent = "Kill the worker";
+    };
+
+    const kill = () => {
+      killed = true;
+      const rows = panel().querySelectorAll("li").length;
+      const from = Number(panel().dataset.kill) + 1;
+      const status = panel().querySelector<HTMLElement>(".rec-status strong")!;
+      const done = () => {
+        announce.textContent = `Recovery finished. Run status: ${status.dataset.final}.`;
+      };
+      action.textContent = "Start over";
+      if (still.matches) { show(rows); done(); return; }
+      show(from);
+      for (let n = from + 1; n <= rows; n++) {
+        timers.push(window.setTimeout(() => { show(n); if (n === rows) done(); }, 700 + (n - from) * 480));
+      }
+    };
+
+    action.addEventListener("click", () => (killed ? arm() : kill()));
+    controls.querySelectorAll<HTMLButtonElement>("button").forEach((button) =>
+      button.addEventListener("click", () => {
+        current = button.dataset.case!;
+        controls.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
+        root.querySelectorAll<HTMLElement>("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== current));
+        announce.textContent = "";
+        arm();
+      }),
+    );
+    controls.hidden = false;
+    action.hidden = false;
+    arm();
+  }
+</script>

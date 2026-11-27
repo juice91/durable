@@ -336,7 +336,7 @@ def test_studio_test_shards_cache_the_vite_transform_cache_on_lockfile_and_confi
 # ---- CI round 3: pull requests run the affected tests, main runs everything ----------------------
 
 # Branch protection and the deploy gate key on these names; the selection must not rename them.
-CI_JOB_NAMES = ("changes", "python", "studio", "studio-test", "deploy-checks")
+CI_JOB_NAMES = ("changes", "python", "studio", "studio-test", "deploy-checks", "site")
 
 
 def _steps(job: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -511,3 +511,15 @@ def test_github_flow_files_are_operator_only_in_the_export():
         assert path in rules, path
     agents = (ROOT / "AGENTS.md").read_text()
     link = "[docs/github-flow.md](docs/github-flow.md)"
+
+
+def test_the_site_job_builds_the_website_as_the_pages_workflow_does():
+    jobs = _load("ci.yml")["jobs"]
+    runs = [step.get("run", "") for step in jobs["site"]["steps"]]
+    assert "bash site/build-pages.sh" in runs
+    assert "needs.changes.outputs.site == 'true'" in jobs["site"]["if"]
+    paths = yaml.load(
+        next(step for step in jobs["changes"]["steps"] if step.get("id") == "filter")["with"]["filters"],
+        Loader=yaml.BaseLoader,
+    )["site"]
+    assert {"site/**", "docs/**"} <= set(paths)

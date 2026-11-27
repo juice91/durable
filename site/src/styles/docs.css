@@ -1,0 +1,46 @@
+/* Starlight in the site's colours and type. */
+:root {
+  --sl-font: var(--d-sans);
+  --sl-font-mono: var(--d-mono);
+  --sl-color-accent-low: #dfe8fd;
+  --sl-color-accent: #1d4ed8;
+  --sl-color-accent-high: #12307f;
+  --sl-color-white: #101c31;
+  --sl-color-gray-1: #1c2940;
+  --sl-color-gray-2: #33415a;
+  --sl-color-gray-3: #55627a;
+  --sl-color-gray-4: #8592a8;
+  --sl-color-gray-5: #c3cbd9;
+  --sl-color-gray-6: #e9edf4;
+  --sl-color-gray-7: #f3f5f9;
+  --sl-color-black: #ffffff;
+}
+
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #1c2d52;
+  --sl-color-accent: #4f7cf0;
+  --sl-color-accent-high: #c3d3ff;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e8edf6;
+  --sl-color-gray-2: #c0cade;
+  --sl-color-gray-3: #8b99b3;
+  --sl-color-gray-4: #52617d;
+  --sl-color-gray-5: #2a3a57;
+  --sl-color-gray-6: #142035;
+  --sl-color-black: #0d1523;
+}
+
+.sl-markdown-content :is(h1, h2, h3),
+h1[data-page-title] {
+  font-stretch: 112%;
+  letter-spacing: -0.005em;
+}
+
+.site-title {
+  font-stretch: 118%;
+}
+
+.sl-markdown-content img {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 6px;
+}

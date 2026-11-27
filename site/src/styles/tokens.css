@@ -1,0 +1,31 @@
+/* A flight recorder's palette: cool paper and deep navy, cobalt for what is on the record, and international orange
+   (the colour of the recorder itself) only where something is interrupted. */
+:root {
+  --d-paper: #f5f7fa;
+  --d-surface: #ffffff;
+  --d-ink: #101c31;
+  --d-muted: #4b586e;
+  --d-line: #d5dce7;
+  --d-record: #1d4ed8;
+  --d-record-soft: #e5ecfd;
+  --d-break: #b83d00;
+  --d-break-soft: #fdece2;
+  --d-done: #12724a;
+  --d-button-ink: #ffffff;
+  --d-sans: "Archivo Variable", "Helvetica Neue", Arial, sans-serif;
+  --d-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root[data-theme="dark"] {
+  --d-paper: #0d1523;
+  --d-surface: #142035;
+  --d-ink: #e8edf6;
+  --d-muted: #a4b1c7;
+  --d-line: #2a3a57;
+  --d-record: #8fb0ff;
+  --d-record-soft: #1c2d52;
+  --d-break: #ff8a4c;
+  --d-break-soft: #3a2118;
+  --d-done: #5fd3a0;
+  --d-button-ink: #0d1523;
+}

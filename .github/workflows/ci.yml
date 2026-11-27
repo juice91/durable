@@ -39,6 +39,7 @@ jobs:
       python: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.python }}
       studio: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.studio }}
       deploy: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.deploy }}
+      site: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.site }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -90,6 +91,14 @@ jobs:
               - 'plugins/*/pyproject.toml'
               - 'plugins/iam-openfga/model/**'
               - 'apps/studio/package.json'
+            # The website: its pages come from docs/, its API reference from the API's routes and schemas.
+            site:
+              - 'site/**'
+              - 'docs/**'
+              - 'apps/api/src/**'
+              - 'packages/*/src/**'
+              - 'uv.lock'
+              - '.github/workflows/ci.yml'
 
   python:
     needs: changes
@@ -324,3 +333,38 @@ jobs:
         env:
           PYTEST_ADDOPTS: --ignore=tests/deploy/test_images.py
         run: uv run pytest tests/deploy -q
+
+  site:
+    # Builds the website (landing page and documentation) exactly as the Pages workflow does, tests its scripts and
+    # checks every internal link and anchor.
+    needs: changes
+    if: >-
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      && needs.changes.outputs.site == 'true'
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        # Hosted runners only, as in the python job.
+        if: runner.os != 'macOS'
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-glob: uv.lock
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          # Per-job install dir: two Mac Studio runners share one HOME, and the default ~/setup-pnpm races.
+          dest: ${{ runner.temp }}/setup-pnpm
+          version: 9.15.9
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+      - run: uv sync --all-packages --frozen
+      - run: bash site/build-pages.sh

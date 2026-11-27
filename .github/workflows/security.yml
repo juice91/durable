@@ -80,7 +80,7 @@ jobs:
         run: |
           for fmt in sarif json; do
             rc=0
-            "$RUNNER_TEMP/osv-scanner" scan source -L uv.lock -L pnpm-lock.yaml --all-vulns \
+            "$RUNNER_TEMP/osv-scanner" scan source -L uv.lock -L pnpm-lock.yaml -L site/pnpm-lock.yaml --all-vulns \
               --format "$fmt" --output-file "$RUNNER_TEMP/osv.$fmt" || rc=$?
             if [ "$rc" -gt 1 ]; then echo "osv-scanner failed (exit $rc)"; exit "$rc"; fi
           done

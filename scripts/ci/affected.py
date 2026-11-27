@@ -13,7 +13,8 @@ entries of [tool.uv.sources]), and the output lists the test directories of the 
 with the reason for each.
 
 Rules, first match wins:
-  * docs/, apps/docs/, examples/, spikes/, .planning/, any *.md       -> nothing to test
+  * docs/, apps/docs/, site/, examples/, spikes/, .planning/, any *.md -> nothing to test
+    (the website in site/ and docs/ has its own CI job, `site`)
   * apps/studio/ and the pnpm files                                    -> Studio only, no Python tests
   * tests/deploy/, deploy/, compose.yaml, .dockerignore, other .github/ files        -> the deploy checks only
   * root pyproject.toml, uv.lock, .github/workflows/ci*.yml, scripts/ci/, any conftest.py,
@@ -35,7 +36,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-NOTHING_PREFIXES = ("docs/", "apps/docs/", "examples/", "spikes/", ".planning/")
+NOTHING_PREFIXES = ("docs/", "apps/docs/", "site/", "examples/", "spikes/", ".planning/")
 STUDIO_FILES = {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc"}
 STUDIO_PREFIXES = ("apps/studio/",)
 DEPLOY_PREFIXES = ("tests/deploy/", "deploy/")

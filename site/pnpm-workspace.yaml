@@ -1,0 +1,4 @@
+# The site is its own pnpm project, outside the platform's workspace: its dependencies never enter the Studio image
+# or the root lockfile. This file makes pnpm treat site/ as the root.
+packages:
+  - "."

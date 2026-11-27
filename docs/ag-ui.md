@@ -1,6 +1,6 @@
 # AG-UI integration guide
 
-PydanticOS serves every published agent and workflow over [AG-UI](https://docs.ag-ui.com) 1.0, so
+Durable serves every published agent and workflow over [AG-UI](https://docs.ag-ui.com) 1.0, so
 any AG-UI client can drive it: CopilotKit, `@ag-ui/client`'s `HttpAgent`, or your own. This guide
 is for engineers who build such a frontend. A working CopilotKit app is in
 [`examples/copilotkit-agui/`](../examples/copilotkit-agui/README.md).
@@ -11,7 +11,7 @@ Resume protocol and the Event mapping).
 
 ## How it works
 
-PydanticOS runs agents and workflows durably in a worker (DBOS). The API records each run, hands it
+Durable runs agents and workflows durably in a worker (DBOS). The API records each run, hands it
 to the worker, and streams the run's durable event log. AG-UI is one output format of that stream;
 the native API (`GET /api/v1/runs/{id}/stream` and the REST routes) is the other, and Studio is
 built on it. Two things follow:
@@ -74,14 +74,14 @@ Create one in Studio (Settings → API keys) or with `POST /api/v1/api-keys`. Th
   itself keeps going.
 - A key cannot run drafts or override the model (403).
 - **Keep the key on a server.** The recommended topology is a backend (the CopilotKit runtime, or
-  your own server) that holds the key and talks to PydanticOS; the browser talks only to that
+  your own server) that holds the key and talks to Durable; the browser talks only to that
   backend. For a browser-direct prototype, the API's operator lists your origin in
   `EAP_AGUI_CORS_ORIGINS`, and you can bind the key to it (`allowed_origins`: another origin gets
   403). An origin binding is a browser control only: a server-side caller sends no `Origin`.
 
 ## Ids
 
-| AG-UI | PydanticOS |
+| AG-UI | Durable |
 |---|---|
 | `threadId` (agent) | A conversation. A UUID that names a conversation of this tenant and agent uses it (Studio's ids); any other value derives a stable conversation, created on first use |
 | `threadId` (workflow) | **One workflow run** (see [Workflows](#workflows)) |
@@ -173,7 +173,7 @@ Compare messages as a set, not as a list, if you test against the server's threa
 
 Events are standard AG-UI 1.0. In short:
 
-| PydanticOS | AG-UI |
+| Durable | AG-UI |
 |---|---|
 | Streamed model text | `TEXT_MESSAGE_START/CONTENT/END` |
 | A tool call (built-in, MCP, frontend) | `TOOL_CALL_START/ARGS/END`; a server tool's result is `TOOL_CALL_RESULT` |
@@ -183,7 +183,7 @@ Events are standard AG-UI 1.0. In short:
 | Run failed, or needs an operator | `RUN_ERROR{code, message}`; `code: "needs_attention"` when a side effect's outcome is unknown |
 | Workflow steps | `STEP_STARTED/FINISHED`; progress as read-only `STATE_SNAPSHOT/DELTA` of `{status, steps: {id: {status, type, output?}}}` |
 
-PydanticOS extras are `CUSTOM` events named `pydanticos.*` (`run`, `status` with `running` /
+Durable extras are `CUSTOM` events named `pydanticos.*` (`run`, `status` with `running` /
 `recovering` / `waiting_approval`, `waiting`, `approval_required`, `approval_decided`, `model`,
 `output_retry`, `processor_result`). Nothing a client needs exists only in a `CUSTOM` event; you can
 ignore them. Cost and metrics are never pushed: read them from the native run API by the `run_id`
@@ -332,7 +332,7 @@ for 422, `{"detail": "..."}` otherwise. A new thread on an archived agent is 409
 
 ## What AG-UI does not cover
 
-AG-UI is for external frontends; PydanticOS's own surfaces stay on the native API. Only Studio's
+AG-UI is for external frontends; Durable's own surfaces stay on the native API. Only Studio's
 agent Chat tab uses AG-UI, as a dogfood. These are **not** served over AG-UI: run details and
 traces, the workflow run graph, the Approvals inbox (its REST routes work alongside interrupts),
 eval runs and tests, tool test runs, knowledge-base ingest, memory, metrics and cost, and every
@@ -402,7 +402,7 @@ In the page, with the v2 hooks (`@copilotkit/react-core/v2`):
 
 ### CopilotKit limitation: history after a reload
 
-CopilotKit 1.83 does not load a thread's history from PydanticOS. When the chat mounts on a
+CopilotKit 1.83 does not load a thread's history from Durable. When the chat mounts on a
 thread (a reload, a thread switch), it asks the runtime's **runner** to `connect`, and the default
 `InMemoryAgentRunner` replays only the events this server process saw and still holds in memory.
 A thread it does not hold comes back **empty**: after a restart, on another instance behind a load
@@ -421,7 +421,7 @@ import { EventType, type BaseEvent, type Message } from "@ag-ui/client";
 import { type AgentRunnerConnectRequest, InMemoryAgentRunner, ɵresolveThreadOwner } from "@copilotkit/runtime/v2";
 import { Observable } from "rxjs";
 
-class PydanticOSHistoryRunner extends InMemoryAgentRunner {
+class DurableHistoryRunner extends InMemoryAgentRunner {
   constructor(private readonly threadUrl: (agentId: string, threadId: string) => string | undefined,
               private readonly apiKey: string) {
     super();
@@ -471,14 +471,14 @@ class PydanticOSHistoryRunner extends InMemoryAgentRunner {
 
 const runtime = new CopilotRuntime({
   agents: { pydanticosAgent: new HttpAgent({ url: AGENT_URL, headers: { Authorization: `Bearer ${KEY}` } }) },
-  runner: new PydanticOSHistoryRunner(
+  runner: new DurableHistoryRunner(
     (agentId, threadId) => agentId === "pydanticosAgent" ? `${AGENT_URL}/threads/${encodeURIComponent(threadId)}` : undefined,
     KEY,
   ),
 });
 ```
 
-**Thread owners.** The API key is the tenant's, so PydanticOS serves the thread GET to whoever
+**Thread owners.** The API key is the tenant's, so Durable serves the thread GET to whoever
 holds it: it cannot tell CopilotKit's users apart. CopilotKit scopes its threads by `ownerId`
 (the anonymous owner `""` without `identifyUser`, else the identified user's id), and the
 fallback must keep that scope:

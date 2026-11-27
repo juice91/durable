@@ -1,5 +1,7 @@
 .git
 .github
+# The website is built by CI and the Pages workflow, never inside an image.
+site/
 .dev/
 .venv/
 .env

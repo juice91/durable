@@ -4,7 +4,7 @@ The test workflows live in `.github/workflows/`:
 
 | Workflow | Runs on | What it does |
 | --- | --- | --- |
-| `ci.yml` (**CI**) | pull requests, pushes to main, manual | Hosted runners: `python` (import contracts, DB-free unit tests), `studio` (lint, tsc), `studio-test` (five vitest shards), `deploy-checks` (manifests, workflow lint, deploy tests). A `changes` job decides which of them apply. |
+| `ci.yml` (**CI**) | pull requests, pushes to main, manual | Hosted runners: `python` (import contracts, DB-free unit tests), `studio` (lint, tsc), `studio-test` (five vitest shards), `deploy-checks` (manifests, workflow lint, deploy tests), `site` (the website build and link check). A `changes` job decides which of them apply. |
 | `ci-heavy.yml` (**CI Heavy**) | same-repository pull requests, pushes to main, nightly, manual | The self-hosted Mac Studio: Postgres-backed package suites, run-store suite and API suite. The nightly adds the worker suite and the recovery suite. |
 | `compose.yml` (**Compose quick start**) | pull requests that touch the quick start, pushes to main that touch what its images carry, nightly, manual | Builds the images, runs `docker compose up` from fresh volumes, creates the admin with the setup code, signs in, starts it again and removes it (`scripts/ci/compose_smoke.py`). Afterwards it removes its images and caps the build cache (`scripts/ci/compose_runner.sh`). Not part of the deploy gate. |
 | `deploy.yml` | manual | The deploy gate needs CI and CI Heavy green on the commit (or on an identical tree). |
@@ -44,7 +44,7 @@ First match wins, per changed file:
 
 | Change | Result |
 | --- | --- |
-| `docs/`, `apps/docs/`, `examples/`, `spikes/`, `.planning/`, any `*.md` | No tests. (CI Heavy does not start for these at all.) |
+| `docs/`, `apps/docs/`, `site/`, `examples/`, `spikes/`, `.planning/`, any `*.md` | No tests. (CI Heavy does not start for these at all.) The `site` job builds the website for `docs/` and `site/` changes. |
 | `apps/studio/`, `package.json`, `pnpm-*.yaml`, `.npmrc` | Studio tests only, no Python tests. |
 | `tests/deploy/`, `deploy/`, `compose.yaml`, `.dockerignore`, other `.github/` files | The deploy checks (their own `deploy-checks` job), no member tests. |
 | root `pyproject.toml`, `uv.lock`, `.github/workflows/ci*.yml`, `scripts/ci/`, any `conftest.py`, the rest of `tests/` | **Everything.** |

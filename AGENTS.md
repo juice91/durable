@@ -27,6 +27,7 @@ distributions under `plugins/`.
 | `deploy/`, `infrastructure/docker/` | Deploy manifests and scripts; dev Postgres compose file (`compose.yaml`) |
 | `scripts/` | Dev stack (`dev-*.sh`), `test.sh`, CI helpers (`ci/`), release tooling (`release/`) |
 | `tests/` | Cross-cutting tests: `deploy/` (workflow shapes, selection logic), `ci/`, `recovery/` (crash matrix), `scripts/`, `ag-ui-smoke/` |
+| `site/` | The public website (landing page and documentation built from `docs/`), its own pnpm project: [site/README.md](site/README.md) |
 | `docs/` | Operator and design docs; `docs/platform/system-manifest.yaml` is the machine-checked system manifest |
 | `config/` | `model-prices.json` and its README |
 
@@ -51,6 +52,7 @@ pnpm install --frozen-lockfile         # Studio
 | Studio accessibility | `pnpm -C apps/studio exec vitest run src/test/a11y.pages.test.tsx`; the page list is `PAGES` in that file and must cover every route under `src/app` |
 | System manifest drift | `uv run python scripts/ci/system_manifest.py --check`; after changing a source constant run it with `--write` |
 | Version agreement | `python3 scripts/release/bump.py --check` |
+| Website build and link check | `bash site/build-pages.sh` (CI job `site`) |
 | What a PR would run | `python3 scripts/ci/affected.py --format table` |
 | Everything | `bash scripts/test.sh` (over an hour; Docker needed for part of it; run it in parts, see "Do not") |
 
