@@ -3,6 +3,8 @@
 [![CI](https://github.com/juice91/durable/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/juice91/durable/actions/workflows/ci.yml)
 [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](./LICENSE)
 
+Website and documentation: <https://juice91.github.io/durable/>
+
 Durable is a self-hosted platform for building, running and observing AI agents and workflows.
 Every run is a durable record in Postgres: a crash never loses a run, and an external side effect
 is never performed twice.
